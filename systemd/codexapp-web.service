@@ -1,0 +1,32 @@
+[Unit]
+Description=CodexApp web bridge
+After=network-online.target codexapp-app-server.service
+Wants=network-online.target
+Requires=codexapp-app-server.service
+
+[Service]
+Type=simple
+User=root
+Group=root
+WorkingDirectory=/opt/codexapp-linux-web
+Environment=HOME=/var/lib/codexapp-linux-web
+Environment=USER=root
+Environment=NODE_ENV=production
+Environment=CODEX_HOME=/var/lib/codexapp-linux-web/.codex
+Environment=CODEXAPP_CODEX_CLI=/usr/bin/codex
+Environment=CODEXAPP_APP_VERSION=0.141.0
+Environment=CODEXAPP_CODEX_PACKAGE_JSON=/usr/lib/node_modules/@openai/codex/package.json
+Environment=CODEXAPP_STATE_DIR=/var/lib/codexapp-linux-web/state
+Environment=CODEXAPP_WEBVIEW_DIR=/opt/codex-desktop/content/webview
+Environment=CODEXAPP_EXTERNAL_APP_SERVER=1
+EnvironmentFile=-/etc/codexapp-linux-web/codexapp.env
+ExecStart=/usr/bin/node /opt/codexapp-linux-web/web-server.js
+Restart=always
+RestartSec=3
+KillMode=process
+StandardOutput=append:/var/log/codexapp-linux-web/web/service.log
+StandardError=append:/var/log/codexapp-linux-web/web/service.log
+LimitNOFILE=65535
+
+[Install]
+WantedBy=multi-user.target

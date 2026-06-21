@@ -1,0 +1,28 @@
+[Unit]
+Description=CodexApp app-server (persistent)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=root
+Group=root
+WorkingDirectory=/opt/codexapp-linux-web
+Environment=HOME=/var/lib/codexapp-linux-web
+Environment=USER=root
+Environment=NODE_ENV=production
+Environment=CODEX_HOME=/var/lib/codexapp-linux-web/.codex
+Environment=CODEXAPP_CODEX_CLI=/usr/bin/codex
+Environment=CODEXAPP_APP_VERSION=0.141.0
+EnvironmentFile=-/etc/codexapp-linux-web/codexapp.env
+ExecStart=/usr/bin/codex app-server --remote-control --listen ws://127.0.0.1:12911 --analytics-default-enabled
+Restart=always
+RestartSec=3
+KillMode=process
+TimeoutStopSec=30s
+StandardOutput=append:/var/log/codexapp-linux-web/app-server/service.log
+StandardError=append:/var/log/codexapp-linux-web/app-server/service.log
+LimitNOFILE=65535
+
+[Install]
+WantedBy=multi-user.target
