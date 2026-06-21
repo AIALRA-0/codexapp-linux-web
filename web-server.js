@@ -1751,6 +1751,27 @@ function largeThreadTurnsFastPathResponse(params = {}) {
   };
 }
 
+function largeThreadInitialTurnsPageFromPage(page = null) {
+  if (!page || !Array.isArray(page.turns)) return null;
+  return {
+    data: page.turns.slice().reverse(),
+    nextCursor: page.nextCursor,
+    backwardsCursor: page.nextCursor,
+  };
+}
+
+function largeThreadTurnsPaginationFromPage(page = null) {
+  const turns = Array.isArray(page?.turns) ? page.turns : [];
+  const olderCursor = page?.nextCursor ?? null;
+  const oldestTurn = turns.find((turn) => typeof turn?.id === "string" && turn.id.length > 0);
+  return {
+    olderCursor,
+    oldestLoadedTurnId: oldestTurn?.id ?? null,
+    isLoadingOlder: false,
+    hasLoadedOldest: olderCursor == null,
+  };
+}
+
 function largeThreadReadFastPathResponse(params = {}, turnsPage = null) {
   if (!params || typeof params.threadId !== "string" || params.threadId.length === 0) return null;
   const info = largeThreadFastPathInfo(params.threadId);
@@ -1760,6 +1781,7 @@ function largeThreadReadFastPathResponse(params = {}, turnsPage = null) {
   const createdAt = epochSecondsFromRow(record, "created_at");
   const updatedAt = epochSecondsFromRow(record, "updated_at");
   const page = turnsPage || largeThreadTurnsFastPathPage({ ...params, cursor: null });
+  const turns = Array.isArray(page?.turns) ? page.turns : [];
   return {
     thread: {
       id: params.threadId,
@@ -1785,8 +1807,10 @@ function largeThreadReadFastPathResponse(params = {}, turnsPage = null) {
         originUrl: record.git_origin_url || null,
       },
       name: truncateUiText(record.title || "", 240),
-      turns: Array.isArray(page?.turns) ? page.turns : [],
+      turns,
+      turnsPagination: largeThreadTurnsPaginationFromPage(page),
     },
+    initialTurnsPage: largeThreadInitialTurnsPageFromPage(page),
   };
 }
 
@@ -1883,11 +1907,7 @@ function largeThreadResumeFastPathResponse(params = {}) {
       status: { type: "idle" },
     },
     ...largeThreadRuntimeSettings(record),
-    initialTurnsPage: turnsPage ? {
-      data: turnsPage.turns.slice().reverse(),
-      nextCursor: turnsPage.nextCursor,
-      backwardsCursor: turnsPage.nextCursor,
-    } : null,
+    initialTurnsPage: largeThreadInitialTurnsPageFromPage(turnsPage),
   };
 }
 
@@ -3707,9 +3727,42 @@ function browserBridgeScript() {
   const threadHistoryLoadState = new Map();
 
   function conversationIdFromThreadContainer(container) {
+    const ownThreadId = container?.getAttribute?.("data-codexapp-conversation-id") || "";
+    if (ownThreadId.length > 0) return ownThreadId;
     const node = container?.querySelector?.("[data-codexapp-conversation-id]");
     const threadId = node?.getAttribute?.("data-codexapp-conversation-id") || "";
     return threadId.length > 0 ? threadId : null;
+  }
+
+  function elementLooksLikeThreadHistoryScroller(element) {
+    if (!(element instanceof HTMLElement)) return false;
+    if (element.scrollHeight <= element.clientHeight + 24) return false;
+    const style = getComputedStyle(element);
+    const overflow = String(style.overflowY || "") + " " + String(style.overflow || "");
+    const className = typeof element.className === "string" ? element.className : "";
+    return /(auto|scroll|overlay)/.test(overflow)
+      || /\b(thread-scroll-container|overflow-y-auto|overflow-auto)\b/.test(className);
+  }
+
+  function nearestThreadHistoryScroller(root) {
+    let node = root instanceof HTMLElement ? root : root?.parentElement;
+    while (node && node instanceof HTMLElement && node !== document.body) {
+      if (elementLooksLikeThreadHistoryScroller(node) && conversationIdFromThreadContainer(node)) return node;
+      node = node.parentElement;
+    }
+    return null;
+  }
+
+  function threadHistoryScrollerCandidates() {
+    const containers = new Set();
+    for (const container of document.querySelectorAll(".thread-scroll-container")) {
+      if (container instanceof HTMLElement) containers.add(container);
+    }
+    for (const root of document.querySelectorAll("[data-codexapp-conversation-id], [data-thread-find-target='conversation']")) {
+      const container = nearestThreadHistoryScroller(root);
+      if (container) containers.add(container);
+    }
+    return containers;
   }
 
   function threadHistoryDistanceFromBottom(container) {
@@ -3743,11 +3796,30 @@ function browserBridgeScript() {
     if (typeof loader !== "function") return;
     const now = Date.now();
     const state = threadHistoryLoadState.get(threadId) || { loading: false, lastStartedAt: 0 };
-    if (state.loading || now - state.lastStartedAt < 700) return;
+    if (state.loading && now - state.lastStartedAt < 10000) return;
+    if (state.loading) {
+      state.loading = false;
+      rawConsoleWarn("[codexapp] older history load lock recovered", reason, threadId);
+    }
+    if (now - state.lastStartedAt < 700) return;
     state.loading = true;
     state.lastStartedAt = now;
     threadHistoryLoadState.set(threadId, state);
+    const startedAt = state.lastStartedAt;
+    const previousScrollHeight = container.scrollHeight;
+    const previousScrollTop = container.scrollTop;
+    const isReverse = /reverse/.test(getComputedStyle(container).flexDirection || "");
+    setTimeout(() => {
+      if (state.loading && state.lastStartedAt === startedAt) state.loading = false;
+    }, 12000);
     Promise.resolve(loader(threadId))
+      .then(() => {
+        if (isReverse) return;
+        requestAnimationFrame(() => {
+          const delta = container.scrollHeight - previousScrollHeight;
+          if (delta > 0) container.scrollTop = previousScrollTop + delta;
+        });
+      })
       .catch((error) => rawConsoleWarn("[codexapp] older history load failed", reason, error))
       .finally(() => {
         state.loading = false;
@@ -3768,8 +3840,9 @@ function browserBridgeScript() {
   }
 
   function installThreadHistoryLoaders() {
-    for (const container of document.querySelectorAll(".thread-scroll-container")) {
+    for (const container of threadHistoryScrollerCandidates()) {
       installThreadHistoryLoader(container);
+      maybeLoadOlderThreadHistory(container, "tick");
     }
   }
 
