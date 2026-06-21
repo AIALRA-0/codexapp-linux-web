@@ -85,7 +85,9 @@ const terminalSnapshotMaxBytes = numberFromEnv("CODEXAPP_TERMINAL_SNAPSHOT_MAX_B
 const codexStateDbPath = process.env.CODEXAPP_CODEX_STATE_DB || path.join(codexHome, "state_5.sqlite");
 const fastThreadListEnabled = parseBoolean(process.env.CODEXAPP_FAST_THREAD_LIST, true);
 const threadTurnsCacheEnabled = parseBoolean(process.env.CODEXAPP_THREAD_TURNS_CACHE, true);
-const threadListFirstPageMinLimit = numberFromEnv("CODEXAPP_THREAD_LIST_FIRST_PAGE_MIN_LIMIT", 50, 50, 5000);
+const threadListFirstPageMinLimit = numberFromEnv("CODEXAPP_THREAD_LIST_FIRST_PAGE_MIN_LIMIT", 20, 5, 5000);
+const threadListFirstPageMaxLimit = numberFromEnv("CODEXAPP_THREAD_LIST_FIRST_PAGE_MAX_LIMIT", 25, 5, 5000);
+const threadListLoadedPriorityLimit = numberFromEnv("CODEXAPP_THREAD_LIST_LOADED_PRIORITY_LIMIT", 20, 0, 200);
 const threadTurnsCacheMaxEntries = numberFromEnv("CODEXAPP_THREAD_TURNS_CACHE_MAX_ENTRIES", 200, 10, 2000);
 const generatedImageRolloutCacheMaxEntries = numberFromEnv("CODEXAPP_GENERATED_IMAGE_ROLLOUT_CACHE_MAX_ENTRIES", 100, 10, 1000);
 const generatedImageInlineMaxBytes = numberFromEnv("CODEXAPP_GENERATED_IMAGE_INLINE_MAX_BYTES", 25 * 1024 * 1024, 1024, 100 * 1024 * 1024);
@@ -103,6 +105,7 @@ const largeThreadFastPathMaxTurns = numberFromEnv("CODEXAPP_LARGE_THREAD_FAST_PA
 const largeThreadFastPathInitialMaxTurns = numberFromEnv("CODEXAPP_LARGE_THREAD_FAST_PATH_INITIAL_MAX_TURNS", 1, 1, 5000);
 const largeThreadFastPathMaxItemTextBytes = numberFromEnv("CODEXAPP_LARGE_THREAD_FAST_PATH_MAX_ITEM_TEXT_BYTES", 4096, 1024, 1024 * 1024);
 const largeThreadFastPathMaxItemsPerTurn = numberFromEnv("CODEXAPP_LARGE_THREAD_FAST_PATH_MAX_ITEMS_PER_TURN", 8, 2, 100);
+const largeThreadStaleInProgressMs = numberFromEnv("CODEXAPP_LARGE_THREAD_STALE_IN_PROGRESS_MS", 2 * 60 * 60 * 1000, 5 * 60 * 1000, 7 * 24 * 60 * 60 * 1000);
 const largeThreadFastPathCursorPrefix = "codexapp-large-rollout:";
 const largeThreadAppResumeTimeoutMs = numberFromEnv("CODEXAPP_LARGE_THREAD_APP_RESUME_TIMEOUT_MS", 120000, 10000, 600000);
 const largeThreadPrewarmOnResumeEnabled = parseBoolean(process.env.CODEXAPP_LARGE_THREAD_PREWARM_ON_RESUME, false);
@@ -1161,6 +1164,37 @@ function threadListSources(params = {}) {
   return requested.length > 0 ? uniqueStrings(requested) : null;
 }
 
+function threadListRowToThread(row, loadedThreadIds = new Set()) {
+  const gitInfo = row.git_sha || row.git_branch || row.git_origin_url
+    ? {
+        sha: row.git_sha || null,
+        branch: row.git_branch || null,
+        originUrl: row.git_origin_url || null,
+      }
+    : null;
+  return {
+    id: row.id,
+    sessionId: row.id,
+    forkedFromId: null,
+    preview: truncateUiText(row.preview || row.first_user_message || "", 500),
+    ephemeral: false,
+    modelProvider: row.model_provider || null,
+    createdAt: epochSecondsFromRow(row, "created_at") || (Number(row.created_ms) / 1000) || 0,
+    updatedAt: epochSecondsFromRow(row, "updated_at") || (Number(row.updated_ms) / 1000) || 0,
+    status: { type: loadedThreadIds.has(row.id) ? "idle" : "notLoaded" },
+    path: row.rollout_path,
+    cwd: row.cwd,
+    cliVersion: row.cli_version || null,
+    source: row.source,
+    threadSource: row.thread_source || null,
+    agentNickname: row.agent_nickname || null,
+    agentRole: row.agent_role || null,
+    gitInfo,
+    name: truncateUiText(row.title || null, 160),
+    turns: [],
+  };
+}
+
 function fastThreadListFromDb(params = {}, loadedThreadIds = new Set()) {
   if (!fastThreadListEnabled || !fs.existsSync(codexStateDbPath)) return null;
   if (params.archived === true) return null;
@@ -1170,10 +1204,13 @@ function fastThreadListFromDb(params = {}, loadedThreadIds = new Set()) {
   const createdMillisExpr = "COALESCE(created_at_ms, created_at * 1000)";
   const updatedMillisExpr = "COALESCE(updated_at_ms, updated_at * 1000)";
   const millisExpr = sortKey === "created_at" ? createdMillisExpr : updatedMillisExpr;
-  const requestedLimit = Math.max(1, Math.min(Number.parseInt(String(params.limit || 50), 10) || 50, 1000));
+  const defaultLimit = Math.max(1, Math.min(threadListFirstPageMinLimit, 1000));
+  const requestedLimit = Math.max(1, Math.min(Number.parseInt(String(params.limit || defaultLimit), 10) || defaultLimit, 1000));
+  const firstPageLowerLimit = Math.min(threadListFirstPageMinLimit, threadListFirstPageMaxLimit);
+  const firstPageUpperLimit = Math.max(threadListFirstPageMinLimit, threadListFirstPageMaxLimit);
   const limit = params.cursor
     ? requestedLimit
-    : Math.max(requestedLimit, threadListFirstPageMinLimit);
+    : Math.max(firstPageLowerLimit, Math.min(requestedLimit, firstPageUpperLimit));
   const archived = 0;
   const where = [
     `archived = ${archived}`,
@@ -1224,41 +1261,58 @@ function fastThreadListFromDb(params = {}, loadedThreadIds = new Set()) {
   if (!Array.isArray(rows)) return null;
 
   const pageRows = rows.slice(0, limit);
-  const data = pageRows.map((row) => {
-    const gitInfo = row.git_sha || row.git_branch || row.git_origin_url
-      ? {
-          sha: row.git_sha || null,
-          branch: row.git_branch || null,
-          originUrl: row.git_origin_url || null,
-        }
-      : null;
-    return {
-      id: row.id,
-      sessionId: row.id,
-      forkedFromId: null,
-      preview: truncateUiText(row.preview || row.first_user_message || "", 500),
-      ephemeral: false,
-      modelProvider: row.model_provider || null,
-      createdAt: epochSecondsFromRow(row, "created_at") || (Number(row.created_ms) / 1000) || 0,
-      updatedAt: epochSecondsFromRow(row, "updated_at") || (Number(row.updated_ms) / 1000) || 0,
-      status: { type: loadedThreadIds.has(row.id) ? "idle" : "notLoaded" },
-      path: row.rollout_path,
-      cwd: row.cwd,
-      cliVersion: row.cli_version || null,
-      source: row.source,
-      threadSource: row.thread_source || null,
-      agentNickname: row.agent_nickname || null,
-      agentRole: row.agent_role || null,
-      gitInfo,
-      name: truncateUiText(row.title || null, 160),
-      turns: [],
-    };
-  });
+  let loadedPriorityRows = [];
+  if (!params.cursor && threadListLoadedPriorityLimit > 0 && loadedThreadIds instanceof Set && loadedThreadIds.size > 0) {
+    const loadedIds = Array.from(loadedThreadIds)
+      .filter((id) => typeof id === "string" && id.length > 0)
+      .slice(0, threadListLoadedPriorityLimit * 4)
+      .map(sqlString);
+    if (loadedIds.length > 0) {
+      loadedPriorityRows = sqliteRows(codexStateDbPath, `
+        SELECT
+          id,
+          rollout_path,
+          created_at,
+          created_at_ms,
+          updated_at,
+          updated_at_ms,
+          source,
+          model_provider,
+          cwd,
+          title,
+          cli_version,
+          first_user_message,
+          agent_nickname,
+          agent_role,
+          git_sha,
+          git_branch,
+          git_origin_url,
+          thread_source,
+          preview,
+          ${createdMillisExpr} AS created_ms,
+          ${updatedMillisExpr} AS updated_ms,
+          ${millisExpr} AS sort_ms
+        FROM threads
+        WHERE ${where.join(" AND ")} AND id IN (${loadedIds.join(", ")})
+        ORDER BY ${millisExpr} DESC, id DESC
+        LIMIT ${threadListLoadedPriorityLimit}
+      `);
+    }
+  }
+  const mergedRows = [];
+  const seenThreadIds = new Set();
+  for (const row of [...loadedPriorityRows, ...pageRows]) {
+    if (!row?.id || seenThreadIds.has(row.id)) continue;
+    seenThreadIds.add(row.id);
+    mergedRows.push(row);
+  }
+  const data = mergedRows.map((row) => threadListRowToThread(row, loadedThreadIds));
+  const cursorBasis = pageRows.length > 0 ? pageRows : mergedRows;
 
   return {
     data,
     nextCursor: rows.length > limit ? isoFromEpochMilliseconds(pageRows[pageRows.length - 1]?.sort_ms) : null,
-    backwardsCursor: isoFromEpochMilliseconds(pageRows[0]?.sort_ms),
+    backwardsCursor: isoFromEpochMilliseconds(cursorBasis[0]?.sort_ms),
   };
 }
 
@@ -1515,6 +1569,32 @@ function largeThreadSetTurnOffset(turn, offset) {
   });
 }
 
+function largeThreadSetTurnLastEventAt(turn, timestampSeconds) {
+  const numeric = Number(timestampSeconds);
+  if (!turn || !Number.isFinite(numeric) || numeric <= 0) return;
+  const current = Number(turn._rolloutLastEventAt);
+  if (Number.isFinite(current) && current >= numeric) return;
+  Object.defineProperty(turn, "_rolloutLastEventAt", {
+    value: numeric,
+    enumerable: false,
+    configurable: true,
+    writable: true,
+  });
+}
+
+function markLargeThreadStaleInProgress(turn) {
+  if (!turn || turn.status !== "inProgress" || largeThreadStaleInProgressMs <= 0) return;
+  const lastEventAt = Number(turn._rolloutLastEventAt || turn.completedAt || turn.startedAt);
+  if (!Number.isFinite(lastEventAt) || lastEventAt <= 0) return;
+  const staleMs = Date.now() - (lastEventAt * 1000);
+  if (staleMs < largeThreadStaleInProgressMs) return;
+  turn.status = "interrupted";
+  turn.completedAt = lastEventAt;
+  if (turn.startedAt && !turn.durationMs) {
+    turn.durationMs = Math.max(0, Math.round((lastEventAt - turn.startedAt) * 1000));
+  }
+}
+
 function largeThreadTurnStartOffset(turn) {
   const offset = Number(turn?._rolloutStartOffset);
   return Number.isFinite(offset) && offset >= 0 ? offset : null;
@@ -1527,6 +1607,7 @@ function parseLargeRolloutTurns(lines, chunkStart) {
 
   const finishCurrent = () => {
     if (!current) return;
+    markLargeThreadStaleInProgress(current);
     compactLargeThreadTurnItems(current);
     if (current.items.length > 0) turns.push(current);
     current = null;
@@ -1552,6 +1633,7 @@ function parseLargeRolloutTurns(lines, chunkStart) {
     largeThreadSetTurnOffset(current, startOffset);
     if (turnId && String(current.id).startsWith("large-")) current.id = turnId;
     if (timestampSeconds && !current.startedAt) current.startedAt = timestampSeconds;
+    largeThreadSetTurnLastEventAt(current, timestampSeconds);
     return current;
   };
 
@@ -1565,10 +1647,11 @@ function parseLargeRolloutTurns(lines, chunkStart) {
     } catch {
       continue;
     }
+    const timestamp = epochSecondsFromRolloutTimestamp(event.timestamp);
+    if (current && timestamp) largeThreadSetTurnLastEventAt(current, timestamp);
     if (event?.type === "response_item") continue;
     const payload = event?.payload && typeof event.payload === "object" ? event.payload : {};
     const type = payload.type || event.type;
-    const timestamp = epochSecondsFromRolloutTimestamp(event.timestamp);
     if (type === "task_started") {
       finishCurrent();
       current = ensureTurn(payload.turn_id, Number(payload.started_at) || timestamp, lineOffset);
@@ -2814,6 +2897,17 @@ function injectBridge(indexHtml, initialRoute = null) {
 function patchJavaScript(filePath, source) {
   const base = path.basename(filePath);
   const cacheBustOnly = () => cacheBustJavaScriptDynamicImports(source);
+  if (base.startsWith("preload-helper-")) {
+    return replaceJavaScriptOnce(
+      source,
+      "if(i&&i.length>0){let r=document.getElementsByTagName(`link`)",
+      "if(i&&i.length>0){i=i.filter(e=>String(e).endsWith(`.css`));let r=document.getElementsByTagName(`link`)",
+      "preload-helper: keep css preload but skip js modulepreload fanout",
+    );
+  }
+  if (base.startsWith("app-prefetch-impl-")) {
+    return "function AppPrefetchImpl(){return null}export{AppPrefetchImpl};\n";
+  }
   if (base.startsWith("index-")) {
     return cacheBustOnly();
   }
