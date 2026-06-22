@@ -2353,6 +2353,15 @@ function threadTurnsResultHasInProgress(result) {
   return Array.isArray(result?.data) && result.data.some((turn) => turn?.status === "inProgress");
 }
 
+function latestTerminalTurnForNotification(result) {
+  if (!Array.isArray(result?.data)) return null;
+  return result.data.find((turn) => {
+    if (!turn || typeof turn !== "object") return false;
+    if (turn.status === "inProgress") return false;
+    return typeof turn.id === "string" || typeof turn.turnId === "string";
+  }) || null;
+}
+
 function threadTurnsResultHasGeneratedImagePayload(result) {
   if (!Array.isArray(result?.data)) return false;
   return result.data.some((turn) => Array.isArray(turn?.items) && turn.items.some((item) => {
@@ -3295,6 +3304,24 @@ function patchJavaScript(filePath, source) {
       "async loadRemainingConversationTurns(e){return ip(this,e)}",
       "async loadRemainingConversationTurns(e){codexappRegisterHistoryManager(this);return ip(this,e)}",
       "app-server-manager-signals: expose history loader from method",
+    );
+    patched = replaceJavaScriptOnce(
+      patched,
+      "async interruptConversation(e){return await cf(this.getArchiveConversationContext(),e),this.interruptConversationSelf(e)}",
+      "async interruptConversation(e){let t=this.getConversation?.(e);if(codexappLargeCursorOffset(t?.turnsPagination?.olderCursor)!=null||t?.codexappWindow!=null||codexappHasWindowCache(e))return this.interruptConversationSelf(e);return await cf(this.getArchiveConversationContext(),e),this.interruptConversationSelf(e)}",
+      "app-server-manager-signals: skip full descendant scan when interrupting windowed large threads",
+    );
+    patched = replaceJavaScriptOnce(
+      patched,
+      "let o=(0,q.default)(n?.turns??[],e=>e.turnId!=null),s=o?.turnId??null;if(!s||o?.status!==`inProgress`)",
+      "let o=(0,q.default)(n?.turns??[],e=>e.status===`inProgress`)??(0,q.default)(n?.turns??[],e=>e.turnId!=null),s=o?.turnId??null;if(o?.status!==`inProgress`)",
+      "app-server-manager-signals: allow interrupt request while active turn id is still hydrating",
+    );
+    patched = replaceJavaScriptOnce(
+      patched,
+      "let s=r.text.trim();s.length!==0&&(i=s)}),a!=null&&o!=null",
+      "let s=r.text.trim();s.length!==0&&(i=s)},!0,{rebindLatestInProgressPlaceholder:!0}),a!=null&&o!=null",
+      "app-server-manager-signals: allow turn/completed to close hydrated optimistic turns",
     );
     patched = replaceJavaScriptOnce(
       patched,
@@ -7724,9 +7751,28 @@ class BridgeSession {
 
   sendDeferredTurnAck(request, params = {}) {
     if (!request || request.id === undefined || request.id === null) return;
+    const threadId = threadIdFromParams(params || {});
+    const expectedTurnId = typeof params?.expectedTurnId === "string" && params.expectedTurnId.length > 0
+      ? params.expectedTurnId
+      : null;
+    const turnId = request.method === "turn/steer" ? expectedTurnId : null;
+    const turn = {
+      id: turnId,
+      turnId,
+      status: "inProgress",
+      error: null,
+      items: [],
+    };
     const responseMessage = {
       id: request.id,
-      result: {},
+      result: {
+        id: turnId,
+        turnId,
+        threadId,
+        conversationId: threadId,
+        status: "inProgress",
+        turn,
+      },
     };
     this.ackedDeferredTurnRequestIds.add(String(request.id));
     this.sendToBrowser({
@@ -7736,7 +7782,7 @@ class BridgeSession {
     });
     this.finishPendingTurnInputSubmission(request.id, responseMessage);
     this.recordTurnInputSubmission(request.method, params || {});
-    this.observeActiveTurnFromRequest(request.method, params || {}, null);
+    this.observeActiveTurnFromRequest(request.method, params || {}, responseMessage.result);
   }
 
   deferLargeThreadTurnRequest(request, params = {}, resumeState = {}) {
@@ -8477,6 +8523,11 @@ class BridgeSession {
           status: hasInProgress ? "inProgress" : "idle",
           final: !hasInProgress && completionIsAuthoritative,
         });
+        if (!hasInProgress && completionIsAuthoritative) {
+          this.sendTurnCompletedNotification(threadId, latestTerminalTurnForNotification(normalized), {
+            reason: "active-turn-watchdog-terminal",
+          });
+        }
       }
 
       if (hasInProgress) {
@@ -8523,6 +8574,37 @@ class BridgeSession {
     }
   }
 
+  sendTurnCompletedNotification(threadId, turn = null, details = {}) {
+    if (typeof threadId !== "string" || threadId.length === 0) return;
+    const status = details.status || turn?.status || "completed";
+    const turnId = typeof turn?.id === "string" && turn.id.length > 0
+      ? turn.id
+      : (typeof turn?.turnId === "string" && turn.turnId.length > 0 ? turn.turnId : null);
+    this.sendToBrowser({
+      type: "mcp-notification",
+      hostId: "local",
+      method: "turn/completed",
+      params: {
+        threadId,
+        turn: {
+          id: turnId,
+          status,
+          error: turn?.error || null,
+          durationMs: Number.isFinite(Number(turn?.durationMs)) ? Number(turn.durationMs) : null,
+        },
+      },
+    });
+    this.sendToBrowser({
+      type: "mcp-notification",
+      hostId: "local",
+      method: "thread/status/changed",
+      params: {
+        threadId,
+        status: { type: "idle" },
+      },
+    });
+  }
+
   schedulePromptHistorySteerRecoveries(previousValue, nextValue) {
     if (!promptHistorySteerRecoveryEnabled) return;
     const entries = appendedPromptHistoryEntries(previousValue, nextValue);
@@ -8536,6 +8618,7 @@ class BridgeSession {
 
   schedulePromptHistorySteerRecovery(threadId, text, options = {}) {
     if (!this.isPromptHistoryRecoveryEligibleThread(threadId)) return;
+    if (largeThreadFastPathInfo(threadId)) return;
     const signature = turnInputSignature(threadId, text);
     if (!signature || this.hasRecentTurnInputSubmission(signature)) return;
     if (this.promptHistoryRecoveryTimers.has(signature)) return;
@@ -8607,6 +8690,16 @@ class BridgeSession {
     return { ...params, expectedTurnId };
   }
 
+  async withLatestInterruptTurnId(method, params) {
+    if (method !== "turn/interrupt" || !params || typeof params !== "object" || Array.isArray(params)) return params;
+    const threadId = typeof params.threadId === "string" ? params.threadId : null;
+    if (!threadId || (typeof params.turnId === "string" && params.turnId.length > 0)) return params;
+    const turnId = await this.latestActiveTurnIdWithRetry(threadId, 3000);
+    if (!turnId) return params;
+    log("normalized turn/interrupt turnId", { threadId });
+    return { ...params, turnId };
+  }
+
   async recoverPromptHistorySteer(threadId, text, signature) {
     if (this.closed || this.hasRecentTurnInputSubmission(signature)) return "already-submitted";
     const expectedTurnId = await this.latestActiveTurnId(threadId);
@@ -8639,10 +8732,9 @@ class BridgeSession {
   async forwardClientRequest(message) {
     const request = message.request;
     if (!request || request.id === undefined || !request.method) return;
-    const params = await this.withLatestExpectedTurnId(
-      request.method,
-      forceLocalManagedWorkspacePermissions(request.method, request.params),
-    );
+    let params = forceLocalManagedWorkspacePermissions(request.method, request.params);
+    params = await this.withLatestExpectedTurnId(request.method, params);
+    params = await this.withLatestInterruptTurnId(request.method, params);
     const effectiveRequest = params === request.params ? request : { ...request, params };
     this.rememberPromptHistoryEligibleThreadFromRequest(effectiveRequest.method, params || {});
     persistSelectedPermissionModeForParams(request.method, params || {});
@@ -8752,14 +8844,38 @@ class BridgeSession {
       return;
     }
     await this.preflightAccountSwitchForRequest(effectiveRequest);
+    if (request.method === "turn/interrupt"
+      && typeof params?.threadId === "string"
+      && largeThreadFastPathInfo(params.threadId)
+      && !(typeof params.turnId === "string" && params.turnId.length > 0)) {
+      const responseMessage = {
+        id: request.id,
+        result: { interruptedTurnId: null },
+      };
+      this.sendToBrowser({
+        type: "mcp-response",
+        hostId: "local",
+        message: responseMessage,
+      });
+      this.sendTurnCompletedNotification(params.threadId, null, {
+        status: "interrupted",
+        reason: "large-thread-interrupt-without-turn-id",
+      });
+      this.broadcastThreadActivity(params.threadId, {
+        reason: "large-thread-interrupt-without-turn-id",
+        status: "idle",
+        final: true,
+      });
+      return;
+    }
     if ((request.method === "turn/start" || request.method === "turn/steer")
       && typeof params?.threadId === "string"
       && largeThreadFastPathInfo(params.threadId)) {
-      const resumeState = await this.waitForLargeThreadSubmitResume(params.threadId, params || {});
-      if (!resumeState.ready) {
-        this.deferLargeThreadTurnRequest({ ...request, params }, params || {}, resumeState);
-        return;
-      }
+      const promise = this.ensureLargeThreadLoadedInAppServer(params.threadId, params || {}, {
+        timeoutMs: largeThreadAppResumeTimeoutMs,
+      }) || Promise.resolve();
+      this.deferLargeThreadTurnRequest({ ...request, params }, params || {}, { ready: false, promise });
+      return;
     }
     await this.sendMcpRequestToAppServer(request, params || {});
   }
@@ -9465,10 +9581,9 @@ class BridgeSession {
           return;
         }
         debugLog("fetch to app-server", method, message.requestId);
-        params = await this.withLatestExpectedTurnId(
-          method,
-          forceLocalManagedWorkspacePermissions(method, params),
-        );
+        params = forceLocalManagedWorkspacePermissions(method, params);
+        params = await this.withLatestExpectedTurnId(method, params);
+        params = await this.withLatestInterruptTurnId(method, params);
         this.rememberPromptHistoryEligibleThreadFromRequest(method, params || {});
         persistSelectedPermissionModeForParams(method, params || {});
         let result = null;
