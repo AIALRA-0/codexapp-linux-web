@@ -20,6 +20,7 @@ const codexHome = process.env.CODEX_HOME || process.env.CODEXAPP_CODEX_HOME || p
 const stateDir = path.resolve(process.env.CODEXAPP_STATE_DIR || path.join(process.cwd(), "state"));
 const browserUploadsRoot = path.join(stateDir, "browser-uploads");
 const browserWorkspaceRoot = path.join(stateDir, "browser-workspaces");
+const canonicalAttachmentsRoot = path.join(browserUploadsRoot, "canonical");
 const persistedAtomStatePath = path.join(stateDir, "persisted-atoms.json");
 const hostStatePath = path.join(stateDir, "host-state.json");
 const remoteControlDesiredPath = path.join(stateDir, "remote-control-desired.json");
@@ -108,6 +109,12 @@ const completeThreadTurnsEnabled = parseBoolean(process.env.CODEXAPP_COMPLETE_TH
 const completeThreadTurnsPageLimit = numberFromEnv("CODEXAPP_THREAD_TURNS_COMPLETE_PAGE_LIMIT", 100, 10, 100);
 const completeThreadTurnsMaxTurns = numberFromEnv("CODEXAPP_THREAD_TURNS_COMPLETE_MAX_TURNS", 2000, 100, 10000);
 const completeThreadTurnsMaxPages = numberFromEnv("CODEXAPP_THREAD_TURNS_COMPLETE_MAX_PAGES", 100, 1, 500);
+const singleSurfaceEnabled = parseBoolean(process.env.CODEXAPP_SINGLE_SURFACE, true);
+const canonicalWindowDefaultLimit = numberFromEnv("CODEXAPP_CANONICAL_WINDOW_LIMIT", 8, 1, 100);
+const canonicalWindowCacheLimit = numberFromEnv("CODEXAPP_CANONICAL_WINDOW_CACHE_LIMIT", 32, canonicalWindowDefaultLimit, 500);
+const canonicalPreviewChars = numberFromEnv("CODEXAPP_CANONICAL_PREVIEW_CHARS", 2000, 256, 20000);
+const canonicalFullTextInlineMaxChars = numberFromEnv("CODEXAPP_CANONICAL_FULL_TEXT_INLINE_MAX_CHARS", 250000, 4096, 2_000_000);
+const canonicalSubmissionTtlMs = numberFromEnv("CODEXAPP_CANONICAL_SUBMISSION_TTL_MS", 30 * 60 * 1000, 60 * 1000, 24 * 60 * 60 * 1000);
 const largeThreadFastPathEnabled = parseBoolean(process.env.CODEXAPP_LARGE_THREAD_FAST_PATH, true);
 const largeThreadFastPathMinBytes = numberFromEnv("CODEXAPP_LARGE_THREAD_FAST_PATH_MIN_BYTES", 50 * 1024 * 1024, 1024 * 1024, 1024 * 1024 * 1024);
 const largeThreadFastPathChunkBytes = numberFromEnv("CODEXAPP_LARGE_THREAD_FAST_PATH_CHUNK_BYTES", 1024 * 1024, 128 * 1024, 128 * 1024 * 1024);
@@ -165,6 +172,10 @@ const MIME_TYPES = new Map([
   [".ttf", "font/ttf"],
   [".map", "application/json; charset=utf-8"],
 ]);
+const canonicalAttachmentTokens = new Map();
+const canonicalSubmissionStates = new Map();
+const canonicalAppRequests = new Map();
+const canonicalFullTextCache = new Map();
 
 function log(...args) {
   console.log(new Date().toISOString(), ...args);
@@ -1509,11 +1520,7 @@ function epochSecondsFromRolloutTimestamp(value) {
 }
 
 function truncateLargeThreadText(value) {
-  const text = typeof value === "string" ? value : String(value ?? "");
-  if (Buffer.byteLength(text, "utf8") <= largeThreadFastPathMaxItemTextBytes) return text;
-  const bytes = Buffer.from(text, "utf8");
-  const tail = bytes.subarray(Math.max(0, bytes.length - largeThreadFastPathMaxItemTextBytes)).toString("utf8");
-  return `[truncated earlier large thread item]\n\n${tail}`;
+  return typeof value === "string" ? value : String(value ?? "");
 }
 
 function textFromRolloutContent(content, maxChars = largeThreadFastPathMaxItemTextBytes * 2) {
@@ -1644,8 +1651,7 @@ function largeThreadItemId(turn) {
 
 function makeLargeThreadUserItem(turn, payload) {
   const content = rolloutUserContentFromPayload(payload);
-  const text = largeThreadUserContentText(content);
-  if (!text.trim()) return null;
+  if (!content.some((part) => part && typeof part === "object")) return null;
   return {
     type: "userMessage",
     id: typeof payload.id === "string" && payload.id.length > 0 ? payload.id : largeThreadItemId(turn),
@@ -1730,28 +1736,6 @@ function dedupeLargeThreadUserItems(turn) {
 function compactLargeThreadTurnItems(turn) {
   if (!turn || !Array.isArray(turn.items)) return;
   dedupeLargeThreadUserItems(turn);
-  if (turn.items.length <= largeThreadFastPathMaxItemsPerTurn) return;
-  const originalItems = turn.items;
-  const firstUser = originalItems.find((item) => item?.type === "userMessage") || null;
-  const tailBudget = firstUser ? Math.max(0, largeThreadFastPathMaxItemsPerTurn - 2) : Math.max(1, largeThreadFastPathMaxItemsPerTurn - 1);
-  const tail = originalItems.slice(-tailBudget);
-  const kept = [];
-  if (firstUser && !tail.includes(firstUser)) kept.push(firstUser);
-  const truncatedCount = Math.max(0, originalItems.length - tail.length - kept.length);
-  if (truncatedCount > 0) {
-    kept.push({
-      type: "agentMessage",
-      id: `large-thread-truncated-${originalItems.length}`,
-      text: `[truncated ${truncatedCount} older large thread items]`,
-      phase: "commentary",
-      memoryCitation: null,
-    });
-  }
-  kept.push(...tail);
-  turn.items = kept.slice(-largeThreadFastPathMaxItemsPerTurn);
-  if (firstUser && !turn.items.includes(firstUser)) {
-    turn.items = [firstUser, ...turn.items.slice(-(largeThreadFastPathMaxItemsPerTurn - 1))];
-  }
 }
 
 function largeThreadHasAgentMessage(turn, text) {
@@ -2964,6 +2948,373 @@ function initialTurnsPageFromTurnsResult(result = null) {
   };
 }
 
+const canonicalCursorPrefix = "codexapp-window:";
+
+function redactUiSecretText(value) {
+  if (typeof value !== "string" || value.length === 0) return value || "";
+  return value
+    .replace(/sk-[A-Za-z0-9_-]{12,}/g, "sk-...redacted")
+    .replace(/\b(api[_-]?key|token|secret|authorization)(["'\s:=]+)[^\s"'`]{12,}/gi, "$1$2[redacted]")
+    .replace(/\/srv\/aialra\/[^\s"'`)]+/g, "/path/to/app")
+    .replace(/https?:\/\/(?:[A-Za-z0-9-]+\.)*aialra\.online[^\s"'`)]+/g, "https://example.com");
+}
+
+function canonicalCursorEndOffset(cursor, size) {
+  if (cursor == null || cursor === "") return size;
+  if (typeof cursor !== "string") return null;
+  const value = cursor.startsWith(canonicalCursorPrefix)
+    ? cursor.slice(canonicalCursorPrefix.length)
+    : (cursor.startsWith(largeThreadFastPathCursorPrefix) ? cursor.slice(largeThreadFastPathCursorPrefix.length) : null);
+  if (value == null) return null;
+  const offset = Number.parseInt(value, 10);
+  if (!Number.isFinite(offset) || offset <= 0) return null;
+  return Math.min(offset, size);
+}
+
+function canonicalRolloutInfo(threadId) {
+  const info = rolloutInfoForThread(threadId);
+  if (!info) return null;
+  const size = Number(String(info.signature).split(":")[0]);
+  if (!Number.isFinite(size) || size <= 0) return null;
+  return { ...info, size };
+}
+
+function canonicalRolloutWindowPage(params = {}) {
+  const info = canonicalRolloutInfo(params.threadId);
+  if (!info) return null;
+  const endOffset = canonicalCursorEndOffset(params.cursor, info.size);
+  if (endOffset == null) return null;
+  const maxTurns = largeThreadRequestedTurnLimit(params, canonicalWindowDefaultLimit);
+  const chunkBytes = params.cursor == null ? largeThreadFastPathInitialChunkBytes : largeThreadFastPathChunkBytes;
+  const maxScanBytes = Math.max(chunkBytes, largeThreadFastPathMaxScanBytes);
+  let nextEndOffset = endOffset;
+  let scannedBytes = 0;
+  let chunk = null;
+  let entries = [];
+  let parsedTurns = [];
+  while (nextEndOffset > 0 && scannedBytes < maxScanBytes) {
+    chunk = readLargeRolloutChunk(info.rolloutPath, nextEndOffset, chunkBytes);
+    const chunkEntries = chunk.entries || [];
+    entries = [...chunkEntries, ...entries];
+    scannedBytes += Math.max(0, chunk.end - chunk.start);
+    const parseStart = entries[0]?.offset ?? chunk.start;
+    parsedTurns = parseLargeRolloutTurns(entries, parseStart);
+    if (parsedTurns.length >= maxTurns || chunk.start <= 0) break;
+    if (chunk.start >= nextEndOffset) break;
+    nextEndOffset = chunk.start;
+  }
+  if (!chunk) return null;
+  const turns = parsedTurns.length > maxTurns ? parsedTurns.slice(-maxTurns) : parsedTurns;
+  let nextOffset = chunk.start;
+  if (parsedTurns.length > turns.length) {
+    const oldestReturnedOffset = largeThreadTurnStartOffset(turns[0]);
+    if (oldestReturnedOffset != null && oldestReturnedOffset > chunk.start && oldestReturnedOffset < endOffset) {
+      nextOffset = oldestReturnedOffset;
+    }
+  }
+  return {
+    turns,
+    olderCursor: nextOffset > 0 ? `${canonicalCursorPrefix}${nextOffset}` : null,
+    source: "rollout",
+    revision: info.signature,
+  };
+}
+
+function canonicalTextShape(text) {
+  const value = typeof text === "string" ? text : String(text ?? "");
+  const previewText = value.length > canonicalPreviewChars
+    ? value.slice(0, canonicalPreviewChars)
+    : value;
+  const fullTextAvailable = value.length > canonicalPreviewChars;
+  const item = {
+    text: value.length <= canonicalFullTextInlineMaxChars ? value : null,
+    previewText,
+    fullTextAvailable,
+    contentLength: value.length,
+  };
+  if (value.length > canonicalFullTextInlineMaxChars) {
+    const key = crypto.createHash("sha256").update(value).digest("hex");
+    canonicalFullTextCache.set(key, { text: value, storedAt: Date.now() });
+    item.fullTextKey = key;
+  }
+  return item;
+}
+
+function cleanupCanonicalCaches() {
+  const cutoff = Date.now() - canonicalSubmissionTtlMs;
+  for (const [key, value] of canonicalSubmissionStates) {
+    if (Number(value?.createdAt || 0) < cutoff) canonicalSubmissionStates.delete(key);
+  }
+  for (const [key, value] of canonicalAppRequests) {
+    if (Number(value?.createdAt || 0) < cutoff) canonicalAppRequests.delete(key);
+  }
+  for (const [key, value] of canonicalFullTextCache) {
+    if (Number(value?.storedAt || 0) < cutoff) canonicalFullTextCache.delete(key);
+  }
+}
+
+function canonicalAttachmentTokenForPath(filePath) {
+  if (typeof filePath !== "string" || filePath.length === 0) return null;
+  let resolved;
+  try {
+    resolved = path.resolve(filePath);
+    const stat = fs.statSync(resolved);
+    if (!stat.isFile()) return null;
+    const token = crypto.createHash("sha256").update(`${resolved}:${stat.size}:${Math.trunc(stat.mtimeMs)}`).digest("hex").slice(0, 32);
+    canonicalAttachmentTokens.set(token, {
+      path: resolved,
+      size: stat.size,
+      mimeType: (MIME_TYPES.get(path.extname(resolved).toLowerCase()) || "application/octet-stream").split(";")[0],
+      storedAt: Date.now(),
+    });
+    return token;
+  } catch {
+    return null;
+  }
+}
+
+function canonicalAttachmentUrlFromSource(src) {
+  if (typeof src !== "string" || src.length === 0) return null;
+  if (/^(https?:|data:|blob:)/i.test(src)) return src;
+  const token = canonicalAttachmentTokenForPath(src);
+  return token ? `/api/attachments/${encodeURIComponent(token)}` : null;
+}
+
+function canonicalImageItem(part, id) {
+  if (!part || typeof part !== "object") return null;
+  const src = part.url || part.imageUrl || part.image_url || part.path || part.localPath || part.image_path;
+  const url = canonicalAttachmentUrlFromSource(src);
+  if (!url) return null;
+  return {
+    id,
+    type: "user_image",
+    url,
+    mimeType: typeof part.mimeType === "string" ? part.mimeType : null,
+    detail: typeof part.detail === "string" ? part.detail : null,
+  };
+}
+
+function canonicalItemsFromLegacyItem(item, turn, itemIndex) {
+  const baseId = `${turnStableId(turn) || turn?.id || "turn"}:${item?.id || itemIndex}`;
+  if (item?.type === "userMessage") {
+    const content = Array.isArray(item.content) ? item.content : [];
+    return content.flatMap((part, partIndex) => {
+      if (!part || typeof part !== "object") return [];
+      if (part.type === "text" && typeof part.text === "string") {
+        return [{
+          id: `${baseId}:text:${partIndex}`,
+          type: "user_text",
+          clientUserMessageId: typeof item.id === "string" ? item.id : null,
+          ...canonicalTextShape(part.text),
+        }];
+      }
+      const image = canonicalImageItem(part, `${baseId}:image:${partIndex}`);
+      return image ? [{ ...image, clientUserMessageId: typeof item.id === "string" ? item.id : null }] : [];
+    });
+  }
+  if (item?.type === "agentMessage") {
+    const text = typeof item.text === "string" ? item.text : "";
+    if (!text.trim()) return [];
+    return [{
+      id: `${baseId}:assistant`,
+      type: item.phase === "reasoning" ? "reasoning_summary" : "assistant_text",
+      phase: item.phase || "commentary",
+      ...canonicalTextShape(text),
+    }];
+  }
+  if (item?.type === "toolCall" || item?.type === "function_call") {
+    return [{
+      id: `${baseId}:tool`,
+      type: "tool_call",
+      name: item.name || item.toolName || "tool",
+      status: item.status || "running",
+      summary: truncateUiText(item.summary || item.text || item.arguments || "", 500),
+    }];
+  }
+  if (item?.type === "toolResult" || item?.type === "function_call_output") {
+    return [{
+      id: `${baseId}:tool-result`,
+      type: "tool_result",
+      name: item.name || item.toolName || "tool",
+      status: item.status || "completed",
+      ...canonicalTextShape(item.output || item.text || ""),
+    }];
+  }
+  return [];
+}
+
+function canonicalTurnFromLegacyTurn(turn, index, threadId) {
+  const turnId = turnStableId(turn) || `${threadId}:turn:${index}`;
+  const items = Array.isArray(turn?.items)
+    ? turn.items.flatMap((item, itemIndex) => canonicalItemsFromLegacyItem(item, turn, itemIndex))
+    : [];
+  const submissionId = Array.isArray(turn?.items)
+    ? turn.items.map((item) => typeof item?.id === "string" ? item.id : null).find((id) => id && id.startsWith("submission-")) || null
+    : null;
+  return {
+    id: turnId,
+    threadId,
+    submissionId,
+    status: turn?.status || "completed",
+    startedAt: turn?.startedAt || null,
+    completedAt: turn?.completedAt || null,
+    durationMs: turn?.durationMs || null,
+    offset: largeThreadTurnStartOffset(turn),
+    items,
+  };
+}
+
+function canonicalStatusFromTurns(turns = [], fallback = "idle") {
+  if (turns.some((turn) => turn?.status === "inProgress")) return "running";
+  if (turns.some((turn) => turn?.status === "failed" || turn?.status === "errored")) return "failed";
+  return fallback;
+}
+
+function canonicalThreadStatus(threadId, turns = []) {
+  cleanupCanonicalCaches();
+  const submissions = Array.from(canonicalSubmissionStates.values()).filter((item) => item.threadId === threadId);
+  const active = submissions.find((item) => ["accepted", "resuming", "submitted", "running", "queued"].includes(item.state));
+  const latest = submissions.sort((a, b) => Number(b.updatedAt || 0) - Number(a.updatedAt || 0))[0] || null;
+  const state = active?.state === "resuming"
+    ? "resuming"
+    : (active?.state === "queued" || active?.state === "accepted"
+      ? "queued"
+      : (active?.state === "submitted" || active?.state === "running"
+        ? "running"
+        : canonicalStatusFromTurns(turns, latest?.state === "failed" ? "failed" : "idle")));
+  return {
+    state,
+    activeSubmissionId: active?.submissionId || null,
+    activeTurnId: turns.find((turn) => turn.status === "running" || turn.status === "inProgress")?.id || null,
+    queueDepth: submissions.filter((item) => item.state === "queued" || item.state === "resuming").length,
+    lastError: latest?.state === "failed" ? latest.error || null : null,
+    submissions: submissions.map((item) => ({
+      submissionId: item.submissionId,
+      clientRequestId: item.clientRequestId,
+      state: item.state,
+      error: item.error || null,
+      updatedAt: item.updatedAt || item.createdAt || null,
+    })),
+    updatedAt: latest?.updatedAt || Date.now(),
+  };
+}
+
+function canonicalWindowResponse(params = {}) {
+  const threadId = typeof params.threadId === "string" ? params.threadId : null;
+  if (!threadId) return null;
+  const record = threadRecord(threadId);
+  if (!record) return null;
+  const page = canonicalRolloutWindowPage({
+    threadId,
+    cursor: params.cursor || null,
+    limit: boundedTurnPageLimit(params.limit, canonicalWindowDefaultLimit),
+  });
+  if (!page) return null;
+  const turns = page.turns.map((turn, index) => canonicalTurnFromLegacyTurn(turn, index, threadId)).filter((turn) => turn.items.length > 0);
+  return {
+    threadId,
+    revision: page.revision,
+    thread: {
+      id: threadId,
+      title: redactUiSecretText(record.title || record.preview || record.first_user_message || "Untitled"),
+      preview: redactUiSecretText(truncateUiText(record.preview || record.first_user_message || record.title || "", 240)),
+      cwd: record.cwd || null,
+      model: record.model || null,
+      reasoningEffort: record.reasoning_effort || null,
+      updatedAt: epochSecondsFromRow(record, "updated_at") || null,
+      createdAt: epochSecondsFromRow(record, "created_at") || null,
+    },
+    items: turns,
+    page: {
+      olderCursor: page.olderCursor,
+      newerCursor: params.cursor ? null : null,
+      hasOlder: page.olderCursor != null,
+      hasNewer: false,
+      limit: boundedTurnPageLimit(params.limit, canonicalWindowDefaultLimit),
+    },
+    status: canonicalThreadStatus(threadId, turns),
+  };
+}
+
+function canonicalThreadList(params = {}) {
+  const result = fastThreadListFromDb({
+    limit: params.limit || 40,
+    cursor: params.cursor || null,
+    sortKey: "updated_at",
+  }, new Set());
+  const threads = Array.isArray(result?.data) ? result.data.map((thread) => ({
+    id: thread.id,
+    title: redactUiSecretText(thread.name || thread.preview || "Untitled"),
+    preview: redactUiSecretText(thread.preview || ""),
+    cwd: thread.cwd || null,
+    updatedAt: thread.updatedAt || null,
+    createdAt: thread.createdAt || null,
+  })) : [];
+  return { items: threads, nextCursor: result?.nextCursor || null };
+}
+
+function canonicalSubmissionKey(threadId, clientRequestId) {
+  if (!threadId || !clientRequestId) return null;
+  return `${threadId}:${clientRequestId}`;
+}
+
+function canonicalInputFromSubmitBody(body = {}) {
+  const input = [];
+  const raw = body.input;
+  if (typeof raw === "string" && raw.trim()) {
+    input.push({ type: "text", text: raw.trim(), text_elements: [] });
+  } else if (Array.isArray(raw)) {
+    for (const item of raw) {
+      if (typeof item === "string" && item.trim()) input.push({ type: "text", text: item.trim(), text_elements: [] });
+      else if (item && typeof item === "object" && typeof item.text === "string" && item.text.trim()) {
+        input.push({ type: "text", text: item.text.trim(), text_elements: Array.isArray(item.text_elements) ? item.text_elements : [] });
+      }
+    }
+  }
+  for (const attachment of Array.isArray(body.attachments) ? body.attachments : []) {
+    if (!attachment || typeof attachment !== "object") continue;
+    const token = typeof attachment.id === "string" && attachment.id.length > 0
+      ? attachment.id
+      : (typeof attachment.url === "string" ? attachment.url.split("/").filter(Boolean).pop() : null);
+    const stored = token ? canonicalAttachmentTokens.get(token) : null;
+    if (stored?.filePath && fs.existsSync(stored.filePath)) {
+      const mimeType = stored.mimeType || "image/png";
+      const contentsBase64 = fs.readFileSync(stored.filePath).toString("base64");
+      input.push({ type: "input_image", image_url: `data:${mimeType};base64,${contentsBase64}` });
+      continue;
+    }
+    const url = typeof attachment.url === "string" ? attachment.url : null;
+    if (url && /^data:image\//i.test(url)) input.push({ type: "input_image", image_url: url });
+    else if (url) input.push({ type: "input_image", image_url: url });
+  }
+  return input;
+}
+
+function optimisticTurnForSubmission(threadId, submissionId, body = {}) {
+  const items = [];
+  const text = typeof body.input === "string" ? body.input.trim() : textFromTurnInput(body.input);
+  if (text) items.push({ id: `${submissionId}:text`, type: "user_text", ...canonicalTextShape(text) });
+  for (const [index, attachment] of (Array.isArray(body.attachments) ? body.attachments : []).entries()) {
+    const url = typeof attachment?.url === "string" ? attachment.url : null;
+    if (url) items.push({ id: `${submissionId}:image:${index}`, type: "user_image", url });
+  }
+  return {
+    id: submissionId,
+    threadId,
+    status: "optimistic",
+    startedAt: Date.now() / 1000,
+    completedAt: null,
+    durationMs: null,
+    items,
+  };
+}
+
+function updateCanonicalSubmission(entry, patch = {}) {
+  Object.assign(entry, patch, { updatedAt: Date.now() });
+  canonicalSubmissionStates.set(entry.key, entry);
+  return entry;
+}
+
 function invalidateThreadTurnsCache(threadId = null) {
   if (!threadId) {
     threadTurnsCache.clear();
@@ -3795,6 +4146,7 @@ function longThreadRescueHtml(threadId) {
 <body>
   <div id="root"><div class="startup-loader">正在打开长线程窗口...</div></div>
   <script>window.__codexappLongThreadRescue = ${JSON.stringify({ threadId })};</script>
+  <script>window.__codexappSingleSurface = true;</script>
   <script src="${bridgeScriptPath}"></script>
 </body>
 </html>`;
@@ -4452,13 +4804,10 @@ function browserBridgeScript() {
   }
 
   async function codexappFastShellFetchTurns(threadId, cursor, limit = 8) {
-    if (!rawFetch) throw new Error("fetch is not ready");
-    const url = "/codexapp-thread-turns?threadId=" + encodeURIComponent(threadId)
-      + (cursor ? "&cursor=" + encodeURIComponent(cursor) : "")
-      + "&limit=" + encodeURIComponent(String(limit));
-    const response = await rawFetch(url, { headers: { "accept": "application/json" }, cache: "no-store" });
-    if (!response.ok) throw new Error("history request failed with " + response.status);
-    return await response.json();
+    void threadId;
+    void cursor;
+    void limit;
+    throw new Error("legacy fast shell history is disabled");
   }
 
   function codexappFastShellTurnKey(turn, index = 0) {
@@ -4780,46 +5129,8 @@ function browserBridgeScript() {
   }
 
   function installCodexappFastThreadShell() {
-    if (!rawFetch) {
-      codexappLoadMarks.fastShellSkipReason = "fetch-unavailable";
-      return false;
-    }
-    const threadId = codexappThreadIdFromPath();
-    if (!threadId) {
-      codexappLoadMarks.fastShellSkipReason = "not-thread-route";
-      return false;
-    }
-    if (window.__codexappFastThreadShellStarted === threadId) return true;
-    const root = document.getElementById("root");
-    if (root && codexappRootHasOfficialThread(root, threadId)) {
-      codexappLoadMarks.fastShellSkipReason = "official-thread-ready";
-      return false;
-    }
-    window.__codexappFastThreadShellStarted = threadId;
-    codexappLoadMarks.fastShellRequestedAt = performance.now();
-    rawFetch("/codexapp-thread-fast?threadId=" + encodeURIComponent(threadId), {
-      headers: { "accept": "application/json" },
-      cache: "no-store",
-    })
-      .then((response) => {
-        codexappLoadMarks.fastShellResponseAt = performance.now();
-        codexappLoadMarks.fastShellStatus = response.status;
-        return response.ok ? response.json() : null;
-      })
-      .then((payload) => {
-        if (payload) {
-          const rendered = codexappRenderFastThreadShell(payload);
-          codexappLoadMarks.fastShellRendered = rendered;
-          if (!rendered) {
-            setTimeout(() => { codexappLoadMarks.fastShellRendered = codexappRenderFastThreadShell(payload); }, 50);
-            setTimeout(() => { codexappLoadMarks.fastShellRendered = codexappRenderFastThreadShell(payload); }, 250);
-          }
-        }
-      })
-      .catch((error) => {
-        codexappLoadMarks.fastShellError = String(error?.message || error || "unknown");
-      });
-    return true;
+    codexappLoadMarks.fastShellSkipReason = "single-surface";
+    return false;
   }
   function scheduleCodexappFastThreadShell() {
     setTimeout(installCodexappFastThreadShell, 0);
@@ -4831,7 +5142,7 @@ function browserBridgeScript() {
       installCodexappFastThreadShell();
     }
   }
-  scheduleCodexappFastThreadShell();
+  if (!window.__codexappSingleSurface) scheduleCodexappFastThreadShell();
 
   function codexappActiveThreadId() {
     return activeThreadIdFromDocument?.() || codexappThreadIdFromPath();
@@ -6573,12 +6884,14 @@ function browserBridgeScript() {
   let activeTranscriptRepairLastAt = 0;
 
   function repairActiveTranscript(reason) {
+    if (window.__codexappSingleSurface) return;
     installRunningTranscriptStyles();
     expandActiveRunningCard();
     keepActiveTranscriptAtTail();
   }
 
   function scheduleActiveTranscriptRepair(reason) {
+    if (window.__codexappSingleSurface) return;
     if (activeTranscriptRepairTimer) return;
     const elapsed = Date.now() - activeTranscriptRepairLastAt;
     const delayMs = elapsed > 350 ? 0 : 350 - elapsed;
@@ -6589,10 +6902,12 @@ function browserBridgeScript() {
     }, delayMs);
   }
 
-  installRunningTranscriptStyles();
-  setInterval(() => {
-    if (activeTranscriptHasRunningCard()) repairActiveTranscript("running-card-watchdog");
-  }, 3000);
+  if (!window.__codexappSingleSurface) {
+    installRunningTranscriptStyles();
+    setInterval(() => {
+      if (activeTranscriptHasRunningCard()) repairActiveTranscript("running-card-watchdog");
+    }, 3000);
+  }
 
   function scheduleReconnect(delayMs = 1000) {
     clearTimeout(reconnectTimer);
@@ -6802,9 +7117,11 @@ function browserBridgeScript() {
     sendToServer(event.detail);
   });
 
-  installSubmitDeduper();
-  installUiShim();
-  installBrowserFileDropUploadShim();
+  if (!window.__codexappSingleSurface) {
+    installSubmitDeduper();
+    installUiShim();
+  }
+  if (!window.__codexappSingleSurface) installBrowserFileDropUploadShim();
   connect();
 })();`;
 }
@@ -10685,6 +11002,728 @@ class BridgeSession {
   }
 }
 
+function liveBridgeSession() {
+  for (const session of bridgeSessions) {
+    if (!session.closed) return session;
+  }
+  return null;
+}
+
+async function transientAppServerRequest(method, params = {}, options = {}) {
+  await appServerProcess.ensureStarted();
+  const timeoutMs = Math.max(1000, Number(options.timeoutMs || 120000));
+  return await new Promise((resolve, reject) => {
+    const ws = new WebSocket(`ws://127.0.0.1:${appServerPort}`);
+    const pending = new Map();
+    let initialized = false;
+    const cleanup = () => {
+      clearTimeout(timeout);
+      try { ws.close(); } catch {}
+    };
+    const fail = (error) => {
+      cleanup();
+      reject(error instanceof Error ? error : new Error(String(error)));
+    };
+    const sendRequest = (id, requestMethod, requestParams) => {
+      pending.set(id, { resolve, reject });
+      ws.send(JSON.stringify({ jsonrpc: "2.0", id, method: requestMethod, params: requestParams }));
+    };
+    const timeout = setTimeout(() => fail(new Error(`${method} timed out`)), timeoutMs);
+    timeout.unref?.();
+    ws.on("open", () => {
+      const initId = `canonical-init-${crypto.randomUUID()}`;
+      pending.set(initId, {
+        resolve: () => {
+          initialized = true;
+          sendRequest(`canonical-${crypto.randomUUID()}`, method, params);
+        },
+        reject,
+      });
+      ws.send(JSON.stringify({
+        jsonrpc: "2.0",
+        id: initId,
+        method: "initialize",
+        params: {
+          clientInfo: { name: clientName, title: `${appDisplayName} API`, version: "0.1.0" },
+          capabilities: { experimentalApi: true },
+        },
+      }));
+    });
+    ws.on("message", (data) => {
+      let message;
+      try { message = JSON.parse(data.toString()); } catch { return; }
+      if (message.id !== undefined && pending.has(message.id)) {
+        const entry = pending.get(message.id);
+        pending.delete(message.id);
+        if (message.error) {
+          fail(new Error(message.error.message || "app-server request failed"));
+          return;
+        }
+        if (!initialized) {
+          entry.resolve(message.result);
+          return;
+        }
+        cleanup();
+        resolve(message.result);
+        return;
+      }
+      if (message.id !== undefined && message.method) {
+        try {
+          ws.send(JSON.stringify({
+            jsonrpc: "2.0",
+            id: message.id,
+            error: { code: -32601, message: "Host interaction requires an active web session" },
+          }));
+        } catch {}
+      }
+    });
+    ws.on("error", fail);
+    ws.on("close", () => {
+      if (pending.size > 0) fail(new Error("app-server connection closed"));
+    });
+  });
+}
+
+async function canonicalAppRequest(method, params = {}, options = {}) {
+  const session = liveBridgeSession();
+  if (session) {
+    return await session.appRequest(method, params, {
+      timeoutMs: options.timeoutMs || 120000,
+      internal: true,
+    });
+  }
+  return await transientAppServerRequest(method, params, options);
+}
+
+async function canonicalEnsureResume(threadId, params = {}) {
+  const session = liveBridgeSession();
+  if (session && largeThreadFastPathInfo(threadId)) {
+    return await session.ensureLargeThreadLoadedInAppServer(threadId, params, {
+      timeoutMs: largeThreadAppResumeTimeoutMs,
+    });
+  }
+  const resumeParams = largeThreadAppResumeParams({ ...params, threadId });
+  if (resumeParams) {
+    return await canonicalAppRequest("thread/resume", resumeParams, { timeoutMs: largeThreadAppResumeTimeoutMs });
+  }
+  return await canonicalAppRequest("thread/resume", { threadId }, { timeoutMs: largeThreadAppResumeTimeoutMs });
+}
+
+async function canonicalLatestActiveTurnId(threadId) {
+  const session = liveBridgeSession();
+  if (session) return await session.latestActiveTurnIdWithRetry(threadId, 2500);
+  const local = canonicalWindowResponse({ threadId, limit: 5 });
+  const active = Array.isArray(local?.items) ? local.items.find((turn) => turn.status === "inProgress" || turn.status === "running") : null;
+  if (active?.id) return active.id;
+  try {
+    const result = await canonicalAppRequest("thread/turns/list", { threadId, cursor: null, limit: 8 }, { timeoutMs: 30000 });
+    const turn = Array.isArray(result?.data) ? result.data.find((item) => item?.status === "inProgress") : null;
+    return turnStableId(turn);
+  } catch {
+    return null;
+  }
+}
+
+function canonicalInputForMode(mode, input) {
+  const normalizedMode = ["normal", "steer", "plan", "goal"].includes(mode) ? mode : "normal";
+  const items = Array.isArray(input) ? input.map((item) => ({ ...item })) : [];
+  if ((normalizedMode === "goal" || normalizedMode === "plan") && items.length > 0 && typeof items[0].text === "string") {
+    const prefix = normalizedMode === "goal" ? "/goal " : "/plan ";
+    if (!items[0].text.trim().startsWith(prefix.trim())) items[0].text = `${prefix}${items[0].text.trim()}`;
+  }
+  return items;
+}
+
+async function runCanonicalSubmission(entry, body = {}) {
+  const threadId = entry.threadId;
+  let input = canonicalInputFromSubmitBody(body);
+  if (input.length === 0) {
+    updateCanonicalSubmission(entry, { state: "failed", error: "empty input" });
+    return;
+  }
+  input = canonicalInputForMode(entry.mode, input);
+  try {
+    updateCanonicalSubmission(entry, { state: "resuming" });
+    await canonicalEnsureResume(threadId, { threadId, input });
+    let activeTurnId = await canonicalLatestActiveTurnId(threadId);
+    let method = activeTurnId ? "turn/steer" : "turn/start";
+    const paramsFor = (requestMethod, expectedTurnId = null) => {
+      const base = {
+        threadId,
+        input,
+        clientRequestId: entry.clientRequestId,
+        clientUserMessageId: entry.submissionId,
+      };
+      if (requestMethod === "turn/steer" && expectedTurnId) base.expectedTurnId = expectedTurnId;
+      const record = threadRecord(threadId);
+      if (requestMethod === "turn/start" && record?.cwd) base.cwd = record.cwd;
+      return forceLocalManagedWorkspacePermissions(requestMethod, base);
+    };
+    let params = paramsFor(method, activeTurnId);
+    updateCanonicalSubmission(entry, { state: "submitted", method });
+    let result;
+    try {
+      result = await canonicalAppRequest(method, params, { timeoutMs: 120000 });
+    } catch (error) {
+      const replacementTurnId = String(error?.message || "").match(/expected active turn id `[^`]+` but found `([^`]+)`/)?.[1];
+      if (method === "turn/steer" && replacementTurnId) {
+        params = paramsFor("turn/steer", replacementTurnId);
+        result = await canonicalAppRequest("turn/steer", params, { timeoutMs: 120000 });
+      } else if (method === "turn/steer" && /not being streamed|without an active turn|no active turn|Cannot steer/i.test(error?.message || "")) {
+        method = "turn/start";
+        params = paramsFor("turn/start", null);
+        result = await canonicalAppRequest("turn/start", params, { timeoutMs: 120000 });
+      } else {
+        throw error;
+      }
+    }
+    invalidateThreadTurnsCache(threadId);
+    const session = liveBridgeSession();
+    if (session) {
+      session.recordTurnInputSubmission?.(method, params || {});
+      session.observeActiveTurnFromRequest?.(method, params || {}, result);
+      session.broadcastThreadActivity?.(threadId, { reason: "canonical-submit", status: "inProgress" });
+    }
+    updateCanonicalSubmission(entry, { state: "running", result: result || null, method });
+  } catch (error) {
+    updateCanonicalSubmission(entry, { state: "failed", error: error.message || String(error) });
+  }
+}
+
+function acceptCanonicalSubmission(threadId, body = {}) {
+  cleanupCanonicalCaches();
+  const clientRequestId = typeof body.clientRequestId === "string" && body.clientRequestId.length > 0
+    ? body.clientRequestId
+    : crypto.randomUUID();
+  const key = canonicalSubmissionKey(threadId, clientRequestId);
+  const existing = canonicalSubmissionStates.get(key);
+  if (existing) {
+    return {
+      accepted: true,
+      submissionId: existing.submissionId,
+      state: existing.state,
+      optimisticTurn: existing.optimisticTurn,
+    };
+  }
+  const submissionId = `submission-${crypto.randomUUID()}`;
+  const entry = {
+    key,
+    threadId,
+    clientRequestId,
+    submissionId,
+    mode: ["normal", "steer", "plan", "goal"].includes(body.mode) ? body.mode : "normal",
+    state: "accepted",
+    optimisticTurn: optimisticTurnForSubmission(threadId, submissionId, body),
+    error: null,
+    createdAt: Date.now(),
+    updatedAt: Date.now(),
+  };
+  canonicalSubmissionStates.set(key, entry);
+  runCanonicalSubmission(entry, body).catch((error) => {
+    updateCanonicalSubmission(entry, { state: "failed", error: error.message || String(error) });
+  });
+  return {
+    accepted: true,
+    submissionId,
+    state: entry.state,
+    optimisticTurn: entry.optimisticTurn,
+  };
+}
+
+function readJsonRequest(req, maxBytes = 25 * 1024 * 1024) {
+  return new Promise((resolve, reject) => {
+    const chunks = [];
+    let size = 0;
+    req.on("data", (chunk) => {
+      size += chunk.length;
+      if (size > maxBytes) {
+        reject(new Error("request body too large"));
+        req.destroy();
+        return;
+      }
+      chunks.push(chunk);
+    });
+    req.on("end", () => {
+      const text = Buffer.concat(chunks).toString("utf8");
+      if (!text.trim()) {
+        resolve({});
+        return;
+      }
+      try { resolve(JSON.parse(text)); } catch (error) { reject(error); }
+    });
+    req.on("error", reject);
+  });
+}
+
+function sendJson(res, status, body, headers = {}) {
+  send(res, status, {
+    "Content-Type": "application/json; charset=utf-8",
+    "Cache-Control": "no-store",
+    ...headers,
+  }, JSON.stringify(body));
+}
+
+function storeCanonicalAttachment(body = {}) {
+  const name = sanitizePathSegment(body.name || body.filename || "attachment", "attachment");
+  const mimeType = typeof body.type === "string" && body.type.length > 0 ? body.type : "application/octet-stream";
+  const contentsBase64 = typeof body.contentsBase64 === "string" ? body.contentsBase64 : "";
+  if (!contentsBase64) throw new Error("missing attachment contents");
+  const buffer = Buffer.from(contentsBase64, "base64");
+  const group = crypto.randomUUID();
+  const root = path.join(canonicalAttachmentsRoot, new Date().toISOString().slice(0, 10), group);
+  fs.mkdirSync(root, { recursive: true });
+  const filePath = path.join(root, name);
+  fs.writeFileSync(filePath, buffer);
+  const token = canonicalAttachmentTokenForPath(filePath);
+  if (!token) throw new Error("unable to store attachment");
+  const url = `/api/attachments/${encodeURIComponent(token)}`;
+  return { id: token, name, url, mimeType, sizeBytes: buffer.length };
+}
+
+function singleSurfaceHtml(threadId) {
+  const safeThreadId = JSON.stringify(threadId || "");
+  return `<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>CodexApp Web</title>
+  <style>
+    :root { color-scheme: light; --line:#e7e7e8; --muted:#737373; --text:#171717; --accent:#111; --bg:#fff; --soft:#f7f7f8; }
+    * { box-sizing: border-box; }
+    html, body { height: 100%; margin: 0; overflow: hidden; background: var(--bg); color: var(--text); font: 14px/1.5 ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; }
+    button, textarea, select { font: inherit; }
+    .app { display: grid; grid-template-columns: 300px minmax(0, 1fr); height: 100%; overflow: hidden; }
+    .side { border-right: 1px solid var(--line); min-width: 0; min-height: 0; display: flex; flex-direction: column; background: #fbfbfc; }
+    .side-head { height: 52px; display: flex; align-items: center; justify-content: space-between; padding: 0 14px; border-bottom: 1px solid var(--line); }
+    .brand { font-weight: 650; }
+    .thread-list { overflow: auto; padding: 8px; }
+    .thread-row { width: 100%; display: block; text-align: left; border: 0; background: transparent; border-radius: 7px; padding: 9px 10px; cursor: pointer; color: var(--text); }
+    .thread-row:hover, .thread-row.active { background: #ededee; }
+    .thread-title { overflow: hidden; white-space: nowrap; text-overflow: ellipsis; font-weight: 560; }
+    .thread-preview { overflow: hidden; white-space: nowrap; text-overflow: ellipsis; color: var(--muted); font-size: 12px; margin-top: 2px; }
+    .main { min-width: 0; min-height: 0; height: 100%; display: grid; grid-template-rows: 52px minmax(0, 1fr) auto; }
+    .top { border-bottom: 1px solid var(--line); display: flex; align-items: center; gap: 12px; padding: 0 18px; min-width: 0; }
+    .title { font-weight: 650; overflow: hidden; white-space: nowrap; text-overflow: ellipsis; min-width: 0; }
+    .status { margin-left: auto; color: var(--muted); font-size: 12px; white-space: nowrap; }
+    .transcript { min-height: 0; overflow: auto; padding: 20px 20px 120px; overflow-anchor: none; }
+    .inner { max-width: 860px; margin: 0 auto; }
+    .loader { width: 100%; border: 1px solid var(--line); border-radius: 7px; background: #fff; color: var(--muted); padding: 8px 10px; margin: 4px 0 16px; cursor: pointer; overflow-anchor: none; }
+    .turn { margin: 16px 0; contain: layout paint; overflow-anchor: none; }
+    .turn.optimistic { opacity: .78; }
+    .bubble { white-space: pre-wrap; overflow-wrap: anywhere; border-radius: 8px; padding: 12px 14px; max-width: 760px; }
+    .user { display: flex; justify-content: flex-end; }
+    .user .bubble { background: #f0f0f1; }
+    .assistant .bubble, .tool .bubble { background: transparent; padding-left: 0; }
+    .meta { color: var(--muted); font-size: 12px; margin: 6px 0 0; }
+    .image-grid { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 8px; justify-content: flex-end; }
+    .image-grid img { max-width: min(240px, 100%); max-height: 220px; border: 1px solid var(--line); border-radius: 7px; object-fit: contain; background: #fff; }
+    .composer-wrap { border-top: 1px solid var(--line); background: rgba(255,255,255,.96); padding: 12px 20px 16px; overflow-anchor: none; }
+    .composer { max-width: 860px; margin: 0 auto; border: 1px solid var(--line); border-radius: 10px; background: #fff; display: grid; grid-template-rows: auto auto; box-shadow: 0 6px 20px rgba(0,0,0,.05); }
+    textarea { min-height: 70px; max-height: 220px; resize: vertical; border: 0; outline: 0; padding: 12px 14px; border-radius: 10px; }
+    .actions { display: flex; align-items: center; gap: 8px; border-top: 1px solid #f0f0f1; padding: 8px 10px; }
+    .icon-btn, .send { border: 0; border-radius: 7px; height: 32px; padding: 0 10px; cursor: pointer; background: #f2f2f3; }
+    .send { margin-left: auto; background: var(--accent); color: #fff; min-width: 62px; }
+    .send:disabled { opacity: .5; cursor: default; }
+    .mode { border: 0; background: #f2f2f3; border-radius: 7px; height: 32px; padding: 0 8px; }
+    .attachments { display: flex; gap: 6px; flex-wrap: wrap; padding: 0 10px 8px; }
+    .attachment-chip { display: inline-flex; align-items: center; gap: 6px; border: 1px solid var(--line); border-radius: 7px; padding: 4px 6px; font-size: 12px; color: var(--muted); }
+    .attachment-chip img { width: 28px; height: 28px; object-fit: cover; border-radius: 5px; }
+    .error { color: #b42318; }
+    .hidden { display: none !important; }
+    @media (max-width: 800px) { .app { grid-template-columns: 1fr; } .side { display: none; } .transcript { padding: 14px 12px 110px; } .composer-wrap { padding: 10px 12px; } }
+  </style>
+</head>
+<body>
+  <div class="app">
+    <aside class="side">
+      <div class="side-head"><div class="brand">CodexApp</div><button id="refreshThreads" class="icon-btn" title="刷新">↻</button></div>
+      <div id="threadList" class="thread-list"></div>
+    </aside>
+    <main class="main">
+      <header class="top"><div id="title" class="title">加载中</div><div id="status" class="status">接入中</div></header>
+      <section id="transcript" class="transcript"><div class="inner"><button id="loadOlder" class="loader">加载更早历史</button><div id="turns"></div></div></section>
+      <section class="composer-wrap">
+        <form id="composer" class="composer">
+          <textarea id="draft" placeholder="要求后续变更"></textarea>
+          <div id="attachments" class="attachments hidden"></div>
+          <div class="actions">
+            <input id="fileInput" type="file" accept="image/*" multiple hidden>
+            <button type="button" id="pickFile" class="icon-btn" title="添加图片">＋</button>
+            <select id="mode" class="mode" title="发送模式">
+              <option value="normal">普通</option>
+              <option value="steer">引导</option>
+              <option value="plan">计划</option>
+              <option value="goal">目标</option>
+            </select>
+            <button id="send" class="send" type="submit">发送</button>
+          </div>
+        </form>
+      </section>
+    </main>
+  </div>
+  <script>window.__codexappSingleSurface = true;</script>
+  <script src="${bridgeScriptPath}"></script>
+  <script>
+  (() => {
+    const threadId = ${safeThreadId};
+    const MAX_WINDOW = ${canonicalWindowCacheLimit};
+    const state = { items: [], newerCache: [], olderCursor: null, hasOlder: true, loading: false, restoring: false, submitting: false, attachments: [], statusTimer: null };
+    const els = {
+      threadList: document.getElementById('threadList'),
+      refreshThreads: document.getElementById('refreshThreads'),
+      title: document.getElementById('title'),
+      status: document.getElementById('status'),
+      transcript: document.getElementById('transcript'),
+      turns: document.getElementById('turns'),
+      loadOlder: document.getElementById('loadOlder'),
+      composer: document.getElementById('composer'),
+      draft: document.getElementById('draft'),
+      send: document.getElementById('send'),
+      mode: document.getElementById('mode'),
+      pickFile: document.getElementById('pickFile'),
+      fileInput: document.getElementById('fileInput'),
+      attachments: document.getElementById('attachments'),
+    };
+    const esc = (s) => String(s ?? '');
+    async function api(path, options) {
+      const response = await fetch(path, options);
+      if (!response.ok) throw new Error(await response.text() || response.statusText);
+      return await response.json();
+    }
+    function statusLabel(value) {
+      return ({ idle:'空闲', resuming:'接入中', queued:'排队中', running:'运行中', waiting_permission:'等待权限', failed:'失败', completed:'已完成' })[value] || value || '未知';
+    }
+    function captureAnchor() {
+      const containerTop = els.transcript.getBoundingClientRect().top;
+      const nodes = Array.from(els.turns.querySelectorAll('[data-turn-id]'));
+      const node = nodes.find((item) => item.getBoundingClientRect().bottom > containerTop + 24);
+      return node ? { id: node.dataset.turnId, top: node.getBoundingClientRect().top } : null;
+    }
+    function restoreAnchor(anchor, attempts) {
+      if (!anchor) return;
+      state.restoring = true;
+      let remaining = Number.isFinite(attempts) ? attempts : 8;
+      const apply = () => {
+        const node = els.turns.querySelector('[data-turn-id="' + CSS.escape(anchor.id) + '"]');
+        if (node) {
+          const delta = node.getBoundingClientRect().top - anchor.top;
+          if (Math.abs(delta) > 0.5) els.transcript.scrollTop += delta;
+        }
+        remaining -= 1;
+        if (remaining > 0) {
+          requestAnimationFrame(apply);
+        } else {
+          state.restoring = false;
+        }
+      };
+      requestAnimationFrame(apply);
+    }
+    function setLoadingUi() {
+      els.loadOlder.disabled = state.loading || !state.hasOlder;
+      els.loadOlder.textContent = state.loading ? '加载中...' : (state.hasOlder ? '加载更早历史' : '已经到达最早历史');
+    }
+    function mergeSubmissionStates(submissions) {
+      if (!Array.isArray(submissions) || submissions.length === 0) return false;
+      let changed = false;
+      for (const submission of submissions) {
+        if (!submission?.submissionId) continue;
+        const turn = state.items.find((item) => item.id === submission.submissionId);
+        if (!turn) continue;
+        const nextStatus = submission.state === 'failed' ? 'failed' : (submission.state === 'running' || submission.state === 'submitted' || submission.state === 'resuming' ? 'running' : turn.status);
+        if (turn.status !== nextStatus || turn.error !== submission.error) {
+          turn.status = nextStatus;
+          turn.error = submission.error || null;
+          changed = true;
+        }
+      }
+      return changed;
+    }
+    function mergeIncomingTurns(incoming) {
+      const list = Array.isArray(incoming) ? incoming : [];
+      const known = new Set(state.items.map((item) => item.id));
+      let changed = false;
+      for (const turn of list) {
+        if (!turn?.id || known.has(turn.id)) continue;
+        if (turn.submissionId) {
+          const optimisticIndex = state.items.findIndex((item) => item.id === turn.submissionId);
+          if (optimisticIndex >= 0) {
+            state.items.splice(optimisticIndex, 1, turn);
+            known.add(turn.id);
+            changed = true;
+            continue;
+          }
+        }
+        state.items.push(turn);
+        known.add(turn.id);
+        changed = true;
+      }
+      return changed;
+    }
+    function textNode(text) {
+      return document.createTextNode(esc(text));
+    }
+    function renderTextItem(item, host) {
+      const text = item.text || item.previewText || '';
+      host.appendChild(textNode(text));
+      if (item.fullTextAvailable) {
+        const more = document.createElement('button');
+        more.type = 'button';
+        more.className = 'icon-btn';
+        more.style.marginTop = '8px';
+        more.textContent = '显示更多';
+        more.addEventListener('click', async () => {
+          if (item.text) {
+            host.textContent = item.text;
+            return;
+          }
+          if (!item.fullTextKey) return;
+          const result = await api('/api/text/' + encodeURIComponent(item.fullTextKey));
+          host.textContent = result.text || '';
+        });
+        host.appendChild(document.createElement('br'));
+        host.appendChild(more);
+      }
+    }
+    function renderTurn(turn) {
+      const section = document.createElement('section');
+      section.className = 'turn' + (turn.status === 'optimistic' ? ' optimistic' : '');
+      section.dataset.turnId = turn.id;
+      const items = Array.isArray(turn.items) ? turn.items : [];
+      const userItems = items.filter((item) => item.type === 'user_text' || item.type === 'user_image');
+      const otherItems = items.filter((item) => !userItems.includes(item));
+      if (userItems.length) {
+        const wrap = document.createElement('div');
+        wrap.className = 'user';
+        const bubble = document.createElement('div');
+        bubble.className = 'bubble';
+        for (const item of userItems) {
+          if (item.type === 'user_text') renderTextItem(item, bubble);
+        }
+        const images = userItems.filter((item) => item.type === 'user_image');
+        if (images.length) {
+          const grid = document.createElement('div');
+          grid.className = 'image-grid';
+          for (const image of images) {
+            const img = document.createElement('img');
+            img.src = image.url;
+            img.alt = 'attachment';
+            img.loading = 'lazy';
+            grid.appendChild(img);
+          }
+          bubble.appendChild(grid);
+        }
+        wrap.appendChild(bubble);
+        section.appendChild(wrap);
+      }
+      for (const item of otherItems) {
+        const wrap = document.createElement('div');
+        wrap.className = item.type === 'tool_call' || item.type === 'tool_result' ? 'tool' : 'assistant';
+        const bubble = document.createElement('div');
+        bubble.className = 'bubble';
+        if (item.type === 'assistant_text' || item.type === 'reasoning_summary' || item.type === 'tool_result') renderTextItem(item, bubble);
+        else bubble.textContent = [item.name, item.status, item.summary].filter(Boolean).join(' · ');
+        wrap.appendChild(bubble);
+        section.appendChild(wrap);
+      }
+      if (turn.status && turn.status !== 'completed') {
+        const meta = document.createElement('div');
+        meta.className = 'meta';
+        meta.textContent = turn.error ? (turn.status + ': ' + turn.error) : (turn.status === 'optimistic' ? '已本地提交' : turn.status);
+        section.appendChild(meta);
+      }
+      return section;
+    }
+    function renderTurns(anchor) {
+      els.turns.replaceChildren(...state.items.map(renderTurn));
+      setLoadingUi();
+      restoreAnchor(anchor);
+    }
+    async function loadLatest() {
+      state.loading = true;
+      setLoadingUi();
+      const result = await api('/api/threads/' + encodeURIComponent(threadId) + '/window?direction=latest&limit=${canonicalWindowDefaultLimit}');
+      state.items = result.items || [];
+      state.olderCursor = result.page?.olderCursor || null;
+      state.hasOlder = !!result.page?.hasOlder;
+      mergeSubmissionStates(result.status?.submissions);
+      els.title.textContent = result.thread?.title || threadId;
+      els.status.textContent = statusLabel(result.status?.state);
+      state.loading = false;
+      renderTurns();
+      requestAnimationFrame(() => { els.transcript.scrollTop = els.transcript.scrollHeight; });
+    }
+    async function loadOlder() {
+      if (state.loading || !state.hasOlder || !state.olderCursor) return;
+      const anchor = captureAnchor();
+      state.loading = true;
+      setLoadingUi();
+      const result = await api('/api/threads/' + encodeURIComponent(threadId) + '/window?direction=older&cursor=' + encodeURIComponent(state.olderCursor) + '&limit=${canonicalWindowDefaultLimit}');
+      const incoming = result.items || [];
+      const existing = new Set(state.items.map((item) => item.id));
+      state.items = incoming.filter((item) => !existing.has(item.id)).concat(state.items);
+      while (state.items.length > MAX_WINDOW) state.newerCache.unshift(state.items.pop());
+      state.olderCursor = result.page?.olderCursor || null;
+      state.hasOlder = !!result.page?.hasOlder;
+      mergeSubmissionStates(result.status?.submissions);
+      state.loading = false;
+      renderTurns(anchor);
+    }
+    function loadNewerFromCache() {
+      if (state.loading || state.newerCache.length === 0) return;
+      const anchor = captureAnchor();
+      const take = state.newerCache.splice(0, ${canonicalWindowDefaultLimit});
+      state.items = state.items.concat(take);
+      while (state.items.length > MAX_WINDOW) state.items.shift();
+      renderTurns(anchor);
+    }
+    async function loadThreads() {
+      const result = await api('/api/threads?limit=80');
+      els.threadList.replaceChildren(...(result.items || []).map((thread) => {
+        const button = document.createElement('button');
+        button.type = 'button';
+        button.className = 'thread-row' + (thread.id === threadId ? ' active' : '');
+        const title = document.createElement('div');
+        title.className = 'thread-title';
+        title.textContent = thread.title || 'Untitled';
+        const preview = document.createElement('div');
+        preview.className = 'thread-preview';
+        preview.textContent = thread.preview || '';
+        button.append(title, preview);
+        button.addEventListener('click', () => { location.href = '/local/' + encodeURIComponent(thread.id); });
+        return button;
+      }));
+    }
+    async function pollStatus() {
+      try {
+        const result = await api('/api/threads/' + encodeURIComponent(threadId) + '/status');
+        els.status.textContent = statusLabel(result.state);
+        if (result.lastError) els.status.textContent += ' · ' + result.lastError;
+        const submissionChanged = mergeSubmissionStates(result.submissions);
+        if (result.state === 'running' || result.state === 'resuming' || result.state === 'queued') {
+          const nearBottom = els.transcript.scrollHeight - els.transcript.clientHeight - els.transcript.scrollTop < 280;
+          const anchor = nearBottom ? null : captureAnchor();
+          const latest = await api('/api/threads/' + encodeURIComponent(threadId) + '/window?direction=latest&limit=${canonicalWindowDefaultLimit}');
+          const changed = mergeIncomingTurns(latest.items);
+          mergeSubmissionStates(latest.status?.submissions);
+          while (state.items.length > MAX_WINDOW) state.items.shift();
+          if (changed || submissionChanged) {
+            renderTurns(anchor);
+            if (nearBottom) requestAnimationFrame(() => { els.transcript.scrollTop = els.transcript.scrollHeight; });
+          }
+        } else if (submissionChanged) {
+          renderTurns(captureAnchor());
+        }
+      } catch (error) {
+        els.status.textContent = '状态异常';
+      }
+    }
+    function fileToAttachment(file) {
+      return new Promise((resolve, reject) => {
+        const reader = new FileReader();
+        reader.onload = async () => {
+          try {
+            const dataUrl = String(reader.result || '');
+            const contentsBase64 = dataUrl.includes(',') ? dataUrl.slice(dataUrl.indexOf(',') + 1) : dataUrl;
+            const uploaded = await api('/api/attachments', {
+              method: 'POST',
+              headers: { 'content-type': 'application/json' },
+              body: JSON.stringify({ name: file.name, type: file.type, contentsBase64 })
+            });
+            resolve({ id: uploaded.id, name: uploaded.name, url: uploaded.url, type: uploaded.mimeType, previewUrl: dataUrl });
+          } catch (error) { reject(error); }
+        };
+        reader.onerror = () => reject(reader.error || new Error('file read failed'));
+        reader.readAsDataURL(file);
+      });
+    }
+    function renderAttachments() {
+      els.attachments.classList.toggle('hidden', state.attachments.length === 0);
+      els.attachments.replaceChildren(...state.attachments.map((item) => {
+        const chip = document.createElement('span');
+        chip.className = 'attachment-chip';
+        const img = document.createElement('img');
+        img.src = item.previewUrl || item.url;
+        img.alt = '';
+        const label = document.createElement('span');
+        label.textContent = item.name || 'image';
+        chip.append(img, label);
+        return chip;
+      }));
+    }
+    function maybeLoadAroundViewport() {
+      if (state.restoring) return;
+      if (els.transcript.scrollTop < 80) void loadOlder();
+      if (els.transcript.scrollHeight - els.transcript.clientHeight - els.transcript.scrollTop < 80) loadNewerFromCache();
+    }
+    els.loadOlder.addEventListener('click', loadOlder);
+    els.transcript.addEventListener('scroll', maybeLoadAroundViewport, { passive: true });
+    if ('IntersectionObserver' in window) {
+      const olderObserver = new IntersectionObserver((entries) => {
+        if (entries.some((entry) => entry.isIntersecting)) void loadOlder();
+      }, { root: els.transcript, rootMargin: '160px 0px 0px 0px' });
+      olderObserver.observe(els.loadOlder);
+    }
+    state.viewportTimer = setInterval(maybeLoadAroundViewport, 300);
+    els.refreshThreads.addEventListener('click', loadThreads);
+    els.pickFile.addEventListener('click', () => els.fileInput.click());
+    els.fileInput.addEventListener('change', async () => {
+      const files = Array.from(els.fileInput.files || []);
+      els.fileInput.value = '';
+      for (const file of files) state.attachments.push(await fileToAttachment(file));
+      renderAttachments();
+    });
+    els.composer.addEventListener('submit', async (event) => {
+      event.preventDefault();
+      if (state.submitting) return;
+      const text = els.draft.value.trim();
+      if (!text && state.attachments.length === 0) return;
+      const attachments = state.attachments.map((item) => ({ id: item.id, url: item.url, name: item.name, type: item.type }));
+      const body = { clientRequestId: crypto.randomUUID(), mode: els.mode.value, input: text, attachments };
+      els.draft.value = '';
+      state.attachments = [];
+      renderAttachments();
+      state.submitting = true;
+      els.send.disabled = true;
+      try {
+        const result = await api('/api/threads/' + encodeURIComponent(threadId) + '/submit', {
+          method: 'POST',
+          headers: { 'content-type': 'application/json' },
+          body: JSON.stringify(body)
+        });
+        if (result.optimisticTurn) {
+          state.items.push(result.optimisticTurn);
+          while (state.items.length > MAX_WINDOW) state.items.shift();
+          renderTurns();
+          requestAnimationFrame(() => { els.transcript.scrollTop = els.transcript.scrollHeight; });
+        }
+        els.status.textContent = statusLabel(result.state);
+      } catch (error) {
+        const failed = optimisticFailureTurn(text, attachments, error.message || String(error));
+        state.items.push(failed);
+        renderTurns();
+      } finally {
+        state.submitting = false;
+        els.send.disabled = false;
+      }
+    });
+    function optimisticFailureTurn(text, attachments, error) {
+      return { id: 'failed-' + crypto.randomUUID(), threadId, status: 'failed', items: [
+        ...(text ? [{ id:'failed-text', type:'user_text', text, previewText:text, fullTextAvailable:false, contentLength:text.length }] : []),
+        ...attachments.map((a, i) => ({ id:'failed-image-' + i, type:'user_image', url:a.url }))
+      ], error };
+    }
+    Promise.all([loadThreads(), loadLatest()]).catch((error) => {
+      els.status.textContent = '加载失败';
+      els.title.textContent = error.message || String(error);
+    });
+    state.statusTimer = setInterval(pollStatus, 2000);
+  })();
+  </script>
+</body>
+</html>`;
+}
+
 const server = http.createServer((req, res) => {
   try {
     const url = new URL(req.url || "/", `http://${req.headers.host || "localhost"}`);
@@ -10694,6 +11733,92 @@ const server = http.createServer((req, res) => {
     }
     if (url.pathname === "/favicon.ico") {
       send(res, 200, { "Content-Type": "image/x-icon", "Cache-Control": "public, max-age=3600" });
+      return;
+    }
+    const localThreadMatch = url.pathname.match(/^\/local\/([^/]+)$/);
+    if (singleSurfaceEnabled && req.method === "GET" && localThreadMatch) {
+      const threadId = decodeURIComponent(localThreadMatch[1]);
+      send(res, 200, {
+        "Content-Type": "text/html; charset=utf-8",
+        "Cache-Control": "no-store",
+      }, singleSurfaceHtml(threadId));
+      return;
+    }
+    if (req.method === "GET" && url.pathname === "/api/threads") {
+      sendJson(res, 200, canonicalThreadList({
+        limit: Number.parseInt(url.searchParams.get("limit") || "40", 10),
+        cursor: url.searchParams.get("cursor") || null,
+      }));
+      return;
+    }
+    const apiWindowMatch = url.pathname.match(/^\/api\/threads\/([^/]+)\/window$/);
+    if (req.method === "GET" && apiWindowMatch) {
+      const result = canonicalWindowResponse({
+        threadId: decodeURIComponent(apiWindowMatch[1]),
+        cursor: url.searchParams.get("cursor") || null,
+        direction: url.searchParams.get("direction") || "latest",
+        limit: Number.parseInt(url.searchParams.get("limit") || "", 10),
+      });
+      if (!result) {
+        sendJson(res, 404, { error: "thread window unavailable" });
+        return;
+      }
+      sendJson(res, 200, result);
+      return;
+    }
+    const apiStatusMatch = url.pathname.match(/^\/api\/threads\/([^/]+)\/status$/);
+    if (req.method === "GET" && apiStatusMatch) {
+      const threadId = decodeURIComponent(apiStatusMatch[1]);
+      const windowResult = canonicalWindowResponse({ threadId, limit: 5 });
+      if (!windowResult) {
+        sendJson(res, 404, { error: "thread status unavailable" });
+        return;
+      }
+      sendJson(res, 200, windowResult.status);
+      return;
+    }
+    const apiSubmitMatch = url.pathname.match(/^\/api\/threads\/([^/]+)\/submit$/);
+    if (req.method === "POST" && apiSubmitMatch) {
+      readJsonRequest(req)
+        .then((body) => {
+          const threadId = decodeURIComponent(apiSubmitMatch[1]);
+          if (!threadRecord(threadId)) {
+            sendJson(res, 404, { error: "thread not found" });
+            return;
+          }
+          sendJson(res, 202, acceptCanonicalSubmission(threadId, body));
+        })
+        .catch((error) => sendJson(res, 400, { error: error.message || String(error) }));
+      return;
+    }
+    if (req.method === "POST" && url.pathname === "/api/attachments") {
+      readJsonRequest(req)
+        .then((body) => sendJson(res, 200, storeCanonicalAttachment(body)))
+        .catch((error) => sendJson(res, 400, { error: error.message || String(error) }));
+      return;
+    }
+    const apiAttachmentMatch = url.pathname.match(/^\/api\/attachments\/([^/]+)$/);
+    if (req.method === "GET" && apiAttachmentMatch) {
+      const token = decodeURIComponent(apiAttachmentMatch[1]);
+      const entry = canonicalAttachmentTokens.get(token);
+      if (!entry || !entry.path || !fs.existsSync(entry.path)) {
+        send(res, 404, { "Content-Type": "text/plain; charset=utf-8", "Cache-Control": "no-store" }, "Attachment not found");
+        return;
+      }
+      sendStaticFile(req, res, entry.path, {
+        "Content-Type": entry.mimeType || "application/octet-stream",
+        "Cache-Control": "private, max-age=3600",
+      }, url);
+      return;
+    }
+    const apiTextMatch = url.pathname.match(/^\/api\/text\/([a-f0-9]+)$/);
+    if (req.method === "GET" && apiTextMatch) {
+      const entry = canonicalFullTextCache.get(apiTextMatch[1]);
+      if (!entry) {
+        sendJson(res, 404, { error: "text not found" });
+        return;
+      }
+      sendJson(res, 200, { text: entry.text || "" });
       return;
     }
     if (url.pathname === "/auth/device/start" && req.method === "POST") {
@@ -10743,51 +11868,6 @@ const server = http.createServer((req, res) => {
         "Content-Type": "text/javascript; charset=utf-8",
         "Cache-Control": "no-store",
       }, browserBridgeScript(), `bridge:${bridgeScriptVersion}:${assetPatchVersion}`);
-      return;
-    }
-    if (url.pathname === "/codexapp-thread-fast") {
-      const threadId = url.searchParams.get("threadId") || "";
-      const result = largeThreadReadFastPathResponse({ threadId });
-      if (!result) {
-        send(res, 404, { "Content-Type": "application/json" }, JSON.stringify({ error: "thread fast path unavailable" }));
-        return;
-      }
-      sendStaticBody(req, res, 200, {
-        "Content-Type": "application/json; charset=utf-8",
-        "Cache-Control": "no-store",
-      }, JSON.stringify(result));
-      return;
-    }
-    if (url.pathname === "/codexapp-thread-turns") {
-      const threadId = url.searchParams.get("threadId") || "";
-      const cursor = url.searchParams.get("cursor") || null;
-      const limit = Number.parseInt(url.searchParams.get("limit") || "", 10);
-      const result = largeThreadTurnsFastPathResponse({
-        threadId,
-        cursor,
-        limit: Number.isFinite(limit) && limit > 0 ? limit : historyWindowMaxTurns,
-      });
-      if (!result) {
-        send(res, 404, { "Content-Type": "application/json" }, JSON.stringify({ error: "thread turns fast path unavailable" }));
-        return;
-      }
-      sendStaticBody(req, res, 200, {
-        "Content-Type": "application/json; charset=utf-8",
-        "Cache-Control": "no-store",
-      }, JSON.stringify(result));
-      return;
-    }
-    if (url.pathname === "/codexapp-thread-status") {
-      const threadId = url.searchParams.get("threadId") || "";
-      const result = largeThreadStatusFastPathResponse({ threadId });
-      if (!result) {
-        send(res, 404, { "Content-Type": "application/json" }, JSON.stringify({ error: "thread status unavailable" }));
-        return;
-      }
-      sendStaticBody(req, res, 200, {
-        "Content-Type": "application/json; charset=utf-8",
-        "Cache-Control": "no-store",
-      }, JSON.stringify(result));
       return;
     }
     const filePath = safeJoin(webviewDir, url.pathname);

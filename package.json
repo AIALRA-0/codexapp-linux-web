@@ -4,7 +4,7 @@
   "license": "MIT",
   "type": "commonjs",
   "scripts": {
-    "check": "node --check web-server.js && node --check login-proxy.js"
+    "check": "node --check web-server.js && node --check login-proxy.js && node scripts/check-guardrails.js"
   },
   "dependencies": {
     "ws": "^8.21.0"

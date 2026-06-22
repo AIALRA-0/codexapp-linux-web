@@ -1,57 +1,68 @@
 # codexapp-linux-web
 
-CodexApp Linux Web serves the Codex desktop webview from a Linux host and connects it to a persistent `codex app-server`. It keeps long-running agent sessions usable in a browser: fast project lists, lightweight long-thread windows, cursor-based history, managed permissions, official Codex device login, and resilient send handling.
+CodexApp Linux Web is a browser surface for Codex on a Linux host. It keeps the official Codex app-server responsible for execution, while the web layer owns fast thread lists, long-history windows, rendering, attachments, status polling, and submit reliability.
 
 ![CodexApp Linux Web overview](docs/assets/codexapp-overview.png)
 
 ## Highlights
 
-- **Native Codex surface**: serves the bundled Codex webview and fills the host APIs expected by the desktop app.
-- **Persistent backend**: runs `codex app-server --remote-control` separately so web bridge restarts do not stop active tasks.
-- **Large-thread rescue window**: opens very large rollout files through a lightweight browser page first, avoiding the full app bundle and full transcript hydrate.
-- **Cursor history**: loads older turns in bounded pages and keeps the scroll position stable while the DOM window stays small.
-- **Reliable sends**: coalesces duplicate clicks, clears the composer immediately, and queues large-thread sends until app-server resume is ready.
-- **Official login path**: wraps `codex login --device-auth`; OpenAI and Google sign-in happen on OpenAI’s verification page.
+- **Official execution path**: delegates resume, start, steer, interrupt, permissions, model settings, and tool execution to `codex app-server`.
+- **Single web conversation surface**: `/local/<thread-id>` uses one CodexApp Web UI for sidebar, transcript, composer, attachments, and status.
+- **Windowed long-history loading**: opens huge threads from a small latest window, loads older pages by cursor, and keeps the DOM capped.
+- **Stable scroll anchors**: prepending history restores the first visible turn by id, so the viewport does not jump.
+- **Reliable submit state machine**: text, image-only messages, plan, goal, and steer share one idempotent `/submit` endpoint.
+- **Safe public defaults**: README, screenshots, and APIs avoid exposing local absolute paths, private domains, or tokens.
 
-![Long thread history mode](docs/assets/long-thread-history.png)
+![Windowed long-thread history](docs/assets/long-thread-history.png)
 
 ## Architecture
 
 ```text
-browser
+Browser
   |
   | HTTP / WebSocket
   v
-web-server.js
-  |-- Codex webview asset server
-  |-- browser bridge and host API shim
-  |-- large rollout cursor reader
-  |-- permission and request normalizers
-  |-- official device-auth wrapper
+CodexApp Web
+  |-- thread index and status APIs
+  |-- canonical history window adapter
+  |-- bounded transcript renderer
+  |-- idempotent submit and attachment APIs
+  |-- optional device-auth/login wrapper
   |
   v
 codex app-server --remote-control
   |
   v
-CODEX_HOME sessions, config, auth, tools, workspaces
+Codex sessions, auth, tools, and workspaces
 ```
 
-Runtime state is intentionally outside the repository.
+The web process can restart independently. Keep the app-server process alive to avoid interrupting running Codex tasks.
 
-| Path | Purpose |
+## API
+
+| Endpoint | Purpose |
 | --- | --- |
-| `web-server.js` | HTTP/WebSocket bridge, asset patcher, long-thread fast path, host API shim. |
-| `login-proxy.js` | Optional outer username/password guard for restricted deployments. |
-| `systemd/` | Example units for the persistent app-server and web bridge. |
-| `docs/assets/` | Redacted README screenshots. |
+| `GET /health` | Liveness probe. |
+| `GET /api/threads?limit=` | Lightweight thread index for the sidebar. |
+| `GET /api/threads/:threadId/window?cursor=&direction=&limit=` | Canonical transcript window with `olderCursor` / `hasOlder`. |
+| `GET /api/threads/:threadId/status` | Running, queued, permission, failure, and submission state. |
+| `POST /api/threads/:threadId/submit` | Idempotent text, image, plan, goal, and steer submission. |
+| `POST /api/attachments` | Upload browser attachments without exposing local filesystem paths. |
+| `GET /api/attachments/:id` | Read-only attachment rendering. |
+| `POST /auth/device/start` | Optional wrapper around official Codex device auth. |
+| `GET /auth/device/status` | Sanitized device-auth status. |
+| `POST /auth/logout` | Official Codex logout wrapper. |
+
+Canonical history data is never truncated. Large text items return preview metadata and can be expanded on demand; image-only user messages are valid messages.
 
 ## Requirements
 
-- Linux host with Node.js 20+
-- Global Codex CLI (`@openai/codex`), verified with `0.141.0`
+- Linux host
+- Node.js 20+
+- Codex CLI with `codex app-server`
 - Persistent `CODEX_HOME`
 - TLS reverse proxy for public deployments
-- Secrets stored outside this repository, for example in an `EnvironmentFile`
+- Secrets stored outside the repository, for example in an environment file
 
 ## Quick Start
 
@@ -71,9 +82,20 @@ node web-server.js
 
 Open `http://127.0.0.1:13913`.
 
+## Configuration
+
+| Variable | Default | Meaning |
+| --- | --- | --- |
+| `CODEXAPP_SINGLE_SURFACE` | `true` | Serve the CodexApp Web conversation surface at `/local/<thread-id>`. |
+| `CODEXAPP_CANONICAL_WINDOW_LIMIT` | `8` | Turn window size per history fetch. |
+| `CODEXAPP_CANONICAL_WINDOW_CACHE_LIMIT` | `32` | Maximum turn nodes kept near the viewport. |
+| `CODEXAPP_EXTERNAL_APP_SERVER` | `false` | Use an already-running Codex app-server. |
+| `CODEXAPP_WEB_PORT` | `13913` | HTTP port for the web bridge. |
+| `CODEXAPP_STATE_DIR` | `./state` | Runtime state directory; do not commit it. |
+
 ## Production
 
-The app-server and bridge are separate services. Restart the bridge for web changes; leave app-server running to preserve active tasks. The app-server unit uses `scripts/codexapp-app-server-supervisor.sh`: if an existing Codex app-server is already listening, it adopts that listener instead of killing active work, then starts a fresh app-server only after the listener exits.
+Run the app-server and web bridge as separate services. Example systemd units live in `systemd/`.
 
 ```bash
 sudo install -d -m 0755 \
@@ -92,53 +114,29 @@ sudo systemctl enable --now codexapp-web-green.service
 curl -fsS http://127.0.0.1:13913/health
 ```
 
-## Long Threads
-
-Large persisted threads are detected from the rollout file size. The default `/local/<thread-id>` route serves a lightweight long-thread window instead of forcing the full Codex app bundle to hydrate a huge transcript. Add `?codexapp_official=1` to open the full official UI when needed.
-
-The lightweight window:
-
-- fetches only the latest bounded turn window;
-- loads older history through cursor pages;
-- skips overlapping rollout pages automatically;
-- keeps at most a small DOM window visible;
-- preserves scroll position when prepending history;
-- keeps the composer available while app-server resume happens in the background.
-
-The app-server resume path still uses Codex protocol shape with `excludeTurns: true` and `initialTurnsPage`.
-
-## Public Endpoints
-
-| Endpoint | Purpose |
-| --- | --- |
-| `GET /health` | Liveness probe. |
-| `POST /auth/device/start` | Starts official `codex login --device-auth` and returns OpenAI verification URL plus user code. |
-| `GET /auth/device/status` | Returns device-auth state and sanitized `codex login status`. |
-| `POST /auth/logout` | Runs official `codex logout`. |
-| `GET /codexapp-thread-fast` | Internal lightweight latest-window endpoint for very large local threads. |
-| `GET /codexapp-thread-turns` | Internal cursor history endpoint for very large local threads. |
-| `GET /codexapp-thread-status` | Internal status endpoint for very large local threads. |
-
-MCP/WebSocket requests continue to use Codex app-server methods such as `thread/read`, `thread/resume`, `thread/status`, `thread/turns/list`, `turn/start`, and `turn/steer`.
+The app-server supervisor adopts an existing listener instead of killing active work. Restart the web service for UI/API changes; leave the app-server running unless you intentionally want to stop active tasks.
 
 ## Verification
 
-Latest production-style browser checks, June 22, 2026:
+Current browser verification uses a real Chromium session against the web app:
 
-- Codex CLI local version and npm latest both `0.141.0`.
-- Long thread default route returns a 736-byte lightweight HTML shell with no `app-main` bundle.
-- Read-only large thread open: visible shell at `563ms` in browser marks; later repeat remained under `3s`.
-- Long thread history paging: two cursor HTTP pages loaded in `235ms` and `158ms`; DOM stayed bounded and scroll offset was compensated.
-- Disposable large-thread send: input cleared immediately, one optimistic message rendered, server ACK arrived, no duplicate bubble.
-- Device login wrapper returned OpenAI official `auth.openai.com` verification URL and a one-time code without exposing tokens.
-- `npm run check` passes.
-- `npm audit` reports `0` vulnerabilities.
+- Long thread first readable window: under 1 second locally.
+- Body height locked to viewport; transcript is the only scroll container.
+- Upward history paging: 16 consecutive pages, anchor delta `0px`.
+- Sliding window: DOM capped at 32 turns while history continues by cursor.
+- Downward cache restore: newer window returns without duplicate turns.
+- Console errors: `0`.
+- Failed requests: `0` after a clean run.
+- Text submit: double click produced one optimistic user message, composer cleared immediately.
+- Image-only submit: accepted with one `user_image` item and no text item.
+- Plan, goal, and steer: all accepted through the same `/submit` path.
+- Guardrails: `npm run check` rejects old exposed fast routes, text-only user filtering, and visible truncation markers.
 
 ## Security
 
-- Do not commit `CODEX_HOME`, auth files, logs, browser traces, `.env`, or local sync scripts.
+- Do not commit `CODEX_HOME`, auth files, logs, browser traces, `.env`, local sync scripts, or runtime state.
 - OpenAI login is delegated to Codex CLI device auth; this project does not implement Google OAuth, scrape cookies, or return access tokens.
-- The optional `login-proxy.js` cookie uses `HttpOnly`, `SameSite=Lax`, and `Secure` when served through HTTPS.
+- Attachment responses expose stable attachment ids, not local file paths.
 - Run a diff and secret scan before publishing:
 
 ```bash
