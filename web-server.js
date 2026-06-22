@@ -36,6 +36,7 @@ const assetPatchVersion = process.env.CODEXAPP_ASSET_PATCH_VERSION || (() => {
   }
 })();
 const HOST_METHOD_NOT_HANDLED = Symbol("host-method-not-handled");
+const queuedFollowupSendLockTtlMs = 30000;
 const codexPackageJsonPath = process.env.CODEXAPP_CODEX_PACKAGE_JSON || null;
 const clientName = process.env.CODEXAPP_CLIENT_NAME || "codex-app-web-gateway";
 const appDisplayName = process.env.CODEXAPP_DISPLAY_NAME || "Codex App Web Gateway";
@@ -118,6 +119,9 @@ const largeThreadFastPathMaxItemTextBytes = numberFromEnv("CODEXAPP_LARGE_THREAD
 const largeThreadFastPathMaxItemsPerTurn = numberFromEnv("CODEXAPP_LARGE_THREAD_FAST_PATH_MAX_ITEMS_PER_TURN", 8, 2, 100);
 const largeThreadStaleInProgressMs = numberFromEnv("CODEXAPP_LARGE_THREAD_STALE_IN_PROGRESS_MS", 2 * 60 * 60 * 1000, 5 * 60 * 1000, 7 * 24 * 60 * 60 * 1000);
 const largeThreadFastPathCursorPrefix = "codexapp-large-rollout:";
+const largeThreadFastPathPageCacheTtlMs = numberFromEnv("CODEXAPP_LARGE_THREAD_FAST_PATH_PAGE_CACHE_TTL_MS", 60 * 1000, 1000, 10 * 60 * 1000);
+const largeThreadFastPathPageCacheMaxEntries = numberFromEnv("CODEXAPP_LARGE_THREAD_FAST_PATH_PAGE_CACHE_MAX_ENTRIES", 64, 4, 1024);
+const largeThreadFastPathPageCache = new Map();
 const largeThreadAppResumeTimeoutMs = numberFromEnv("CODEXAPP_LARGE_THREAD_APP_RESUME_TIMEOUT_MS", 120000, 10000, 600000);
 const largeThreadSubmitResumeTimeoutMs = numberFromEnv("CODEXAPP_LARGE_THREAD_SUBMIT_RESUME_TIMEOUT_MS", 8000, 1000, 60000);
 const largeThreadPrewarmOnResumeEnabled = parseBoolean(process.env.CODEXAPP_LARGE_THREAD_PREWARM_ON_RESUME, false);
@@ -1418,6 +1422,49 @@ function largeThreadCursorEndOffset(cursor, size) {
   return Math.min(offset, size);
 }
 
+function cloneLargeThreadFastPathPage(page = null) {
+  if (!page || !Array.isArray(page.turns)) return null;
+  return {
+    turns: page.turns.map((turn) => JSON.parse(JSON.stringify(turn))),
+    nextCursor: page.nextCursor ?? null,
+  };
+}
+
+function largeThreadFastPathPageCacheKey(info, params = {}, endOffset, maxTurns, chunkBytes, maxScanBytes) {
+  return [
+    info.threadId,
+    info.signature,
+    endOffset,
+    params.cursor ?? "",
+    maxTurns,
+    chunkBytes,
+    maxScanBytes,
+  ].join("|");
+}
+
+function getCachedLargeThreadFastPathPage(key) {
+  const entry = largeThreadFastPathPageCache.get(key);
+  if (!entry) return null;
+  if (Date.now() - Number(entry.storedAt || 0) > largeThreadFastPathPageCacheTtlMs) {
+    largeThreadFastPathPageCache.delete(key);
+    return null;
+  }
+  largeThreadFastPathPageCache.delete(key);
+  largeThreadFastPathPageCache.set(key, entry);
+  return cloneLargeThreadFastPathPage(entry.page);
+}
+
+function setCachedLargeThreadFastPathPage(key, page) {
+  const cloned = cloneLargeThreadFastPathPage(page);
+  if (!key || !cloned) return;
+  largeThreadFastPathPageCache.set(key, { storedAt: Date.now(), page: cloned });
+  while (largeThreadFastPathPageCache.size > largeThreadFastPathPageCacheMaxEntries) {
+    const oldestKey = largeThreadFastPathPageCache.keys().next().value;
+    if (!oldestKey) break;
+    largeThreadFastPathPageCache.delete(oldestKey);
+  }
+}
+
 function readLargeRolloutChunk(rolloutPath, endOffset, chunkBytes = largeThreadFastPathChunkBytes) {
   const end = Math.max(0, Number(endOffset) || 0);
   const requestedBytes = Number.isFinite(Number(chunkBytes)) && Number(chunkBytes) > 0
@@ -1498,18 +1545,112 @@ function textFromRolloutContent(content, maxChars = largeThreadFastPathMaxItemTe
   return parts.join("\n");
 }
 
+function rolloutUserContentFromPayload(payload = {}) {
+  const content = payload.content;
+  const defaultTextElements = Array.isArray(payload.text_elements) ? payload.text_elements : [];
+  if (typeof payload.message === "string" && payload.message.length > 0) {
+    return [{ type: "text", text: truncateLargeThreadText(payload.message), text_elements: defaultTextElements }];
+  }
+  if (typeof content === "string" && content.length > 0) {
+    return [{ type: "text", text: truncateLargeThreadText(content), text_elements: defaultTextElements }];
+  }
+  if (!Array.isArray(content)) return [];
+  const parts = [];
+  for (const part of content) {
+    if (typeof part === "string") {
+      if (part.length > 0) parts.push({ type: "text", text: truncateLargeThreadText(part), text_elements: defaultTextElements });
+      continue;
+    }
+    if (!part || typeof part !== "object") continue;
+    const type = String(part.type || "");
+    if (type === "input_text" || type === "text" || typeof part.text === "string" || typeof part.message === "string") {
+      const text = typeof part.text === "string" ? part.text : (typeof part.message === "string" ? part.message : "");
+      if (text.length > 0) {
+        parts.push({
+          type: "text",
+          text: truncateLargeThreadText(text),
+          text_elements: Array.isArray(part.text_elements) ? part.text_elements : defaultTextElements,
+        });
+      }
+      continue;
+    }
+    if (type === "input_image" || type === "image") {
+      const url = part.image_url || part.imageUrl || part.url;
+      if (typeof url === "string" && url.length > 0) {
+        parts.push({
+          type: "image",
+          url,
+          ...(typeof part.detail === "string" ? { detail: part.detail } : {}),
+        });
+      }
+      continue;
+    }
+    if (type === "localImage" || type === "local_image") {
+      const imagePath = part.path || part.localPath || part.image_path;
+      if (typeof imagePath === "string" && imagePath.length > 0) {
+        parts.push({ type: "localImage", path: imagePath });
+      }
+    }
+  }
+  return parts;
+}
+
+function largeThreadUserContentText(content) {
+  if (!Array.isArray(content)) return "";
+  return content
+    .filter((part) => part?.type === "text" && typeof part.text === "string")
+    .map((part) => part.text)
+    .join("\n");
+}
+
+function normalizeLargeThreadUserText(content) {
+  return largeThreadUserContentText(content).replace(/\s+/g, " ").trim();
+}
+
+function largeThreadUserImageCount(content) {
+  if (!Array.isArray(content)) return 0;
+  return content.filter((part) => {
+    if (!part || typeof part !== "object") return false;
+    return part.type === "image" || part.type === "localImage" || typeof part.url === "string" || typeof part.path === "string";
+  }).length;
+}
+
+function largeThreadMergeUserContent(a, b) {
+  const merged = [];
+  const seenImages = new Set();
+  const seenTexts = new Set();
+  for (const source of [a, b]) {
+    for (const part of Array.isArray(source) ? source : []) {
+      if (!part || typeof part !== "object") continue;
+      if (part.type === "text") {
+        const key = typeof part.text === "string" ? part.text.replace(/\s+/g, " ").trim() : "";
+        if (key && seenTexts.has(key)) continue;
+        if (key) seenTexts.add(key);
+      }
+      if (part.type === "image" || part.type === "localImage") {
+        const key = `${part.type}:${part.url || part.path || ""}`;
+        if (seenImages.has(key)) continue;
+        seenImages.add(key);
+      }
+      merged.push(part);
+    }
+  }
+  return merged;
+}
+
 function largeThreadItemId(turn) {
   return `item-${Array.isArray(turn.items) ? turn.items.length + 1 : 1}`;
 }
 
 function makeLargeThreadUserItem(turn, payload) {
-  const text = truncateLargeThreadText(payload.message ?? textFromRolloutContent(payload.content));
+  const content = rolloutUserContentFromPayload(payload);
+  const text = largeThreadUserContentText(content);
   if (!text.trim()) return null;
   return {
     type: "userMessage",
-    id: largeThreadItemId(turn),
+    id: typeof payload.id === "string" && payload.id.length > 0 ? payload.id : largeThreadItemId(turn),
     clientId: typeof payload.client_id === "string" ? payload.client_id : null,
-    content: [{ type: "text", text, text_elements: Array.isArray(payload.text_elements) ? payload.text_elements : [] }],
+    content,
   };
 }
 
@@ -1527,6 +1668,20 @@ function makeLargeThreadAgentItem(turn, payload, fallbackPhase = "commentary") {
 
 function pushLargeThreadItem(turn, item) {
   if (!turn || !item) return;
+  if (item.type === "userMessage") {
+    const itemText = normalizeLargeThreadUserText(item.content);
+    const previous = turn.items[turn.items.length - 1];
+    if (itemText && previous?.type === "userMessage" && normalizeLargeThreadUserText(previous.content) === itemText) {
+      const previousImages = largeThreadUserImageCount(previous.content);
+      const itemImages = largeThreadUserImageCount(item.content);
+      previous.content = largeThreadMergeUserContent(
+        itemImages > previousImages ? item.content : previous.content,
+        itemImages > previousImages ? previous.content : item.content,
+      );
+      if (!previous.clientId && item.clientId) previous.clientId = item.clientId;
+      return;
+    }
+  }
   if (item.type === "agentMessage") {
     const previous = turn.items[turn.items.length - 1];
     if (previous?.type === "agentMessage"
@@ -1543,8 +1698,39 @@ function pushLargeThreadItem(turn, item) {
   turn.items.push(item);
 }
 
+function dedupeLargeThreadUserItems(turn) {
+  if (!turn || !Array.isArray(turn.items) || turn.items.length < 2) return;
+  const byText = new Map();
+  const dropIndexes = new Set();
+  turn.items.forEach((item, index) => {
+    if (item?.type !== "userMessage") return;
+    const text = normalizeLargeThreadUserText(item.content);
+    if (!text) return;
+    const previous = byText.get(text);
+    if (!previous) {
+      byText.set(text, { item, index });
+      return;
+    }
+    const previousImages = largeThreadUserImageCount(previous.item.content);
+    const itemImages = largeThreadUserImageCount(item.content);
+    if (itemImages > previousImages) {
+      item.content = largeThreadMergeUserContent(item.content, previous.item.content);
+      dropIndexes.add(previous.index);
+      byText.set(text, { item, index });
+    } else {
+      previous.item.content = largeThreadMergeUserContent(previous.item.content, item.content);
+      dropIndexes.add(index);
+    }
+  });
+  if (dropIndexes.size > 0) {
+    turn.items = turn.items.filter((_item, index) => !dropIndexes.has(index));
+  }
+}
+
 function compactLargeThreadTurnItems(turn) {
-  if (!turn || !Array.isArray(turn.items) || turn.items.length <= largeThreadFastPathMaxItemsPerTurn) return;
+  if (!turn || !Array.isArray(turn.items)) return;
+  dedupeLargeThreadUserItems(turn);
+  if (turn.items.length <= largeThreadFastPathMaxItemsPerTurn) return;
   const originalItems = turn.items;
   const firstUser = originalItems.find((item) => item?.type === "userMessage") || null;
   const tailBudget = firstUser ? Math.max(0, largeThreadFastPathMaxItemsPerTurn - 2) : Math.max(1, largeThreadFastPathMaxItemsPerTurn - 1);
@@ -1670,9 +1856,15 @@ function parseLargeRolloutTurns(lines, chunkStart) {
     }
     const timestamp = epochSecondsFromRolloutTimestamp(event.timestamp);
     if (current && timestamp) largeThreadSetTurnLastEventAt(current, timestamp);
-    if (event?.type === "response_item") continue;
     const payload = event?.payload && typeof event.payload === "object" ? event.payload : {};
     const type = payload.type || event.type;
+    if (event?.type === "response_item") {
+      if (type === "message" && payload.role === "user") {
+        const turn = ensureTurn(null, timestamp, lineOffset);
+        pushLargeThreadItem(turn, makeLargeThreadUserItem(turn, payload));
+      }
+      continue;
+    }
     if (type === "task_started") {
       finishCurrent();
       current = ensureTurn(payload.turn_id, Number(payload.started_at) || timestamp, lineOffset);
@@ -1750,6 +1942,9 @@ function largeThreadTurnsFastPathPage(params = {}) {
   const configuredMaxTurns = isInitialPage ? largeThreadFastPathInitialMaxTurns : largeThreadFastPathMaxTurns;
   const maxTurns = largeThreadRequestedTurnLimit(params, configuredMaxTurns);
   const maxScanBytes = Math.max(chunkBytes, largeThreadFastPathMaxScanBytes);
+  const cacheKey = largeThreadFastPathPageCacheKey(info, params, endOffset, maxTurns, chunkBytes, maxScanBytes);
+  const cachedPage = getCachedLargeThreadFastPathPage(cacheKey);
+  if (cachedPage) return cachedPage;
   let nextEndOffset = endOffset;
   let scannedBytes = 0;
   let chunk = null;
@@ -1776,7 +1971,9 @@ function largeThreadTurnsFastPathPage(params = {}) {
     }
   }
   const nextCursor = nextOffset > 0 ? `${largeThreadFastPathCursorPrefix}${nextOffset}` : null;
-  return { turns, nextCursor, chunk };
+  const page = { turns, nextCursor };
+  setCachedLargeThreadFastPathPage(cacheKey, page);
+  return page;
 }
 
 function largeThreadTurnsFastPathResponse(params = {}) {
@@ -2808,6 +3005,41 @@ function textInputFromPromptHistory(text) {
   const trimmed = typeof text === "string" ? text.trim() : "";
   if (!trimmed) return [];
   return [{ type: "text", text: trimmed, text_elements: [] }];
+}
+
+function queuedFollowupText(message = {}) {
+  if (typeof message?.text === "string" && message.text.trim()) return message.text.trim();
+  if (typeof message?.context?.prompt === "string" && message.context.prompt.trim()) return message.context.prompt.trim();
+  return "";
+}
+
+function queuedFollowupInput(message = {}) {
+  return textInputFromPromptHistory(queuedFollowupText(message));
+}
+
+function queuedFollowupCwd(message = {}) {
+  if (typeof message?.cwd === "string" && message.cwd.length > 0) return message.cwd;
+  if (typeof message?.context?.cwd === "string" && message.context.cwd.length > 0) return message.context.cwd;
+  const roots = Array.isArray(message?.context?.workspaceRoots) ? message.context.workspaceRoots : [];
+  return typeof roots[0] === "string" && roots[0].length > 0 ? roots[0] : undefined;
+}
+
+function queuedFollowupResponseMetadata(message = {}) {
+  return isPlainObject(message?.responsesapiClientMetadata) ? message.responsesapiClientMetadata : undefined;
+}
+
+function queuedFollowupStartParams(threadId, message = {}) {
+  const params = {
+    threadId,
+    input: queuedFollowupInput(message),
+    clientUserMessageId: typeof message?.id === "string" ? message.id : undefined,
+    responsesapiClientMetadata: queuedFollowupResponseMetadata(message),
+  };
+  const cwd = queuedFollowupCwd(message);
+  if (cwd) params.cwd = cwd;
+  if (Array.isArray(message?.context?.commentAttachments)) params.commentAttachments = message.context.commentAttachments;
+  if (Array.isArray(message?.context?.fileAttachments)) params.attachments = message.context.fileAttachments;
+  return params;
 }
 
 function turnInputSignature(threadId, inputOrText) {
@@ -4155,6 +4387,24 @@ function browserBridgeScript() {
       .join("\\n\\n");
   }
 
+  function codexappFastShellImages(turn) {
+    const images = [];
+    const collect = (value) => {
+      if (Array.isArray(value)) {
+        value.forEach(collect);
+        return;
+      }
+      if (!value || typeof value !== "object") return;
+      const src = value.url || value.imageUrl || value.image_url || value.path;
+      if ((value.type === "image" || value.type === "localImage" || value.type === "input_image") && typeof src === "string" && src.length > 0) {
+        images.push(src);
+      }
+      if (Array.isArray(value.content)) collect(value.content);
+    };
+    for (const item of Array.isArray(turn?.items) ? turn.items : []) collect(item?.content);
+    return images;
+  }
+
   function codexappFastShellMcpRequest(method, params = {}, timeoutMs = 120000) {
     const id = "fast-shell-" + randomBridgeId();
     return new Promise((resolve, reject) => {
@@ -4220,7 +4470,23 @@ function browserBridgeScript() {
     block.dataset.codexappTurnKey = codexappFastShellTurnKey(turn, index);
     block.style.cssText = "margin:14px 0;padding:14px 16px;border-radius:8px;background:" + (turn?.status === "inProgress" ? "#fff8ef" : "#f6f6f6") + ";white-space:pre-wrap;overflow-wrap:anywhere;";
     const text = codexappFastShellTurnText(turn);
-    block.textContent = text || (turn?.status === "inProgress" ? "正在运行..." : "");
+    const textNode = document.createElement("div");
+    textNode.textContent = text || (turn?.status === "inProgress" ? "正在运行..." : "");
+    block.appendChild(textNode);
+    const images = codexappFastShellImages(turn);
+    if (images.length > 0) {
+      const gallery = document.createElement("div");
+      gallery.style.cssText = "display:flex;flex-wrap:wrap;gap:8px;margin-top:10px;";
+      images.slice(0, 8).forEach((src, imageIndex) => {
+        const img = document.createElement("img");
+        img.src = src;
+        img.alt = "attachment " + (imageIndex + 1);
+        img.loading = "lazy";
+        img.style.cssText = "max-width:min(220px,100%);max-height:180px;border-radius:8px;border:1px solid #ddd;object-fit:contain;background:#fff;";
+        gallery.appendChild(img);
+      });
+      block.appendChild(gallery);
+    }
     return block;
   }
 
@@ -4346,11 +4612,52 @@ function browserBridgeScript() {
     return false;
   }
 
+  function codexappRootHasVisibleOfficialThread(root, threadId = null) {
+    if (!root) return false;
+    const rootStyle = getComputedStyle(root);
+    if (rootStyle.display === "none" || rootStyle.visibility === "hidden") return false;
+    const activeThreadId = typeof threadId === "string" && threadId.length > 0 ? threadId : codexappThreadIdFromPath();
+    const marked = root.querySelector("[data-codexapp-conversation-id]");
+    if (activeThreadId && marked?.getAttribute?.("data-codexapp-conversation-id") !== activeThreadId) return false;
+    const scroller = root.querySelector(".thread-scroll-container");
+    if (!(scroller instanceof HTMLElement) || !visibleElement(scroller)) return false;
+    return (scroller.innerText || scroller.textContent || "").trim().length > 20;
+  }
+
   function codexappDismissFastThreadShellIfReady() {
     const root = document.getElementById("root");
     const shell = document.getElementById("codexapp-fast-thread-shell");
     const threadId = shell?.__codexappFastShellState?.threadId || codexappThreadIdFromPath();
     if (!shell || !codexappRootHasOfficialThread(root, threadId)) return false;
+    const now = performance.now();
+    if (root && (getComputedStyle(root).display === "none" || getComputedStyle(root).visibility === "hidden")) {
+      root.style.display = "";
+      root.style.visibility = "";
+      delete root.dataset.codexappFastHidden;
+      root.removeAttribute("aria-hidden");
+      shell.__codexappOfficialShownAt = now;
+      return false;
+    }
+    if (!codexappRootHasVisibleOfficialThread(root, threadId)) {
+      shell.__codexappOfficialReadyAt = 0;
+      return false;
+    }
+    if (!shell.__codexappOfficialShownAt) {
+      shell.__codexappOfficialShownAt = now;
+      return false;
+    }
+    if (now - shell.__codexappOfficialShownAt < 700) return false;
+    if (!shell.__codexappOfficialReadyAt) {
+      shell.__codexappOfficialReadyAt = now;
+      return false;
+    }
+    if (now - shell.__codexappOfficialReadyAt < 700) return false;
+    if (root) {
+      root.style.display = "";
+      root.style.visibility = "";
+      delete root.dataset.codexappFastHidden;
+      root.removeAttribute("aria-hidden");
+    }
     shell.remove();
     codexappLoadMarks.fastShellDismissedAt ??= performance.now();
     return true;
@@ -4381,9 +4688,15 @@ function browserBridgeScript() {
     if (!thread || turns.length === 0) return false;
     const mount = document.body || document.documentElement;
     if (!mount) return false;
-    document.getElementById("codexapp-fast-thread-shell")?.remove();
+    const existingShell = document.getElementById("codexapp-fast-thread-shell");
+    const existingThreadId = existingShell?.__codexappFastShellState?.threadId;
+    const nextThreadId = thread.id || thread.sessionId || codexappThreadIdFromPath();
+    if (existingShell && existingThreadId === nextThreadId) return true;
+    existingShell?.remove();
     if (window.__codexappLongThreadRescue && root) {
-      root.style.display = "none";
+      root.style.display = "";
+      root.style.visibility = "hidden";
+      root.dataset.codexappFastHidden = "1";
       root.setAttribute("aria-hidden", "true");
     }
     const shell = document.createElement("div");
@@ -4398,7 +4711,7 @@ function browserBridgeScript() {
     title.textContent = (thread.title || thread.name || "Codex thread") + " · 快速长线程窗口";
     inner.appendChild(title);
     const state = {
-      threadId: thread.id || thread.sessionId || codexappThreadIdFromPath(),
+      threadId: nextThreadId,
       olderCursor: thread.turnsPagination?.olderCursor ?? payload?.initialTurnsPage?.nextCursor ?? null,
       hasActiveTurn: turns.some((turn) => turn?.status === "inProgress"),
       loadingOlder: false,
@@ -4519,6 +4832,77 @@ function browserBridgeScript() {
     }
   }
   scheduleCodexappFastThreadShell();
+
+  function codexappActiveThreadId() {
+    return activeThreadIdFromDocument?.() || codexappThreadIdFromPath();
+  }
+
+  async function codexappPreserveScrollAfterHistoryChange(container, beforeHeight, beforeTop) {
+    await new Promise((resolve) => requestAnimationFrame(() => resolve()));
+    const heightDelta = Math.max(0, container.scrollHeight - beforeHeight);
+    const reverse = /reverse/.test(getComputedStyle(container).flexDirection || "");
+    container.scrollTop = reverse ? beforeTop - heightDelta : beforeTop + heightDelta;
+  }
+
+  async function codexappMaybeLoadOlderForScroll(container) {
+    if (!(container instanceof HTMLElement)) return;
+    if (container.dataset.codexappOlderLoadInFlight === "1") return;
+    if (typeof isNearThreadHistoryHead === "function" && !isNearThreadHistoryHead(container)) return;
+    const lastTopIntent = Number(container.dataset.codexappLastTopScrollIntent || 0);
+    if (Date.now() - lastTopIntent > 1200) return;
+    const threadId = codexappActiveThreadId();
+    if (!threadId || typeof window.__codexappLoadOlderThreadHistory !== "function") return;
+    const beforeHeight = container.scrollHeight;
+    const beforeTop = container.scrollTop;
+    const shifted = window.__codexappShiftThreadHistoryWindow?.(threadId, "older") === true;
+    if (shifted) {
+      await codexappPreserveScrollAfterHistoryChange(container, beforeHeight, beforeTop);
+      return;
+    }
+    const pagination = window.__codexappGetThreadHistoryPagination?.(threadId);
+    if (!pagination?.olderCursor || pagination.isLoadingOlder === true) return;
+    container.dataset.codexappOlderLoadInFlight = "1";
+    try {
+      await window.__codexappLoadOlderThreadHistory(threadId);
+      window.__codexappShiftThreadHistoryWindow?.(threadId, "older");
+      await codexappPreserveScrollAfterHistoryChange(container, beforeHeight, beforeTop);
+    } catch (error) {
+      console.warn("[codexapp] older history scroll load failed", error?.message || error);
+    } finally {
+      setTimeout(() => { delete container.dataset.codexappOlderLoadInFlight; }, 250);
+    }
+  }
+
+  function codexappInstallHistoryScrollSentinels() {
+    for (const container of document.querySelectorAll(".thread-scroll-container")) {
+      if (!(container instanceof HTMLElement)) continue;
+      if (container.dataset.codexappHistoryScrollSentinel === "1") continue;
+      container.dataset.codexappHistoryScrollSentinel = "1";
+      let scheduled = false;
+      const schedule = () => {
+        if (scheduled) return;
+        scheduled = true;
+        requestAnimationFrame(() => {
+          scheduled = false;
+          void codexappMaybeLoadOlderForScroll(container);
+        });
+      };
+      container.addEventListener("wheel", (event) => {
+        if (event.deltaY < 0) {
+          container.dataset.codexappLastTopScrollIntent = String(Date.now());
+          schedule();
+        }
+      }, { passive: true });
+      container.addEventListener("touchstart", () => {
+        container.dataset.codexappLastTopScrollIntent = String(Date.now());
+      }, { passive: true });
+      container.addEventListener("scroll", schedule, { passive: true });
+    }
+  }
+
+  setInterval(codexappInstallHistoryScrollSentinels, 2000);
+  setTimeout(codexappInstallHistoryScrollSentinels, 0);
+  setTimeout(codexappInstallHistoryScrollSentinels, 1000);
 
   try {
     const rawSendBeacon = navigator.sendBeacon?.bind(navigator);
@@ -5034,7 +5418,8 @@ function browserBridgeScript() {
     let attempts = 0;
     const fallback = () => {
       const delta = container.scrollHeight - Number(anchor.scrollHeight || 0);
-      if (Math.abs(delta) > 1) container.scrollTop = Number(anchor.scrollTop || 0) + delta;
+      const reverse = /reverse/.test(getComputedStyle(container).flexDirection || "");
+      if (Math.abs(delta) > 1) container.scrollTop = Number(anchor.scrollTop || 0) + (reverse ? -delta : delta);
       else container.scrollTop = Number(anchor.scrollTop || 0);
     };
     const apply = () => {
@@ -5123,24 +5508,47 @@ function browserBridgeScript() {
     if (!(container instanceof HTMLElement)) return;
     if (container.dataset.codexappHistoryLoaderInstalled === "1") return;
     container.dataset.codexappHistoryLoaderInstalled = "1";
+    let scrollScheduled = false;
+    const markIntent = (direction = "both") => {
+      const now = String(Date.now());
+      if (direction === "older" || direction === "both") container.dataset.codexappOlderIntentAt = now;
+      if (direction === "newer" || direction === "both") container.dataset.codexappNewerIntentAt = now;
+    };
+    const shouldReact = (direction) => {
+      const key = direction === "older" ? "codexappOlderIntentAt" : "codexappNewerIntentAt";
+      return Date.now() - Number(container.dataset[key] || 0) < 1500;
+    };
+    const runScrollLoaders = (reason) => {
+      scrollScheduled = false;
+      if (shouldReact("older")) maybeLoadOlderThreadHistory(container, reason);
+      if (shouldReact("newer")) maybeLoadNewerThreadHistory(container, reason);
+    };
+    const scheduleScrollLoaders = (reason) => {
+      if (scrollScheduled) return;
+      scrollScheduled = true;
+      requestAnimationFrame(() => runScrollLoaders(reason));
+    };
     const onScroll = () => {
-      maybeLoadOlderThreadHistory(container, "scroll");
-      maybeLoadNewerThreadHistory(container, "scroll");
+      scheduleScrollLoaders("scroll");
     };
     const onWheel = (event) => {
-      if (event.deltaY < 0) setTimeout(() => maybeLoadOlderThreadHistory(container, "wheel-up"), 0);
-      if (event.deltaY > 0) setTimeout(() => maybeLoadNewerThreadHistory(container, "wheel-down"), 0);
+      if (event.deltaY < 0) markIntent("older");
+      if (event.deltaY > 0) markIntent("newer");
+      scheduleScrollLoaders(event.deltaY < 0 ? "wheel-up" : "wheel-down");
+    };
+    const onPointerStart = () => {
+      markIntent("both");
+      scheduleScrollLoaders("pointer-scroll");
     };
     container.addEventListener("scroll", onScroll, { passive: true });
     container.addEventListener("wheel", onWheel, { passive: true });
-    setTimeout(() => maybeLoadOlderThreadHistory(container, "install"), 0);
+    container.addEventListener("touchstart", onPointerStart, { passive: true });
+    container.addEventListener("pointerdown", onPointerStart, { passive: true });
   }
 
   function installThreadHistoryLoaders() {
     for (const container of threadHistoryScrollerCandidates()) {
       installThreadHistoryLoader(container);
-      maybeLoadOlderThreadHistory(container, "tick");
-      maybeLoadNewerThreadHistory(container, "tick");
     }
   }
 
@@ -5151,10 +5559,19 @@ function browserBridgeScript() {
       hydrateCurrentRouteThread();
       installThreadHistoryLoaders();
     };
+    let tickScheduled = false;
+    const scheduleTick = () => {
+      if (tickScheduled) return;
+      tickScheduled = true;
+      setTimeout(() => {
+        tickScheduled = false;
+        tick();
+      }, 120);
+    };
     tick();
-    const observer = new MutationObserver(tick);
-    observer.observe(document.documentElement, { childList: true, subtree: true, characterData: true });
-    setInterval(tick, 2000);
+    const observer = new MutationObserver(scheduleTick);
+    observer.observe(document.documentElement, { childList: true, subtree: true });
+    setInterval(scheduleTick, 3000);
   }
 
   function randomBridgeId() {
@@ -5359,6 +5776,8 @@ function browserBridgeScript() {
   const browserStaleMs = ${bridgeBrowserStaleMs};
   const mcpRequests = new Map();
   const pendingTurnSubmissions = new Map();
+  const submittedTurnUiCleanups = new Map();
+  let lastTrustedComposerInputAt = 0;
   const turnSubmitLockMs = ${browserTurnSubmitLockMs};
   const queue = [];
   const browserRequests = new Map();
@@ -5376,6 +5795,10 @@ function browserBridgeScript() {
       if (Array.isArray(item.content)) return textFromClientTurnInput(item.content);
       return "";
     }).filter((part) => part.length > 0).join("\\n").trim();
+  }
+
+  function normalizeClientVisibleText(text) {
+    return String(text || "").replace(/\\s+/g, " ").trim();
   }
 
   function clientHashText(text) {
@@ -5435,6 +5858,157 @@ function browserBridgeScript() {
     return (activeComposer()?.innerText || "").trim();
   }
 
+  function clearComposerByElement(composer) {
+    if (!(composer instanceof HTMLElement)) return false;
+    try { composer.focus({ preventScroll: true }); } catch {}
+    try {
+      const selection = window.getSelection?.();
+      const range = document.createRange();
+      range.selectNodeContents(composer);
+      selection?.removeAllRanges();
+      selection?.addRange(range);
+      document.execCommand?.("delete");
+      selection?.removeAllRanges();
+    } catch {}
+    if ((composer.innerText || composer.textContent || "").trim()) {
+      composer.textContent = "";
+    }
+    try {
+      composer.dispatchEvent(new InputEvent("input", {
+        bubbles: true,
+        inputType: "deleteContentBackward",
+        data: null,
+      }));
+    } catch {
+      composer.dispatchEvent(new Event("input", { bubbles: true }));
+    }
+    return true;
+  }
+
+  function clearActiveComposerIfMatching(text) {
+    const composer = activeComposer();
+    if (!(composer instanceof HTMLElement)) return false;
+    const expected = normalizeClientVisibleText(text);
+    const actual = normalizeClientVisibleText(activeComposerText());
+    if (!expected || actual !== expected) return false;
+    return clearComposerByElement(composer);
+  }
+
+  function composerSurfaceFromElement(element) {
+    let current = element;
+    for (let depth = 0; current instanceof HTMLElement && depth < 10; depth += 1, current = current.parentElement) {
+      const className = String(current.className || "");
+      if (className.includes("_multilineSurface_") || className.includes("bg-token-input-background")) return current;
+    }
+    return element instanceof HTMLElement ? element.parentElement : null;
+  }
+
+  function clearComposerAttachmentResidue(text) {
+    const composer = activeComposer();
+    if (!(composer instanceof HTMLElement)) return;
+    const surface = composerSurfaceFromElement(composer);
+    if (!(surface instanceof HTMLElement)) return;
+    const expected = normalizeClientVisibleText(text);
+    if (!expected) return;
+    const surfaceText = normalizeClientVisibleText(surface.innerText || surface.textContent || "");
+    if (surfaceText && !surfaceText.includes(expected.slice(0, Math.min(expected.length, 80)))) return;
+    for (const button of Array.from(surface.querySelectorAll("button"))) {
+      if (!(button instanceof HTMLElement) || !visibleElement(button)) continue;
+      const label = normalizeClientVisibleText([
+        button.getAttribute("aria-label"),
+        button.getAttribute("title"),
+        button.innerText,
+        button.textContent,
+      ].filter(Boolean).join(" "));
+      const rect = button.getBoundingClientRect();
+      const likelyRemove = /remove|delete|clear|dismiss|close|移除|删除|清除|关闭/i.test(label)
+        || (rect.width <= 28 && rect.height <= 28 && rect.y < composer.getBoundingClientRect().top);
+      if (!likelyRemove) continue;
+      try { button.click(); } catch {}
+    }
+  }
+
+  function hideSubmittedDuplicateBubbles(text, signature) {
+    const root = document.querySelector(".thread-scroll-container");
+    if (!(root instanceof HTMLElement)) return;
+    const expected = normalizeClientVisibleText(text);
+    if (expected.length < 12) return;
+    const candidates = Array.from(root.querySelectorAll("[class*='whitespace-pre-wrap'], [class*='text-size-chat']"))
+      .filter((element) => element instanceof HTMLElement)
+      .filter((element) => !element.isContentEditable && !element.closest("[contenteditable='true']"))
+      .filter((element) => visibleElement(element))
+      .filter((element) => normalizeClientVisibleText(element.innerText || element.textContent || "") === expected)
+      .sort((a, b) => a.getBoundingClientRect().y - b.getBoundingClientRect().y);
+    if (candidates.length <= 1) return;
+    const keep = candidates.at(-1);
+    for (const element of candidates) {
+      if (element === keep) continue;
+      element.dataset.codexappHiddenDuplicateSubmission = signature || "1";
+      element.style.display = "none";
+    }
+  }
+
+  function transcriptExactTextMatchCount(text) {
+    const root = document.querySelector(".thread-scroll-container");
+    if (!(root instanceof HTMLElement)) return 0;
+    const expected = normalizeClientVisibleText(text);
+    if (expected.length < 12) return 0;
+    return Array.from(root.querySelectorAll("[class*='whitespace-pre-wrap'], [class*='text-size-chat']"))
+      .filter((element) => element instanceof HTMLElement)
+      .filter((element) => !element.isContentEditable && !element.closest("[contenteditable='true']"))
+      .filter((element) => visibleElement(element))
+      .filter((element) => normalizeClientVisibleText(element.innerText || element.textContent || "") === expected)
+      .length;
+  }
+
+  function hideRecentSubmitErrors() {
+    const root = document.querySelector(".thread-scroll-container") || document;
+    const nodes = Array.from(root.querySelectorAll("div,section,[role='alert'],[data-sonner-toast]"))
+      .filter((element) => element instanceof HTMLElement)
+      .filter((element) => visibleElement(element))
+      .filter((element) => /Error submitting message|创建任务时出错|提交消息出错/i.test(element.innerText || element.textContent || ""));
+    for (const node of nodes.slice(-4)) {
+      node.dataset.codexappHiddenSubmitError = "1";
+      node.style.display = "none";
+    }
+  }
+
+  function cleanupSubmittedTurnUi(signature, text, hideErrors = false) {
+    clearActiveComposerIfMatching(text);
+    clearComposerAttachmentResidue(text);
+    hideSubmittedDuplicateBubbles(text, signature);
+    if (hideErrors) hideRecentSubmitErrors();
+  }
+
+  function rememberSubmittedTurnUiCleanup(signature, text, source = "submit") {
+    if (!signature || !normalizeClientVisibleText(text)) return;
+    submittedTurnUiCleanups.set(signature, {
+      text,
+      source,
+      storedAt: Date.now(),
+    });
+    const hideErrors = source !== "mcp-request";
+    const delays = [0, 80, 250, 700, 1500, 3000];
+    for (const delayMs of delays) {
+      setTimeout(() => cleanupSubmittedTurnUi(signature, text, hideErrors), delayMs);
+    }
+    const cutoff = Date.now() - 5 * 60 * 1000;
+    for (const [key, entry] of submittedTurnUiCleanups) {
+      if (Number(entry?.storedAt || 0) < cutoff) submittedTurnUiCleanups.delete(key);
+    }
+  }
+
+  function clearStaleComposerSubmissionResidue(reason = "watchdog") {
+    if (Date.now() - lastTrustedComposerInputAt < 2500) return false;
+    const text = activeComposerText();
+    const normalized = normalizeClientVisibleText(text);
+    if (normalized.length < 12) return false;
+    if (transcriptExactTextMatchCount(text) <= 0) return false;
+    const signature = clientTurnSignature(activeThreadIdFromDocument(), text) || ("stale:" + clientHashText(text));
+    cleanupSubmittedTurnUi(signature, text, true);
+    return true;
+  }
+
   function isLikelySubmitButton(button) {
     if (!(button instanceof HTMLButtonElement)) return false;
     if (button.disabled || button.getAttribute("aria-disabled") === "true") return false;
@@ -5459,6 +6033,11 @@ function browserBridgeScript() {
   }
 
   function installSubmitDeduper() {
+    document.addEventListener("beforeinput", (event) => {
+      const composer = activeComposer();
+      if (!event.isTrusted || !composer || !(event.target instanceof Node) || !composer.contains(event.target)) return;
+      lastTrustedComposerInputAt = Date.now();
+    }, true);
     document.addEventListener("click", (event) => {
       const button = event.target instanceof Element ? event.target.closest("button") : null;
       if (!isLikelySubmitButton(button)) return;
@@ -5491,6 +6070,13 @@ function browserBridgeScript() {
         if (entry?.source === "enter" && entry.requestId == null) pendingTurnSubmissions.delete(signature);
       }, 5000);
     }, true);
+    const staleCleanerStartedAt = Date.now();
+    const staleCleaner = setInterval(() => {
+      clearStaleComposerSubmissionResidue("interval");
+      if (Date.now() - staleCleanerStartedAt > 30000) clearInterval(staleCleaner);
+    }, 900);
+    setTimeout(() => clearStaleComposerSubmissionResidue("startup"), 1200);
+    setTimeout(() => clearStaleComposerSubmissionResidue("startup-late"), 3000);
   }
 
   function postToView(message) {
@@ -5861,10 +6447,12 @@ function browserBridgeScript() {
     const signature = /^(turn\\/start|turn\\/steer)$/.test(request.method)
       ? clientTurnSignature(request.params?.threadId, request.params?.input)
       : null;
+    const inputText = signature ? textFromClientTurnInput(request.params?.input) : "";
     mcpRequests.set(String(request.id), {
       method: request.method,
       params: request.params || {},
       signature,
+      inputText,
       storedAt: Date.now()
     });
     if (signature) {
@@ -5875,6 +6463,7 @@ function browserBridgeScript() {
         }
       }
       rememberPendingTurnSubmission(signature, request.id, "mcp-request");
+      rememberSubmittedTurnUiCleanup(signature, inputText, "mcp-request");
     }
     if (mcpRequests.size <= 500) return;
     const cutoff = Date.now() - 10 * 60 * 1000;
@@ -5980,18 +6569,24 @@ function browserBridgeScript() {
     }
   }
 
+  let activeTranscriptRepairTimer = null;
+  let activeTranscriptRepairLastAt = 0;
+
   function repairActiveTranscript(reason) {
     installRunningTranscriptStyles();
     expandActiveRunningCard();
     keepActiveTranscriptAtTail();
-    try { window.dispatchEvent(new Event("resize")); } catch {}
   }
 
   function scheduleActiveTranscriptRepair(reason) {
-    const delays = [0, 120, 400, 1000, 2000];
-    for (const delayMs of delays) {
-      setTimeout(() => repairActiveTranscript(reason), delayMs);
-    }
+    if (activeTranscriptRepairTimer) return;
+    const elapsed = Date.now() - activeTranscriptRepairLastAt;
+    const delayMs = elapsed > 350 ? 0 : 350 - elapsed;
+    activeTranscriptRepairTimer = setTimeout(() => {
+      activeTranscriptRepairTimer = null;
+      activeTranscriptRepairLastAt = Date.now();
+      repairActiveTranscript(reason);
+    }, delayMs);
   }
 
   installRunningTranscriptStyles();
@@ -6111,6 +6706,9 @@ function browserBridgeScript() {
         const request = responseId == null ? null : mcpRequests.get(String(responseId));
         if (request) mcpRequests.delete(String(responseId));
         if (request?.signature) releasePendingTurnSubmission(request.signature);
+        if (request?.signature && !message.message?.error) {
+          rememberSubmittedTurnUiCleanup(request.signature, request.inputText || textFromClientTurnInput(request.params?.input), "mcp-response");
+        }
         if (request?.method === "thread/turns/list" && hasActiveTurns(message.message?.result)) {
           scheduleActiveTranscriptRepair("active-thread-open");
         }
@@ -7223,8 +7821,12 @@ class BridgeSession {
     this.promptHistoryRecoveryTimers = new Map();
     this.promptHistoryEligibleThreads = new Map();
     this.activeTurnWatchdogs = new Map();
+    this.lastThreadActivityBroadcasts = new Map();
     this.ephemeralThreads = new Map();
     this.largeThreadAppResumePromises = new Map();
+    this.queuedFollowupSendLocks = new Map();
+    this.queuedFollowupDrainTimers = new Map();
+    this.queuedFollowupDrainInFlight = new Set();
     this.closed = false;
     bridgeSessions.add(this);
     bridgeSessionsByClientId.set(this.clientId, this);
@@ -7302,7 +7904,14 @@ class BridgeSession {
       if (state.timer) clearTimeout(state.timer);
     }
     this.activeTurnWatchdogs.clear();
+    this.lastThreadActivityBroadcasts.clear();
     this.ephemeralThreads.clear();
+    this.queuedFollowupSendLocks.clear();
+    for (const timer of this.queuedFollowupDrainTimers.values()) {
+      clearTimeout(timer);
+    }
+    this.queuedFollowupDrainTimers.clear();
+    this.queuedFollowupDrainInFlight.clear();
     if (this.appSocket) {
       try { this.appSocket.close(); } catch {}
       this.appSocket = null;
@@ -8205,6 +8814,10 @@ class BridgeSession {
         }
         break;
       case "thread-queued-followups-changed":
+        this.scheduleQueuedFollowupDrain(
+          message.conversationId ?? message.params?.conversationId,
+          "thread-queued-followups-changed",
+        );
         broadcastBridgeMessage({
           type: "thread-queued-followups-changed",
           params: {
@@ -8407,6 +9020,34 @@ class BridgeSession {
     };
   }
 
+  ephemeralThreadReadResponse(threadId) {
+    if (!this.isKnownEphemeralThread(threadId)) return null;
+    const turnsResult = this.ephemeralThreadTurnsResponse(threadId);
+    const turns = Array.isArray(turnsResult?.data) ? turnsResult.data : [];
+    const thread = {
+      id: threadId,
+      sessionId: threadId,
+      title: "Ephemeral thread",
+      ephemeral: true,
+      turns,
+      turnsPagination: {
+        olderCursor: null,
+        newerCursor: null,
+        hasLoadedOldest: true,
+        hasLoadedNewest: true,
+        isLoadingOlder: false,
+      },
+    };
+    return {
+      thread,
+      initialTurnsPage: {
+        data: turns,
+        nextCursor: null,
+        backwardsCursor: null,
+      },
+    };
+  }
+
   observeActiveTurnFromRequest(method, params = {}, result = null) {
     if (!activeTurnWatchdogEnabled) return;
     const threadId = threadIdFromTurnPayload(params, result);
@@ -8562,11 +9203,21 @@ class BridgeSession {
 
   broadcastThreadActivity(threadId, details = {}) {
     if (typeof threadId !== "string" || threadId.length === 0) return;
+    const now = Date.now();
+    const signature = JSON.stringify({
+      status: details.status || null,
+      final: details.final === true,
+      error: details.error || null,
+      message: details.message || null,
+    });
+    const previous = this.lastThreadActivityBroadcasts.get(threadId);
+    if (previous?.signature === signature && now - Number(previous.sentAt || 0) < 1500) return;
+    this.lastThreadActivityBroadcasts.set(threadId, { signature, sentAt: now });
     const params = {
       threadId,
       conversationId: threadId,
       source: "codexapp-active-turn-watchdog",
-      updatedAt: Date.now(),
+      updatedAt: now,
       ...details,
     };
     for (const type of ["local-thread-activity-changed", "thread-stream-state-changed", "thread-read-state-changed"]) {
@@ -8603,6 +9254,205 @@ class BridgeSession {
         status: { type: "idle" },
       },
     });
+  }
+
+  queuedFollowupState() {
+    const value = readHostState("queued-follow-ups");
+    return isPlainObject(value) ? value : {};
+  }
+
+  queuedFollowupsForThread(threadId) {
+    if (typeof threadId !== "string" || threadId.length === 0) return [];
+    const messages = this.queuedFollowupState()[threadId];
+    return Array.isArray(messages) ? messages : [];
+  }
+
+  writeQueuedFollowupsForThread(threadId, messages = []) {
+    if (typeof threadId !== "string" || threadId.length === 0) return;
+    const state = { ...this.queuedFollowupState() };
+    const nextMessages = Array.isArray(messages) ? messages.filter(Boolean) : [];
+    if (nextMessages.length > 0) state[threadId] = nextMessages;
+    else delete state[threadId];
+    writeHostState("queued-follow-ups", state);
+    broadcastBridgeMessage({ type: "global-state-updated", keys: ["queued-follow-ups"] });
+    broadcastBridgeMessage({
+      type: "thread-queued-followups-changed",
+      params: { conversationId: threadId, messages: nextMessages },
+    });
+  }
+
+  removeQueuedFollowup(threadId, messageId) {
+    const messages = this.queuedFollowupsForThread(threadId);
+    if (messages.length === 0) return false;
+    const nextMessages = messages.filter((message) => message?.id !== messageId);
+    if (nextMessages.length === messages.length) return false;
+    this.writeQueuedFollowupsForThread(threadId, nextMessages);
+    return true;
+  }
+
+  markQueuedFollowupPaused(threadId, messageId, reason) {
+    const messages = this.queuedFollowupsForThread(threadId);
+    if (messages.length === 0) return false;
+    let changed = false;
+    const nextMessages = messages.map((message) => {
+      if (message?.id !== messageId) return message;
+      changed = true;
+      return { ...message, pausedReason: reason };
+    });
+    if (!changed) return false;
+    this.writeQueuedFollowupsForThread(threadId, nextMessages);
+    return true;
+  }
+
+  scheduleQueuedFollowupDrain(threadId, reason = "queued-followup", delayMs = 1800) {
+    if (this.closed || typeof threadId !== "string" || threadId.length === 0) return;
+    const existing = this.queuedFollowupDrainTimers.get(threadId);
+    if (existing) clearTimeout(existing);
+    const timer = setTimeout(() => {
+      this.queuedFollowupDrainTimers.delete(threadId);
+      this.drainQueuedFollowups(threadId, reason).catch((error) => {
+        log("queued follow-up drain failed", { threadId, reason, error: error.message || String(error) });
+      });
+    }, Math.max(0, delayMs));
+    timer.unref?.();
+    this.queuedFollowupDrainTimers.set(threadId, timer);
+  }
+
+  scheduleQueuedFollowupDrainsFromState(state, reason = "queued-followup-state") {
+    if (!isPlainObject(state)) return;
+    for (const [threadId, messages] of Object.entries(state)) {
+      if (Array.isArray(messages) && messages.length > 0) {
+        this.scheduleQueuedFollowupDrain(threadId, reason);
+      }
+    }
+  }
+
+  async drainQueuedFollowups(threadId, reason = "queued-followup") {
+    if (this.closed || this.queuedFollowupDrainInFlight.has(threadId)) return;
+    this.queuedFollowupDrainInFlight.add(threadId);
+    try {
+      const messages = this.queuedFollowupsForThread(threadId);
+      const message = messages[0];
+      if (!message) return;
+      const status = await this.submitQueuedFollowup(threadId, message, reason);
+      if (status === "submitted" || status === "already-submitted") {
+        this.removeQueuedFollowup(threadId, message.id);
+        if (this.queuedFollowupsForThread(threadId).length > 0) {
+          this.scheduleQueuedFollowupDrain(threadId, "queued-followup-next", 500);
+        }
+      } else if (status === "not-ready") {
+        this.scheduleQueuedFollowupDrain(threadId, "queued-followup-not-ready", 3000);
+      }
+    } finally {
+      this.queuedFollowupDrainInFlight.delete(threadId);
+    }
+  }
+
+  acquireQueuedFollowupDrainLock(threadId, messageId) {
+    if (!threadId || !messageId) return null;
+    const key = `${threadId}:${messageId}`;
+    const now = Date.now();
+    const existing = this.queuedFollowupSendLocks.get(key);
+    if (existing && now - existing.acquiredAt < queuedFollowupSendLockTtlMs) return null;
+    const lockId = `bridge-drain-${crypto.randomUUID()}`;
+    this.queuedFollowupSendLocks.set(key, { lockId, acquiredAt: now });
+    return { key, lockId };
+  }
+
+  releaseQueuedFollowupDrainLock(lock) {
+    if (!lock?.key) return;
+    const existing = this.queuedFollowupSendLocks.get(lock.key);
+    if (!existing || existing.lockId === lock.lockId || Date.now() - existing.acquiredAt >= queuedFollowupSendLockTtlMs) {
+      this.queuedFollowupSendLocks.delete(lock.key);
+    }
+  }
+
+  async submitQueuedFollowup(threadId, message, reason = "queued-followup") {
+    const input = queuedFollowupInput(message);
+    const signature = turnInputSignature(threadId, input);
+    if (!signature || input.length === 0) return "empty";
+    if (this.hasRecentTurnInputSubmission(signature)) return "already-submitted";
+    const messageId = typeof message?.id === "string" ? message.id : signature;
+    const lock = this.acquireQueuedFollowupDrainLock(threadId, messageId);
+    if (!lock) return "not-ready";
+    try {
+      let expectedTurnId = await this.latestActiveTurnIdWithRetry(threadId, 2500);
+      let method = expectedTurnId ? "turn/steer" : "turn/start";
+      let params = expectedTurnId
+        ? {
+          threadId,
+          input,
+          expectedTurnId,
+          clientUserMessageId: messageId,
+          responsesapiClientMetadata: queuedFollowupResponseMetadata(message),
+        }
+        : queuedFollowupStartParams(threadId, message);
+      params = forceLocalManagedWorkspacePermissions(method, params);
+      persistSelectedPermissionModeForParams(method, params || {});
+      if (largeThreadFastPathInfo(threadId)) {
+        await this.ensureLargeThreadLoadedInAppServer(threadId, params || {}, {
+          timeoutMs: largeThreadAppResumeTimeoutMs,
+        });
+        if (method === "turn/start") {
+          expectedTurnId = await this.latestActiveTurnIdWithRetry(threadId, 2500);
+          if (expectedTurnId) {
+            method = "turn/steer";
+            params = forceLocalManagedWorkspacePermissions(method, {
+              threadId,
+              input,
+              expectedTurnId,
+              clientUserMessageId: messageId,
+              responsesapiClientMetadata: queuedFollowupResponseMetadata(message),
+            });
+            persistSelectedPermissionModeForParams(method, params || {});
+          }
+        } else if (method === "turn/steer") {
+          params = await this.withLatestExpectedTurnId(method, params);
+          expectedTurnId = params.expectedTurnId;
+        }
+      }
+      try {
+        const result = await this.appRequest(method, params, { timeoutMs: 120000, internal: true });
+        this.recordTurnInputSubmission(method, params || {});
+        invalidateThreadTurnsCache(threadId);
+        this.observeActiveTurnFromRequest(method, params || {}, result);
+        this.broadcastThreadActivity(threadId, { reason: `${reason}-submitted`, status: "inProgress" });
+        log("submitted queued follow-up", { threadId, method, messageId });
+        return "submitted";
+      } catch (error) {
+        const replacementTurnId = String(error?.message || "").match(/expected active turn id `[^`]+` but found `([^`]+)`/)?.[1];
+        if (method === "turn/steer" && replacementTurnId) {
+          params = { ...params, expectedTurnId: replacementTurnId };
+          const result = await this.appRequest(method, params, { timeoutMs: 120000, internal: true });
+          this.recordTurnInputSubmission(method, params || {});
+          invalidateThreadTurnsCache(threadId);
+          this.observeActiveTurnFromRequest(method, params || {}, result);
+          this.broadcastThreadActivity(threadId, { reason: `${reason}-submitted-replacement-turn`, status: "inProgress" });
+          log("submitted queued follow-up after active turn correction", { threadId, method, messageId });
+          return "submitted";
+        }
+        if (method === "turn/steer" && /not being streamed|without an active turn|no active turn|Cannot steer/i.test(error?.message || "")) {
+          method = "turn/start";
+          params = forceLocalManagedWorkspacePermissions(method, queuedFollowupStartParams(threadId, message));
+          persistSelectedPermissionModeForParams(method, params || {});
+          const result = await this.appRequest(method, params, { timeoutMs: 120000, internal: true });
+          this.recordTurnInputSubmission(method, params || {});
+          invalidateThreadTurnsCache(threadId);
+          this.observeActiveTurnFromRequest(method, params || {}, result);
+          this.broadcastThreadActivity(threadId, { reason: `${reason}-submitted-as-start`, status: "inProgress" });
+          log("submitted queued follow-up as new turn", { threadId, messageId });
+          return "submitted";
+        }
+        throw error;
+      }
+    } catch (error) {
+      const messageText = error.message || String(error);
+      this.markQueuedFollowupPaused(threadId, messageId, messageText);
+      log("queued follow-up submit failed", { threadId, messageId, error: messageText });
+      return "failed";
+    } finally {
+      this.releaseQueuedFollowupDrainLock(lock);
+    }
   }
 
   schedulePromptHistorySteerRecoveries(previousValue, nextValue) {
@@ -8648,17 +9498,31 @@ class BridgeSession {
       cursor: null,
       limit: activeTurnWatchdogPageLimit,
     };
-    const completeResult = await this.completeThreadTurnsResponse(params);
+    let completeResult = await this.completeThreadTurnsResponse(params);
     if (this.isKnownEphemeralThread(threadId)) return null;
-    const result = completeResult || await this.appRequest("thread/turns/list", params, {
+    let result = completeResult || await this.appRequest("thread/turns/list", params, {
       timeoutMs: 30000,
       internal: true,
     });
-    const turn = Array.isArray(result?.data)
+    let turn = Array.isArray(result?.data)
       ? result.data.find((item) => item?.status === "inProgress")
       : null;
-    if (!turn) return null;
-    return typeof turn.id === "string" ? turn.id : (typeof turn.turnId === "string" ? turn.turnId : null);
+    let turnId = typeof turn?.id === "string" ? turn.id : (typeof turn?.turnId === "string" ? turn.turnId : null);
+    if (!turnId && completeResult && largeThreadFastPathInfo(threadId)) {
+      try {
+        result = await this.appRequest("thread/turns/list", params, {
+          timeoutMs: 30000,
+          internal: true,
+        });
+        turn = Array.isArray(result?.data)
+          ? result.data.find((item) => item?.status === "inProgress")
+          : null;
+        turnId = typeof turn?.id === "string" ? turn.id : (typeof turn?.turnId === "string" ? turn.turnId : null);
+      } catch (error) {
+        debugLog("latest active turn app-server fallback failed", threadId, error.message || String(error));
+      }
+    }
+    return turnId || null;
   }
 
   async latestActiveTurnIdWithRetry(threadId, timeoutMs = 1500) {
@@ -8702,6 +9566,7 @@ class BridgeSession {
 
   async recoverPromptHistorySteer(threadId, text, signature) {
     if (this.closed || this.hasRecentTurnInputSubmission(signature)) return "already-submitted";
+    if (largeThreadFastPathInfo(threadId)) return "large-thread-skip";
     const expectedTurnId = await this.latestActiveTurnId(threadId);
     if (!expectedTurnId) return "not-ready";
     if (this.hasRecentTurnInputSubmission(signature)) return "already-submitted";
@@ -8938,6 +9803,7 @@ class BridgeSession {
     if (!params || typeof params.threadId !== "string" || params.threadId.length === 0) return null;
     const largeFastPathResult = largeThreadReadFastPathResponse(params);
     if (largeFastPathResult) return largeFastPathResult;
+    if (this.isKnownEphemeralThread(params.threadId)) return this.ephemeralThreadReadResponse(params.threadId);
     try {
       const readResult = await this.appRequest("thread/read", params, {
         timeoutMs: 60000,
@@ -8976,6 +9842,11 @@ class BridgeSession {
         initialTurnsPage: initialTurnsPageFromTurnsResult(turnsResult),
       };
     } catch (error) {
+      if (looksLikeEphemeralThreadTurnsUnsupported(error)) {
+        if (this.rememberEphemeralThread(params.threadId, "thread/read-error")) {
+          return this.ephemeralThreadReadResponse(params.threadId);
+        }
+      }
       log("complete thread read failed; falling back to app-server", params.threadId, error.message || String(error));
       return null;
     }
@@ -9126,12 +9997,46 @@ class BridgeSession {
       case "set-global-state":
         writeHostState(params.key, params.value);
         broadcastBridgeMessage({ type: "global-state-updated", keys: [params.key] });
+        if (params.key === "queued-follow-ups") {
+          this.scheduleQueuedFollowupDrainsFromState(params.value, "set-global-state");
+        }
         return { success: true };
       case "get-configuration":
         return { value: readHostState(params.key) };
       case "set-configuration":
         writeHostState(params.key, params.value);
         return { success: true };
+      case "queued-follow-up-send-lock-acquire": {
+        const conversationId = typeof params.conversationId === "string" ? params.conversationId : params.threadId;
+        const messageId = typeof params.messageId === "string" ? params.messageId : null;
+        const lockId = typeof params.lockId === "string" ? params.lockId : crypto.randomUUID();
+        if (!conversationId || !messageId) return { acquired: false };
+        const key = `${conversationId}:${messageId}`;
+        const now = Date.now();
+        const existing = this.queuedFollowupSendLocks.get(key);
+        if (
+          existing
+          && existing.lockId !== lockId
+          && now - existing.acquiredAt < queuedFollowupSendLockTtlMs
+        ) {
+          return { acquired: false };
+        }
+        this.queuedFollowupSendLocks.set(key, { lockId, acquiredAt: now });
+        return { acquired: true };
+      }
+      case "queued-follow-up-send-lock-release": {
+        const conversationId = typeof params.conversationId === "string" ? params.conversationId : params.threadId;
+        const messageId = typeof params.messageId === "string" ? params.messageId : null;
+        const lockId = typeof params.lockId === "string" ? params.lockId : null;
+        if (!conversationId || !messageId) return { success: true, released: false };
+        const key = `${conversationId}:${messageId}`;
+        const existing = this.queuedFollowupSendLocks.get(key);
+        if (!existing || !lockId || existing.lockId === lockId || Date.now() - existing.acquiredAt >= queuedFollowupSendLockTtlMs) {
+          this.queuedFollowupSendLocks.delete(key);
+          return { success: true, released: true };
+        }
+        return { success: true, released: false };
+      }
       case "active-workspace-roots":
         return { roots: uniqueStrings(readHostState("active-workspace-roots")) };
       case "workspace-root-options":
