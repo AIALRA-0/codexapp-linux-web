@@ -116,6 +116,8 @@ const canonicalWindowCacheLimit = numberFromEnv("CODEXAPP_CANONICAL_WINDOW_CACHE
 const canonicalPreviewChars = numberFromEnv("CODEXAPP_CANONICAL_PREVIEW_CHARS", 2000, 256, 20000);
 const canonicalFullTextInlineMaxChars = numberFromEnv("CODEXAPP_CANONICAL_FULL_TEXT_INLINE_MAX_CHARS", 250000, 4096, 2_000_000);
 const canonicalSubmissionTtlMs = numberFromEnv("CODEXAPP_CANONICAL_SUBMISSION_TTL_MS", 30 * 60 * 1000, 60 * 1000, 24 * 60 * 60 * 1000);
+const canonicalEventBacklogLimit = numberFromEnv("CODEXAPP_CANONICAL_EVENT_BACKLOG_LIMIT", 500, 50, 5000);
+const canonicalEventHeartbeatMs = numberFromEnv("CODEXAPP_CANONICAL_EVENT_HEARTBEAT_MS", 15000, 3000, 60000);
 const largeThreadFastPathEnabled = parseBoolean(process.env.CODEXAPP_LARGE_THREAD_FAST_PATH, true);
 const largeThreadFastPathMinBytes = numberFromEnv("CODEXAPP_LARGE_THREAD_FAST_PATH_MIN_BYTES", 50 * 1024 * 1024, 1024 * 1024, 1024 * 1024 * 1024);
 const largeThreadFastPathChunkBytes = numberFromEnv("CODEXAPP_LARGE_THREAD_FAST_PATH_CHUNK_BYTES", 1024 * 1024, 128 * 1024, 128 * 1024 * 1024);
@@ -177,7 +179,10 @@ const canonicalAttachmentTokens = new Map();
 const canonicalSubmissionStates = new Map();
 const canonicalAppRequests = new Map();
 const canonicalFullTextCache = new Map();
+const canonicalThreadEventBacklogs = new Map();
+const canonicalThreadEventSubscribers = new Map();
 let canonicalSubmissionsSaveTimer = null;
+let canonicalEventSequence = 0;
 
 function log(...args) {
   console.log(new Date().toISOString(), ...args);
@@ -1094,7 +1099,7 @@ function threadIdFromParams(params = {}) {
 function persistSelectedPermissionModeForParams(method, params = {}) {
   if (!selectedLocalFullAccessEnabled()) return false;
   const normalized = String(method || "");
-  if (!["thread/read", "thread/resume", "thread/settings/update", "turn/start", "turn/steer"].includes(normalized)) {
+  if (!["thread/read", "thread/resume", "thread/fork", "thread/settings/update", "turn/start", "turn/steer"].includes(normalized)) {
     return false;
   }
   const threadId = threadIdFromParams(params);
@@ -1513,6 +1518,53 @@ function readLargeRolloutChunk(rolloutPath, endOffset, chunkBytes = largeThreadF
     if (line) entries.push({ line, offset: lineOffset });
   }
   return { start, end, lines: entries.map((entry) => entry.line), entries };
+}
+
+function readLargeRolloutForwardChunk(rolloutPath, startOffset, chunkBytes = largeThreadFastPathChunkBytes) {
+  const stat = fs.statSync(rolloutPath);
+  const size = stat.size;
+  const start = Math.max(0, Math.min(Number(startOffset) || 0, size));
+  const requestedBytes = Number.isFinite(Number(chunkBytes)) && Number(chunkBytes) > 0
+    ? Number(chunkBytes)
+    : largeThreadFastPathChunkBytes;
+  const end = Math.min(size, start + requestedBytes);
+  const length = Math.max(0, end - start);
+  if (length === 0) return { start, end, lines: [], entries: [] };
+  const buffer = Buffer.allocUnsafe(length);
+  const fd = fs.openSync(rolloutPath, "r");
+  try {
+    fs.readSync(fd, buffer, 0, length, start);
+  } finally {
+    fs.closeSync(fd);
+  }
+  let text = buffer.toString("utf8");
+  let lineBaseOffset = start;
+  if (start > 0) {
+    const firstNewline = text.indexOf("\n");
+    if (firstNewline >= 0) {
+      lineBaseOffset += Buffer.byteLength(text.slice(0, firstNewline + 1), "utf8");
+      text = text.slice(firstNewline + 1);
+    } else {
+      text = "";
+    }
+  }
+  if (end < size) {
+    const lastNewline = text.lastIndexOf("\n");
+    if (lastNewline >= 0) text = text.slice(0, lastNewline + 1);
+    else text = "";
+  }
+  const entries = [];
+  let relativeOffset = 0;
+  for (const rawLine of text.split("\n")) {
+    const lineOffset = lineBaseOffset + relativeOffset;
+    relativeOffset += Buffer.byteLength(rawLine, "utf8") + 1;
+    const line = rawLine.endsWith("\r") ? rawLine.slice(0, -1) : rawLine;
+    if (line) entries.push({ line, offset: lineOffset });
+  }
+  const nextOffset = entries.length > 0
+    ? Math.min(size, entries.at(-1).offset + Buffer.byteLength(entries.at(-1).line, "utf8") + 1)
+    : end;
+  return { start, end: nextOffset, lines: entries.map((entry) => entry.line), entries };
 }
 
 function epochSecondsFromRolloutTimestamp(value) {
@@ -2815,7 +2867,7 @@ function fullAccessThreadSettings(settings = {}) {
 
 function applySelectedPermissionModeToParams(method, params) {
   if (selectedLocalAgentMode() !== "full-access" || !isPlainObject(params)) return params;
-  if (!["thread/start", "thread/resume", "turn/start", "turn/steer", "thread/settings/update"].includes(String(method || ""))) return params;
+  if (!["thread/start", "thread/resume", "thread/fork", "turn/start", "turn/steer", "thread/settings/update"].includes(String(method || ""))) return params;
   const next = {
     ...params,
     approvalPolicy: "never",
@@ -2961,16 +3013,48 @@ function redactUiSecretText(value) {
     .replace(/https?:\/\/(?:[A-Za-z0-9-]+\.)*aialra\.online[^\s"'`)]+/g, "https://example.com");
 }
 
-function canonicalCursorEndOffset(cursor, size) {
-  if (cursor == null || cursor === "") return size;
+function canonicalEncodeCursor(info, offset, turn = null, ordinal = 0) {
+  const numericOffset = Math.max(0, Math.min(Number(offset) || 0, Number(info?.size) || 0));
+  const payload = {
+    v: 2,
+    r: info?.signature || null,
+    o: numericOffset,
+    t: turnStableId(turn) || null,
+    n: Number.isFinite(Number(ordinal)) ? Number(ordinal) : 0,
+  };
+  return `${canonicalCursorPrefix}${Buffer.from(JSON.stringify(payload), "utf8").toString("base64url")}`;
+}
+
+function canonicalDecodeCursor(cursor, info, fallbackOffset = null) {
+  const size = Number(info?.size || 0);
+  if (cursor == null || cursor === "") {
+    const offset = fallbackOffset == null ? size : Number(fallbackOffset);
+    return { offset: Math.max(0, Math.min(Number(offset) || 0, size)), turnId: null, revision: info?.signature || null, ordinal: 0 };
+  }
   if (typeof cursor !== "string") return null;
-  const value = cursor.startsWith(canonicalCursorPrefix)
+  const raw = cursor.startsWith(canonicalCursorPrefix)
     ? cursor.slice(canonicalCursorPrefix.length)
-    : (cursor.startsWith(largeThreadFastPathCursorPrefix) ? cursor.slice(largeThreadFastPathCursorPrefix.length) : null);
-  if (value == null) return null;
-  const offset = Number.parseInt(value, 10);
-  if (!Number.isFinite(offset) || offset <= 0) return null;
-  return Math.min(offset, size);
+    : (cursor.startsWith(largeThreadFastPathCursorPrefix) ? cursor.slice(largeThreadFastPathCursorPrefix.length) : cursor);
+  const legacyOffset = Number.parseInt(raw, 10);
+  if (Number.isFinite(legacyOffset) && legacyOffset > 0) {
+    return { offset: Math.min(legacyOffset, size), turnId: null, revision: info?.signature || null, ordinal: 0 };
+  }
+  try {
+    const parsed = JSON.parse(Buffer.from(raw, "base64url").toString("utf8"));
+    const offset = Math.max(0, Math.min(Number(parsed?.o) || 0, size));
+    return {
+      offset,
+      turnId: typeof parsed?.t === "string" && parsed.t.length > 0 ? parsed.t : null,
+      revision: typeof parsed?.r === "string" ? parsed.r : null,
+      ordinal: Number.isFinite(Number(parsed?.n)) ? Number(parsed.n) : 0,
+    };
+  } catch {
+    return null;
+  }
+}
+
+function canonicalCursorEndOffset(cursor, info) {
+  return canonicalDecodeCursor(cursor, info, info?.size || 0)?.offset ?? null;
 }
 
 function canonicalRolloutInfo(threadId) {
@@ -2981,12 +3065,15 @@ function canonicalRolloutInfo(threadId) {
   return { ...info, size };
 }
 
-function canonicalRolloutWindowPage(params = {}) {
-  const info = canonicalRolloutInfo(params.threadId);
-  if (!info) return null;
-  const endOffset = canonicalCursorEndOffset(params.cursor, info.size);
+function canonicalTurnCursor(info, turn, ordinal = 0) {
+  const offset = largeThreadTurnStartOffset(turn);
+  return offset == null ? null : canonicalEncodeCursor(info, offset, turn, ordinal);
+}
+
+function canonicalRolloutWindowPageBackward(info, params = {}, maxTurns) {
+  const endOffset = canonicalCursorEndOffset(params.cursor, info);
   if (endOffset == null) return null;
-  const maxTurns = largeThreadRequestedTurnLimit(params, canonicalWindowDefaultLimit);
+  const direction = params.direction === "older" ? "older" : "latest";
   const chunkBytes = params.cursor == null ? largeThreadFastPathInitialChunkBytes : largeThreadFastPathChunkBytes;
   const maxScanBytes = Math.max(chunkBytes, largeThreadFastPathMaxScanBytes);
   let nextEndOffset = endOffset;
@@ -3014,12 +3101,74 @@ function canonicalRolloutWindowPage(params = {}) {
       nextOffset = oldestReturnedOffset;
     }
   }
+  const firstTurn = turns[0] || null;
+  const lastTurn = turns.at(-1) || null;
   return {
     turns,
-    olderCursor: nextOffset > 0 ? `${canonicalCursorPrefix}${nextOffset}` : null,
+    olderCursor: nextOffset > 0 ? canonicalEncodeCursor(info, nextOffset, firstTurn, 0) : null,
+    newerCursor: direction === "latest" ? null : (params.cursor || canonicalTurnCursor(info, lastTurn, turns.length - 1)),
+    hasOlder: nextOffset > 0,
+    hasNewer: direction !== "latest",
     source: "rollout",
     revision: info.signature,
   };
+}
+
+function canonicalRolloutWindowPageForward(info, params = {}, maxTurns) {
+  const cursor = canonicalDecodeCursor(params.cursor, info, 0);
+  if (!cursor) return null;
+  const chunkBytes = largeThreadFastPathChunkBytes;
+  const maxScanBytes = Math.max(chunkBytes, largeThreadFastPathMaxScanBytes * 8);
+  let nextStartOffset = cursor.offset;
+  let scannedBytes = 0;
+  let chunk = null;
+  let entries = [];
+  let parsedTurns = [];
+  while (nextStartOffset < info.size && scannedBytes < maxScanBytes) {
+    chunk = readLargeRolloutForwardChunk(info.rolloutPath, nextStartOffset, chunkBytes);
+    const chunkEntries = chunk.entries || [];
+    entries = entries.concat(chunkEntries);
+    scannedBytes += Math.max(0, chunk.end - chunk.start);
+    const parseStart = entries[0]?.offset ?? nextStartOffset;
+    parsedTurns = parseLargeRolloutTurns(entries, parseStart);
+    const cursorIndex = parsedTurns.findIndex((turn) => {
+      const id = turnStableId(turn);
+      const offset = largeThreadTurnStartOffset(turn);
+      return (cursor.turnId && id === cursor.turnId) || offset === cursor.offset;
+    });
+    const candidates = cursorIndex >= 0 ? parsedTurns.slice(cursorIndex + 1) : parsedTurns;
+    if (candidates.length > maxTurns || chunk.end >= info.size) break;
+    if (chunk.end <= nextStartOffset) break;
+    nextStartOffset = chunk.end;
+  }
+  if (!chunk) return null;
+  const cursorIndex = parsedTurns.findIndex((turn) => {
+    const id = turnStableId(turn);
+    const offset = largeThreadTurnStartOffset(turn);
+    return (cursor.turnId && id === cursor.turnId) || offset === cursor.offset;
+  });
+  const candidates = cursorIndex >= 0 ? parsedTurns.slice(cursorIndex + 1) : parsedTurns;
+  const turns = candidates.slice(0, maxTurns);
+  const firstTurn = turns[0] || null;
+  const lastTurn = turns.at(-1) || null;
+  const hasNewer = candidates.length > turns.length || (chunk.end < info.size && turns.length > 0);
+  return {
+    turns,
+    olderCursor: canonicalTurnCursor(info, firstTurn, 0),
+    newerCursor: hasNewer ? canonicalTurnCursor(info, lastTurn, turns.length - 1) : null,
+    hasOlder: true,
+    hasNewer,
+    source: "rollout",
+    revision: info.signature,
+  };
+}
+
+function canonicalRolloutWindowPage(params = {}) {
+  const info = canonicalRolloutInfo(params.threadId);
+  if (!info) return null;
+  const maxTurns = largeThreadRequestedTurnLimit(params, canonicalWindowDefaultLimit);
+  if (params.direction === "newer") return canonicalRolloutWindowPageForward(info, params, maxTurns);
+  return canonicalRolloutWindowPageBackward(info, params, maxTurns);
 }
 
 function canonicalTextShape(text) {
@@ -3028,17 +3177,18 @@ function canonicalTextShape(text) {
     ? value.slice(0, canonicalPreviewChars)
     : value;
   const fullTextAvailable = value.length > canonicalPreviewChars;
+  let fullTextKey = null;
+  if (fullTextAvailable) {
+    fullTextKey = crypto.createHash("sha256").update(value).digest("hex");
+    canonicalFullTextCache.set(fullTextKey, { text: value, storedAt: Date.now() });
+  }
   const item = {
-    text: value.length <= canonicalFullTextInlineMaxChars ? value : null,
+    text: fullTextAvailable || value.length > canonicalFullTextInlineMaxChars ? null : value,
     previewText,
     fullTextAvailable,
     contentLength: value.length,
   };
-  if (value.length > canonicalFullTextInlineMaxChars) {
-    const key = crypto.createHash("sha256").update(value).digest("hex");
-    canonicalFullTextCache.set(key, { text: value, storedAt: Date.now() });
-    item.fullTextKey = key;
-  }
+  if (fullTextKey) item.fullTextKey = fullTextKey;
   return item;
 }
 
@@ -3070,6 +3220,7 @@ function canonicalAttachmentTokenForPath(filePath) {
     const token = crypto.createHash("sha256").update(`${resolved}:${stat.size}:${Math.trunc(stat.mtimeMs)}`).digest("hex").slice(0, 32);
     canonicalAttachmentTokens.set(token, {
       path: resolved,
+      filePath: resolved,
       size: stat.size,
       mimeType: (MIME_TYPES.get(path.extname(resolved).toLowerCase()) || "application/octet-stream").split(";")[0],
       storedAt: Date.now(),
@@ -3101,19 +3252,58 @@ function canonicalImageItem(part, id) {
   };
 }
 
+function canonicalItemsFromUserText(text, baseId, partIndex, clientUserMessageId = null) {
+  const value = typeof text === "string" ? text : "";
+  const normalizedValue = value.trim().toLowerCase();
+  if (normalizedValue === "</image>" || normalizedValue === "image content omitted because it could not be processed") return [];
+  const imageTagPattern = /<image\b[^>]*\b(?:path|url)=(?:"([^"]+)"|'([^']+)'|([^\s>]+))[^>]*(?:>[\s\S]*?<\/image>|\/?>)/gi;
+  const items = [];
+  let lastIndex = 0;
+  let imageIndex = 0;
+  for (const match of value.matchAll(imageTagPattern)) {
+    const before = value.slice(lastIndex, match.index);
+    if (before.trim()) {
+      items.push({
+        id: `${baseId}:text:${partIndex}:${items.length}`,
+        type: "user_text",
+        clientUserMessageId,
+        ...canonicalTextShape(before.trim()),
+      });
+    }
+    const src = match[1] || match[2] || match[3] || "";
+    const image = canonicalImageItem({ path: src, url: src }, `${baseId}:image-tag:${partIndex}:${imageIndex}`);
+    if (image) items.push({ ...image, clientUserMessageId });
+    imageIndex += 1;
+    lastIndex = Number(match.index || 0) + match[0].length;
+  }
+  const tail = value.slice(lastIndex);
+  if (tail.trim()) {
+    items.push({
+      id: `${baseId}:text:${partIndex}:${items.length}`,
+      type: "user_text",
+      clientUserMessageId,
+      ...canonicalTextShape(tail.trim()),
+    });
+  }
+  if (items.length > 0) return items;
+  if (!value.trim()) return [];
+  return [{
+    id: `${baseId}:text:${partIndex}`,
+    type: "user_text",
+    clientUserMessageId,
+    ...canonicalTextShape(value),
+  }];
+}
+
 function canonicalItemsFromLegacyItem(item, turn, itemIndex) {
-  const baseId = `${turnStableId(turn) || turn?.id || "turn"}:${item?.id || itemIndex}`;
+  const offset = largeThreadTurnStartOffset(turn);
+  const baseId = `${turnStableId(turn) || turn?.id || "turn"}${offset != null ? `@${offset}` : ""}:${item?.id || itemIndex}`;
   if (item?.type === "userMessage") {
     const content = Array.isArray(item.content) ? item.content : [];
     return content.flatMap((part, partIndex) => {
       if (!part || typeof part !== "object") return [];
       if (part.type === "text" && typeof part.text === "string") {
-        return [{
-          id: `${baseId}:text:${partIndex}`,
-          type: "user_text",
-          clientUserMessageId: typeof item.id === "string" ? item.id : null,
-          ...canonicalTextShape(part.text),
-        }];
+        return canonicalItemsFromUserText(part.text, baseId, partIndex, typeof item.id === "string" ? item.id : null);
       }
       const image = canonicalImageItem(part, `${baseId}:image:${partIndex}`);
       return image ? [{ ...image, clientUserMessageId: typeof item.id === "string" ? item.id : null }] : [];
@@ -3151,7 +3341,9 @@ function canonicalItemsFromLegacyItem(item, turn, itemIndex) {
 }
 
 function canonicalTurnFromLegacyTurn(turn, index, threadId) {
-  const turnId = turnStableId(turn) || `${threadId}:turn:${index}`;
+  const stableTurnId = turnStableId(turn) || `${threadId}:turn:${index}`;
+  const offset = largeThreadTurnStartOffset(turn);
+  const turnId = offset != null ? `${stableTurnId}@${offset}` : stableTurnId;
   const items = Array.isArray(turn?.items)
     ? turn.items.flatMap((item, itemIndex) => canonicalItemsFromLegacyItem(item, turn, itemIndex))
     : [];
@@ -3166,7 +3358,8 @@ function canonicalTurnFromLegacyTurn(turn, index, threadId) {
     startedAt: turn?.startedAt || null,
     completedAt: turn?.completedAt || null,
     durationMs: turn?.durationMs || null,
-    offset: largeThreadTurnStartOffset(turn),
+    offset,
+    sourceTurnId: stableTurnId,
     items,
   };
 }
@@ -3181,17 +3374,29 @@ function canonicalThreadStatus(threadId, turns = []) {
   cleanupCanonicalCaches();
   const submissions = Array.from(canonicalSubmissionStates.values()).filter((item) => item.threadId === threadId);
   for (const submission of submissions) {
-    if (!["accepted", "resuming", "submitted", "running", "queued"].includes(submission.state)) continue;
-    const committed = turns.some((turn) => turn?.submissionId === submission.submissionId || turn?.id === submission.submissionId);
-    if (committed) updateCanonicalSubmission(submission, { state: "completed", error: null });
+    const needsCommitLookup = ["accepted", "ensuring_resume", "resuming", "submitted_to_app_server", "submitted", "running", "queued"].includes(submission.state)
+      || (submission.state === "completed" && !submission.committedTurnId);
+    if (!needsCommitLookup) continue;
+    const submissionCreatedAtSeconds = Number(submission.createdAt || 0) / 1000;
+    let committedTurn = null;
+    const committed = turns.some((turn) => {
+      if (turn?.submissionId === submission.submissionId || turn?.id === submission.submissionId) return true;
+      const turnTime = Math.max(Number(turn?.startedAt || 0), Number(turn?.completedAt || 0));
+      if (!Number.isFinite(turnTime) || !Number.isFinite(submissionCreatedAtSeconds) || submissionCreatedAtSeconds <= 0) return false;
+      if (!["completed", "failed", "errored", "interrupted"].includes(String(turn?.status || ""))) return false;
+      const isCommitted = turnTime >= submissionCreatedAtSeconds - 2;
+      if (isCommitted) committedTurn = turn;
+      return isCommitted;
+    });
+    if (committed) updateCanonicalSubmission(submission, { state: "completed", error: null, committedTurnId: committedTurn?.id || submission.committedTurnId || null });
   }
-  const active = submissions.find((item) => ["accepted", "resuming", "submitted", "running", "queued"].includes(item.state));
+  const active = submissions.find((item) => ["accepted", "ensuring_resume", "resuming", "submitted_to_app_server", "submitted", "running", "queued"].includes(item.state));
   const latest = submissions.sort((a, b) => Number(b.updatedAt || 0) - Number(a.updatedAt || 0))[0] || null;
-  const state = active?.state === "resuming"
+  const state = active?.state === "ensuring_resume" || active?.state === "resuming"
     ? "resuming"
     : (active?.state === "queued" || active?.state === "accepted"
       ? "queued"
-      : (active?.state === "submitted" || active?.state === "running"
+      : (active?.state === "submitted_to_app_server" || active?.state === "submitted" || active?.state === "running"
         ? "running"
         : canonicalStatusFromTurns(turns, latest?.state === "failed" ? "failed" : "idle")));
   return {
@@ -3205,6 +3410,7 @@ function canonicalThreadStatus(threadId, turns = []) {
       clientRequestId: item.clientRequestId,
       state: item.state,
       error: item.error || null,
+      committedTurnId: item.committedTurnId || null,
       updatedAt: item.updatedAt || item.createdAt || null,
       optimisticTurn: item.optimisticTurn || null,
     })),
@@ -3220,6 +3426,7 @@ function canonicalWindowResponse(params = {}) {
   const page = canonicalRolloutWindowPage({
     threadId,
     cursor: params.cursor || null,
+    direction: params.direction || "latest",
     limit: boundedTurnPageLimit(params.limit, canonicalWindowDefaultLimit),
   });
   if (!page) return null;
@@ -3239,10 +3446,10 @@ function canonicalWindowResponse(params = {}) {
     },
     items: turns,
     page: {
-      olderCursor: page.olderCursor,
-      newerCursor: params.cursor ? null : null,
-      hasOlder: page.olderCursor != null,
-      hasNewer: false,
+      olderCursor: page.olderCursor || null,
+      newerCursor: page.newerCursor || null,
+      hasOlder: page.hasOlder !== false && page.olderCursor != null,
+      hasNewer: page.hasNewer === true && page.newerCursor != null,
       limit: boundedTurnPageLimit(params.limit, canonicalWindowDefaultLimit),
     },
     status: canonicalThreadStatus(threadId, turns),
@@ -3281,6 +3488,7 @@ function serializableCanonicalSubmission(entry) {
     mode: entry.mode,
     state: entry.state,
     method: entry.method || null,
+    committedTurnId: entry.committedTurnId || null,
     optimisticTurn: entry.optimisticTurn || null,
     submitBody: entry.submitBody || null,
     error: entry.error || null,
@@ -3304,8 +3512,9 @@ function sanitizeCanonicalSubmissionEntry(raw) {
     clientRequestId,
     submissionId,
     mode: ["normal", "steer", "plan", "goal"].includes(raw.mode) ? raw.mode : "normal",
-    state: ["accepted", "resuming", "submitted", "running", "queued", "failed", "completed"].includes(raw.state) ? raw.state : "accepted",
+    state: ["accepted", "ensuring_resume", "resuming", "submitted_to_app_server", "submitted", "running", "queued", "failed", "completed"].includes(raw.state) ? raw.state : "accepted",
     method: typeof raw.method === "string" ? raw.method : null,
+    committedTurnId: typeof raw.committedTurnId === "string" ? raw.committedTurnId : null,
     optimisticTurn: isPlainObject(raw.optimisticTurn) ? raw.optimisticTurn : null,
     submitBody: isPlainObject(raw.submitBody) ? raw.submitBody : null,
     error: typeof raw.error === "string" ? raw.error : null,
@@ -3366,15 +3575,13 @@ function canonicalInputFromSubmitBody(body = {}) {
       ? attachment.id
       : (typeof attachment.url === "string" ? attachment.url.split("/").filter(Boolean).pop() : null);
     const stored = token ? canonicalAttachmentTokens.get(token) : null;
-    if (stored?.filePath && fs.existsSync(stored.filePath)) {
-      const mimeType = stored.mimeType || "image/png";
-      const contentsBase64 = fs.readFileSync(stored.filePath).toString("base64");
-      input.push({ type: "input_image", image_url: `data:${mimeType};base64,${contentsBase64}` });
+    const storedPath = stored?.filePath || stored?.path || null;
+    if (storedPath && fs.existsSync(storedPath)) {
+      input.push({ type: "localImage", path: storedPath });
       continue;
     }
     const url = typeof attachment.url === "string" ? attachment.url : null;
-    if (url && /^data:image\//i.test(url)) input.push({ type: "input_image", image_url: url });
-    else if (url) input.push({ type: "input_image", image_url: url });
+    if (url) input.push({ type: "image", url });
   }
   return input;
 }
@@ -3399,9 +3606,22 @@ function optimisticTurnForSubmission(threadId, submissionId, body = {}) {
 }
 
 function updateCanonicalSubmission(entry, patch = {}) {
+  const previousState = entry?.state || null;
   Object.assign(entry, patch, { updatedAt: Date.now() });
   canonicalSubmissionStates.set(entry.key, entry);
   saveCanonicalSubmissionsSoon();
+  if (entry.threadId && (patch.state || patch.error || previousState !== entry.state)) {
+    appendCanonicalThreadEvent(entry.threadId, {
+      kind: "submission",
+      submissionId: entry.submissionId,
+      clientRequestId: entry.clientRequestId,
+      status: entry.state,
+      error: entry.error || null,
+      committedTurnId: entry.committedTurnId || null,
+      optimisticTurn: entry.optimisticTurn || null,
+      message: entry.error ? `Submission ${entry.state}: ${entry.error}` : `Submission ${entry.state}`,
+    });
+  }
   return entry;
 }
 
@@ -10487,6 +10707,263 @@ function liveBridgeSession() {
   return null;
 }
 
+function canonicalNotificationThreadId(method, params = {}) {
+  return threadIdFromParams(params)
+    || threadIdFromParams(params?.turn || {})
+    || threadIdFromParams(params?.item || {})
+    || threadIdFromParams(params?.request || {})
+    || null;
+}
+
+function canonicalNotificationEvent(method, params = {}) {
+  const base = {
+    method,
+    turnId: typeof params?.turnId === "string" ? params.turnId : (typeof params?.turn?.id === "string" ? params.turn.id : null),
+    itemId: typeof params?.itemId === "string" ? params.itemId : (typeof params?.item?.id === "string" ? params.item.id : null),
+    updatedAt: Date.now(),
+  };
+  if (method === "turn/started") return { ...base, kind: "turn_started", status: "running", message: "Turn started" };
+  if (method === "turn/completed") {
+    const status = params?.turn?.status || "completed";
+    return { ...base, kind: "turn_completed", status, message: status === "failed" ? "Turn failed" : "Turn completed" };
+  }
+  if (method === "thread/status/changed") {
+    const status = params?.status?.type || params?.status || null;
+    return { ...base, kind: "status", status, message: status ? `Status: ${status}` : "Status changed" };
+  }
+  if (method === "turn/plan/updated") {
+    return { ...base, kind: "plan", explanation: params?.explanation || null, plan: Array.isArray(params?.plan) ? params.plan : [] };
+  }
+  if (method === "item/agentMessage/delta") return { ...base, kind: "assistant_delta", text: String(params?.delta || "") };
+  if (method === "item/reasoning/summaryTextDelta" || method === "item/reasoning/textDelta" || method === "item/plan/delta") {
+    return { ...base, kind: "reasoning_delta", text: String(params?.delta || "") };
+  }
+  if (method === "item/commandExecution/outputDelta") return { ...base, kind: "tool_delta", text: String(params?.delta || "") };
+  if (method === "item/mcpToolCall/progress") return { ...base, kind: "tool_progress", message: redactUiSecretText(truncateUiText(JSON.stringify(params || {}), 500)) };
+  if (method === "item/started" || method === "item/completed") {
+    const item = params?.item || {};
+    const itemType = item.type || item.kind || "item";
+    const status = method === "item/started" ? "running" : "completed";
+    return {
+      ...base,
+      kind: itemType === "commandExecution" || itemType === "toolCall" || itemType === "mcpToolCall" ? "tool_event" : "item_event",
+      status,
+      itemType,
+      name: item.name || item.command || item.toolName || null,
+      message: [itemType, status].filter(Boolean).join(" "),
+    };
+  }
+  if (method === "error" || method === "warning" || method === "guardianWarning" || method === "configWarning") {
+    return { ...base, kind: "system_event", status: method === "error" ? "failed" : "warning", message: redactUiSecretText(params?.message || truncateUiText(JSON.stringify(params || {}), 500)) };
+  }
+  return { ...base, kind: "system_event", message: method };
+}
+
+function appendCanonicalThreadEvent(threadId, event = {}) {
+  if (typeof threadId !== "string" || threadId.length === 0) return null;
+  const entry = {
+    seq: ++canonicalEventSequence,
+    threadId,
+    updatedAt: Date.now(),
+    ...event,
+  };
+  const backlog = canonicalThreadEventBacklogs.get(threadId) || [];
+  backlog.push(entry);
+  while (backlog.length > canonicalEventBacklogLimit) backlog.shift();
+  canonicalThreadEventBacklogs.set(threadId, backlog);
+  const subscribers = canonicalThreadEventSubscribers.get(threadId);
+  if (subscribers) {
+    for (const res of subscribers) {
+      try {
+        res.write(`id: ${entry.seq}\n`);
+        res.write(`event: thread-event\n`);
+        res.write(`data: ${JSON.stringify(entry)}\n\n`);
+      } catch {}
+    }
+  }
+  return entry;
+}
+
+function finishActiveCanonicalSubmissions(threadId, status = "completed", error = null) {
+  if (typeof threadId !== "string" || threadId.length === 0) return;
+  for (const entry of canonicalSubmissionStates.values()) {
+    if (entry.threadId !== threadId) continue;
+    if (!["accepted", "ensuring_resume", "resuming", "submitted_to_app_server", "submitted", "running", "queued"].includes(entry.state)) continue;
+    updateCanonicalSubmission(entry, { state: status, error: error || null });
+  }
+}
+
+function canonicalEventsSince(threadId, since) {
+  const backlog = canonicalThreadEventBacklogs.get(threadId) || [];
+  const numeric = Number(since);
+  if (!Number.isFinite(numeric) || numeric <= 0) return backlog;
+  return backlog.filter((event) => Number(event.seq) > numeric);
+}
+
+function subscribeCanonicalThreadEvents(req, res, threadId, since = 0) {
+  res.writeHead(200, {
+    "Content-Type": "text/event-stream; charset=utf-8",
+    "Cache-Control": "no-store",
+    "Connection": "keep-alive",
+    "X-Accel-Buffering": "no",
+  });
+  res.write(`retry: 1500\n\n`);
+  for (const event of canonicalEventsSince(threadId, since)) {
+    res.write(`id: ${event.seq}\n`);
+    res.write(`event: thread-event\n`);
+    res.write(`data: ${JSON.stringify(event)}\n\n`);
+  }
+  let subscribers = canonicalThreadEventSubscribers.get(threadId);
+  if (!subscribers) {
+    subscribers = new Set();
+    canonicalThreadEventSubscribers.set(threadId, subscribers);
+  }
+  subscribers.add(res);
+  const heartbeat = setInterval(() => {
+    try { res.write(`: heartbeat ${Date.now()}\n\n`); } catch {}
+  }, canonicalEventHeartbeatMs);
+  heartbeat.unref?.();
+  req.on("close", () => {
+    clearInterval(heartbeat);
+    subscribers.delete(res);
+    if (subscribers.size === 0) canonicalThreadEventSubscribers.delete(threadId);
+  });
+}
+
+class AppServerEventHub {
+  constructor() {
+    this.socket = null;
+    this.connecting = null;
+    this.pending = new Map();
+    this.initialized = false;
+  }
+
+  async ensureConnected() {
+    if (this.socket && this.socket.readyState === WebSocket.OPEN && this.initialized) return;
+    if (this.connecting) return await this.connecting;
+    this.connecting = this.connect();
+    try {
+      await this.connecting;
+    } finally {
+      this.connecting = null;
+    }
+  }
+
+  connect() {
+    return new Promise((resolve, reject) => {
+      appServerProcess.ensureStarted().then(() => {
+        const socket = new WebSocket(`ws://127.0.0.1:${appServerPort}`);
+        this.socket = socket;
+        this.initialized = false;
+        const fail = (error) => {
+          if (!this.initialized) reject(error instanceof Error ? error : new Error(String(error)));
+        };
+        socket.on("open", () => {
+          const initId = `eventhub-init-${crypto.randomUUID()}`;
+          this.pending.set(initId, {
+            resolve: () => {
+              try { socket.send(JSON.stringify({ method: "initialized", params: {} })); } catch {}
+              this.initialized = true;
+              resolve();
+            },
+            reject,
+          });
+          socket.send(JSON.stringify({
+            id: initId,
+            method: "initialize",
+            params: {
+              clientInfo: { name: clientName, title: `${appDisplayName} EventHub`, version: "0.1.0" },
+              capabilities: { experimentalApi: true },
+            },
+          }));
+        });
+        socket.on("message", (data) => this.handleMessage(data));
+        socket.on("error", fail);
+        socket.on("close", () => {
+          this.initialized = false;
+          this.socket = null;
+          for (const pending of this.pending.values()) {
+            pending.reject(new Error("app-server event hub closed"));
+          }
+          this.pending.clear();
+        });
+      }).catch(reject);
+    });
+  }
+
+  handleMessage(data) {
+    let message;
+    try { message = JSON.parse(data.toString()); } catch { return; }
+    if (message.id !== undefined && this.pending.has(message.id)) {
+      const pending = this.pending.get(message.id);
+      this.pending.delete(message.id);
+      if (message.error) pending.reject(new Error(message.error.message || "app-server request failed"));
+      else pending.resolve(message.result);
+      return;
+    }
+    if (message.id !== undefined && message.method) {
+      const threadId = canonicalNotificationThreadId(message.method, message.params || {});
+      if (threadId) {
+        appendCanonicalThreadEvent(threadId, {
+          kind: "permission_request",
+          method: message.method,
+          requestId: message.id,
+          params: message.params || {},
+          status: "waiting_permission",
+          message: `Permission required: ${message.method}`,
+        });
+      }
+      try {
+        this.socket?.send(JSON.stringify({
+          id: message.id,
+          error: { code: -32601, message: "Host interaction requires a browser approval flow" },
+        }));
+      } catch {}
+      return;
+    }
+    if (message.method) {
+      const threadId = canonicalNotificationThreadId(message.method, message.params || {});
+      if (threadId) {
+        const event = canonicalNotificationEvent(message.method, message.params || {});
+        appendCanonicalThreadEvent(threadId, event);
+        if (message.method === "turn/completed") {
+          const turnStatus = message.params?.turn?.status || "completed";
+          finishActiveCanonicalSubmissions(threadId, turnStatus === "failed" ? "failed" : "completed", message.params?.turn?.error || null);
+        } else if (message.method === "thread/status/changed" && (message.params?.status?.type === "idle" || message.params?.status === "idle")) {
+          finishActiveCanonicalSubmissions(threadId, "completed", null);
+        }
+      }
+    }
+  }
+
+  async request(method, params = {}, options = {}) {
+    await this.ensureConnected();
+    const id = options.id || `eventhub-${crypto.randomUUID()}`;
+    const timeoutMs = Math.max(1000, Number(options.timeoutMs || 120000));
+    const payload = { id, method, params };
+    const promise = new Promise((resolve, reject) => {
+      const timeout = setTimeout(() => {
+        if (this.pending.delete(id)) reject(new Error("app-server request timed out"));
+      }, timeoutMs);
+      timeout.unref?.();
+      this.pending.set(id, {
+        resolve: (value) => {
+          clearTimeout(timeout);
+          resolve(value);
+        },
+        reject: (error) => {
+          clearTimeout(timeout);
+          reject(error);
+        },
+      });
+    });
+    this.socket.send(JSON.stringify(payload));
+    return await promise;
+  }
+}
+
+const appServerEventHub = new AppServerEventHub();
+
 async function transientAppServerRequest(method, params = {}, options = {}) {
   await appServerProcess.ensureStarted();
   const timeoutMs = Math.max(1000, Number(options.timeoutMs || 120000));
@@ -10563,23 +11040,17 @@ async function transientAppServerRequest(method, params = {}, options = {}) {
 }
 
 async function canonicalAppRequest(method, params = {}, options = {}) {
-  const session = liveBridgeSession();
-  if (session) {
-    return await session.appRequest(method, params, {
-      timeoutMs: options.timeoutMs || 120000,
-      internal: true,
-    });
-  }
-  return await transientAppServerRequest(method, params, options);
+  return await appServerEventHub.request(method, params, options);
 }
 
 async function canonicalEnsureResume(threadId, params = {}) {
-  const session = liveBridgeSession();
-  if (session && largeThreadFastPathInfo(threadId)) {
-    return await session.ensureLargeThreadLoadedInAppServer(threadId, params, {
-      timeoutMs: largeThreadAppResumeTimeoutMs,
-    });
-  }
+  try {
+    const loaded = await canonicalAppRequest("thread/loaded/list", {}, { timeoutMs: threadLoadedListTimeoutMs });
+    const data = Array.isArray(loaded?.data) ? loaded.data : (Array.isArray(loaded?.threads) ? loaded.threads : []);
+    if (data.some((item) => item === threadId || item?.id === threadId || item?.threadId === threadId)) {
+      return { loaded: true, alreadyLoaded: true };
+    }
+  } catch {}
   const resumeParams = largeThreadAppResumeParams({ ...params, threadId });
   if (resumeParams) {
     return await canonicalAppRequest("thread/resume", resumeParams, { timeoutMs: largeThreadAppResumeTimeoutMs });
@@ -10621,7 +11092,7 @@ async function runCanonicalSubmission(entry, body = {}) {
   }
   input = canonicalInputForMode(entry.mode, input);
   try {
-    updateCanonicalSubmission(entry, { state: "resuming" });
+    updateCanonicalSubmission(entry, { state: "ensuring_resume" });
     await canonicalEnsureResume(threadId, { threadId, input });
     let activeTurnId = await canonicalLatestActiveTurnId(threadId);
     let method = activeTurnId ? "turn/steer" : "turn/start";
@@ -10638,7 +11109,7 @@ async function runCanonicalSubmission(entry, body = {}) {
       return forceLocalManagedWorkspacePermissions(requestMethod, base);
     };
     let params = paramsFor(method, activeTurnId);
-    updateCanonicalSubmission(entry, { state: "submitted", method });
+    updateCanonicalSubmission(entry, { state: "submitted_to_app_server", method });
     let result;
     try {
       result = await canonicalAppRequest(method, params, { timeoutMs: 120000 });
@@ -10699,6 +11170,14 @@ function acceptCanonicalSubmission(threadId, body = {}) {
   };
   canonicalSubmissionStates.set(key, entry);
   saveCanonicalSubmissionsSoon();
+  appendCanonicalThreadEvent(threadId, {
+    kind: "submission",
+    submissionId,
+    clientRequestId,
+    status: entry.state,
+    optimisticTurn: entry.optimisticTurn,
+    message: "Submission accepted",
+  });
   runCanonicalSubmission(entry, body).catch((error) => {
     updateCanonicalSubmission(entry, { state: "failed", error: error.message || String(error) });
   });
@@ -10710,9 +11189,49 @@ function acceptCanonicalSubmission(threadId, body = {}) {
   };
 }
 
+async function canonicalForkThread(threadId, body = {}) {
+  const record = threadRecord(threadId);
+  if (!record) throw new Error("thread not found");
+  const runtime = largeThreadRuntimeSettings(record);
+  const params = applySelectedPermissionModeToParams("thread/fork", {
+    threadId,
+    path: record.rollout_path || undefined,
+    model: body.model || record.model || runtime.model || null,
+    modelProvider: body.modelProvider || record.model_provider || runtime.modelProvider || null,
+    serviceTier: body.serviceTier ?? runtime.serviceTier ?? null,
+    cwd: body.cwd || record.cwd || runtime.cwd || null,
+    config: largeThreadResumeConfig(body),
+    approvalPolicy: runtime.approvalPolicy,
+    approvalsReviewer: runtime.approvalsReviewer,
+    sandbox: runtime.sandbox,
+    excludeTurns: true,
+    threadSource: "user",
+  });
+  appendCanonicalThreadEvent(threadId, {
+    kind: "system_event",
+    status: "running",
+    message: "Fork requested",
+  });
+  const result = await canonicalAppRequest("thread/fork", params, { timeoutMs: largeThreadAppResumeTimeoutMs });
+  const forkedThreadId = result?.thread?.id || result?.threadId || null;
+  if (!forkedThreadId) throw new Error("thread/fork returned no thread id");
+  appendCanonicalThreadEvent(threadId, {
+    kind: "system_event",
+    status: "completed",
+    forkedThreadId,
+    message: "Fork completed",
+  });
+  appendCanonicalThreadEvent(forkedThreadId, {
+    kind: "system_event",
+    status: "completed",
+    message: `Forked from ${threadId}`,
+  });
+  return { ok: true, threadId: forkedThreadId, thread: result.thread || null };
+}
+
 function resumePersistedCanonicalSubmissions() {
   for (const entry of canonicalSubmissionStates.values()) {
-    if (!["accepted", "resuming", "queued"].includes(entry.state)) continue;
+    if (!["accepted", "ensuring_resume", "resuming", "queued"].includes(entry.state)) continue;
     if (!isPlainObject(entry.submitBody)) continue;
     runCanonicalSubmission(entry, entry.submitBody).catch((error) => {
       updateCanonicalSubmission(entry, { state: "failed", error: error.message || String(error) });
@@ -10782,7 +11301,7 @@ function singleSurfaceHtml(threadId) {
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>CodexApp Web</title>
   <style>
-    :root { color-scheme: light; --line:#e7e7e8; --muted:#737373; --text:#171717; --accent:#111; --bg:#fff; --soft:#f7f7f8; }
+    :root { color-scheme: light; --line:#e7e7e8; --muted:#737373; --text:#171717; --accent:#111; --bg:#fff; --soft:#f7f7f8; --danger:#b42318; }
     * { box-sizing: border-box; }
     html, body { height: 100%; margin: 0; overflow: hidden; background: var(--bg); color: var(--text); font: 14px/1.5 ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; }
     button, textarea, select { font: inherit; }
@@ -10796,12 +11315,13 @@ function singleSurfaceHtml(threadId) {
     .thread-title { overflow: hidden; white-space: nowrap; text-overflow: ellipsis; font-weight: 560; }
     .thread-preview { overflow: hidden; white-space: nowrap; text-overflow: ellipsis; color: var(--muted); font-size: 12px; margin-top: 2px; }
     .main { min-width: 0; min-height: 0; height: 100%; display: grid; grid-template-rows: 52px minmax(0, 1fr) auto; }
-    .top { border-bottom: 1px solid var(--line); display: flex; align-items: center; gap: 12px; padding: 0 18px; min-width: 0; }
+    .top { border-bottom: 1px solid var(--line); display: flex; align-items: center; gap: 8px; padding: 0 18px; min-width: 0; }
     .title { font-weight: 650; overflow: hidden; white-space: nowrap; text-overflow: ellipsis; min-width: 0; }
     .status { margin-left: auto; color: var(--muted); font-size: 12px; white-space: nowrap; }
     .transcript { min-height: 0; overflow: auto; padding: 20px 20px 120px; overflow-anchor: none; scrollbar-gutter: stable; }
     .inner { max-width: 860px; margin: 0 auto; }
     .loader { width: 100%; border: 1px solid var(--line); border-radius: 7px; background: #fff; color: var(--muted); padding: 8px 10px; margin: 4px 0 16px; cursor: pointer; overflow-anchor: none; }
+    .spacer { height: 0; overflow: hidden; overflow-anchor: none; flex: none; }
     .turn { margin: 16px 0; contain: layout paint; overflow-anchor: none; }
     .turn.optimistic { opacity: .78; }
     .bubble { white-space: pre-wrap; overflow-wrap: anywhere; border-radius: 8px; padding: 12px 14px; max-width: 760px; }
@@ -10809,8 +11329,13 @@ function singleSurfaceHtml(threadId) {
     .user .bubble { background: #f0f0f1; }
     .assistant .bubble, .tool .bubble { background: transparent; padding-left: 0; }
     .meta { color: var(--muted); font-size: 12px; margin: 6px 0 0; }
+    .meta.error { color: var(--danger); }
     .image-grid { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 8px; justify-content: flex-end; }
     .image-grid img { max-width: min(240px, 100%); max-height: 220px; border: 1px solid var(--line); border-radius: 7px; object-fit: contain; background: #fff; }
+    .event-row { color: var(--muted); font-size: 12px; margin: 5px 0; }
+    .event-row.strong { color: var(--text); }
+    .fork { border: 0; border-radius: 7px; height: 30px; padding: 0 10px; background: #f2f2f3; cursor: pointer; }
+    .fork:disabled { opacity: .55; cursor: default; }
     .composer-wrap { border-top: 1px solid var(--line); background: rgba(255,255,255,.96); padding: 12px 20px 16px; overflow-anchor: none; }
     .composer { max-width: 860px; margin: 0 auto; border: 1px solid var(--line); border-radius: 10px; background: #fff; display: grid; grid-template-rows: auto auto; box-shadow: 0 6px 20px rgba(0,0,0,.05); }
     textarea { min-height: 70px; max-height: 220px; resize: vertical; border: 0; outline: 0; padding: 12px 14px; border-radius: 10px; }
@@ -10834,8 +11359,8 @@ function singleSurfaceHtml(threadId) {
       <div id="threadList" class="thread-list"></div>
     </aside>
     <main class="main">
-      <header class="top"><div id="title" class="title">加载中</div><div id="status" class="status">接入中</div></header>
-      <section id="transcript" class="transcript"><div class="inner"><button id="loadOlder" class="loader">加载更早历史</button><div id="turns"></div></div></section>
+      <header class="top"><div id="title" class="title">加载中</div><button id="forkThread" class="fork" type="button">Fork</button><div id="status" class="status" data-role="thread-status">接入中</div></header>
+      <section id="transcript" class="transcript" data-role="thread-scroll"><div class="inner"><button id="loadOlder" class="loader">加载更早历史</button><div id="topSpacer" class="spacer"></div><div id="turns"></div><div id="bottomSpacer" class="spacer"></div></div></section>
       <section class="composer-wrap">
         <form id="composer" class="composer">
           <textarea id="draft" placeholder="要求后续变更"></textarea>
@@ -10859,15 +11384,46 @@ function singleSurfaceHtml(threadId) {
   <script>
   (() => {
     const threadId = ${safeThreadId};
-    const MAX_WINDOW = ${canonicalWindowCacheLimit};
-    const state = { items: [], pendingTurns: new Map(), newerCache: [], olderCursor: null, hasOlder: true, loading: false, restoring: false, submitting: false, attachments: [], statusTimer: null, viewportCheckRaf: 0 };
+    const PAGE_LIMIT = ${canonicalWindowDefaultLimit};
+    const DOM_LIMIT = Math.min(40, Math.max(24, ${canonicalWindowCacheLimit}));
+    const state = {
+      items: [],
+      pendingTurns: new Map(),
+      nodeCache: new Map(),
+      heightCache: new Map(),
+      threadRows: new Map(),
+      olderCursor: null,
+      newerCursor: null,
+      hasOlder: true,
+      hasNewer: false,
+      topSpacerHeight: 0,
+      bottomSpacerHeight: 0,
+      loadingOlder: false,
+      loadingNewer: false,
+      loadingLatest: false,
+      restoring: false,
+      submitting: false,
+      attachments: [],
+      statusTimer: null,
+      viewportCheckRaf: 0,
+      tailWatchTimer: 0,
+      lastEventSeq: 0,
+      events: null,
+      tailAttached: true,
+      loadGeneration: { older: 0, newer: 0, latest: 0 },
+      autoFillCount: 0,
+    };
+    window.__codexappSurfaceState = state;
     const els = {
       threadList: document.getElementById('threadList'),
       refreshThreads: document.getElementById('refreshThreads'),
       title: document.getElementById('title'),
       status: document.getElementById('status'),
+      forkThread: document.getElementById('forkThread'),
       transcript: document.getElementById('transcript'),
       turns: document.getElementById('turns'),
+      topSpacer: document.getElementById('topSpacer'),
+      bottomSpacer: document.getElementById('bottomSpacer'),
       loadOlder: document.getElementById('loadOlder'),
       composer: document.getElementById('composer'),
       draft: document.getElementById('draft'),
@@ -10884,13 +11440,36 @@ function singleSurfaceHtml(threadId) {
       return await response.json();
     }
     function statusLabel(value) {
-      return ({ idle:'空闲', resuming:'接入中', queued:'排队中', running:'运行中', waiting_permission:'等待权限', failed:'失败', completed:'已完成' })[value] || value || '未知';
+      return ({ idle:'空闲', accepted:'已接收', ensuring_resume:'接入中', resuming:'接入中', queued:'排队中', submitted_to_app_server:'已转发', submitted:'已转发', running:'运行中', waiting_permission:'等待权限', failed:'失败', completed:'已完成' })[value] || value || '未知';
+    }
+    function atTail() {
+      return els.transcript.scrollHeight - els.transcript.clientHeight - els.transcript.scrollTop < 48;
+    }
+    function markUserScrollIntent() {
+      state.tailAttached = atTail();
+      if (state.tailAttached && state.hasNewer && state.newerCursor && !state.loadingNewer) {
+        setTimeout(() => { void loadNewer(); }, 0);
+      }
+    }
+    function scheduleTailWatch() {
+      if (state.tailWatchTimer) return;
+      state.tailWatchTimer = setTimeout(() => {
+        state.tailWatchTimer = 0;
+        if (!state.hasNewer || !state.newerCursor) return;
+        if (atTail() && !state.loadingNewer) {
+          void loadNewer();
+          return;
+        }
+        scheduleTailWatch();
+      }, 250);
     }
     function captureAnchor() {
       const containerTop = els.transcript.getBoundingClientRect().top;
       const nodes = Array.from(els.turns.querySelectorAll('[data-turn-id]'));
       const node = nodes.find((item) => item.getBoundingClientRect().bottom > containerTop + 24);
-      return node ? { id: node.dataset.turnId, top: node.getBoundingClientRect().top } : null;
+      if (!node) return null;
+      const rect = node.getBoundingClientRect();
+      return { id: node.dataset.turnId, offset: containerTop + 24 - rect.top };
     }
     function restoreAnchor(anchor, attempts) {
       if (!anchor) return;
@@ -10899,7 +11478,9 @@ function singleSurfaceHtml(threadId) {
       const apply = () => {
         const node = els.turns.querySelector('[data-turn-id="' + CSS.escape(anchor.id) + '"]');
         if (node) {
-          const delta = node.getBoundingClientRect().top - anchor.top;
+          const containerTop = els.transcript.getBoundingClientRect().top;
+          const wantedTop = containerTop + 24 - anchor.offset;
+          const delta = node.getBoundingClientRect().top - wantedTop;
           if (Math.abs(delta) > 0.5) els.transcript.scrollTop += delta;
         }
         remaining -= 1;
@@ -10913,14 +11494,51 @@ function singleSurfaceHtml(threadId) {
       apply();
     }
     function setLoadingUi() {
-      els.loadOlder.disabled = state.loading || !state.hasOlder;
-      els.loadOlder.textContent = state.loading ? '加载中...' : (state.hasOlder ? '加载更早历史' : '已经到达最早历史');
+      els.loadOlder.disabled = state.loadingOlder || !state.hasOlder;
+      els.loadOlder.textContent = state.loadingOlder ? '加载中...' : (state.hasOlder ? '加载更早历史' : '已经到达最早历史');
+      els.topSpacer.style.height = Math.max(0, Math.round(state.topSpacerHeight)) + 'px';
+      els.bottomSpacer.style.height = Math.max(0, Math.round(state.bottomSpacerHeight)) + 'px';
+    }
+    function turnFingerprint(turn) {
+      const items = Array.isArray(turn.items) ? turn.items : [];
+      return JSON.stringify({
+        id: turn.id,
+        status: turn.status || '',
+        error: turn.error || '',
+        count: items.length,
+        parts: items.map((item) => [item.id, item.type, item.status || '', item.text || item.previewText || item.summary || '', item.url || ''])
+      });
+    }
+    function estimateTurnHeight(turn) {
+      if (!turn) return 160;
+      if (state.heightCache.has(turn.id)) return state.heightCache.get(turn.id);
+      let chars = 0;
+      let images = 0;
+      for (const item of Array.isArray(turn.items) ? turn.items : []) {
+        chars += String(item.text || item.previewText || item.summary || '').length;
+        if (item.type === 'user_image') images += 1;
+      }
+      return Math.max(96, Math.min(1200, 80 + Math.ceil(chars / 72) * 22 + images * 180));
+    }
+    function measureHeights() {
+      for (const node of els.turns.querySelectorAll('[data-turn-id]')) {
+        const height = node.getBoundingClientRect().height + 32;
+        if (height > 0) state.heightCache.set(node.dataset.turnId, height);
+      }
     }
     function mergeSubmissionStates(submissions) {
       if (!Array.isArray(submissions) || submissions.length === 0) return false;
       let changed = false;
       for (const submission of submissions) {
         if (!submission?.submissionId) continue;
+        const committedTurnId = typeof submission.committedTurnId === 'string' ? submission.committedTurnId : '';
+        if (submission.state === 'completed' && committedTurnId && state.items.some((item) => item.id === committedTurnId || turnCanonicalKey(item) === committedTurnId.split('@')[0])) {
+          if (state.pendingTurns.delete(submission.submissionId)) changed = true;
+          const before = state.items.length;
+          state.items = state.items.filter((item) => item.id !== submission.submissionId && item.submissionId !== submission.submissionId);
+          if (state.items.length !== before) changed = true;
+          continue;
+        }
         let turn = state.pendingTurns.get(submission.submissionId) || state.items.find((item) => item.id === submission.submissionId || item.submissionId === submission.submissionId);
         if (!turn && submission.optimisticTurn) {
           turn = JSON.parse(JSON.stringify(submission.optimisticTurn));
@@ -10932,7 +11550,7 @@ function singleSurfaceHtml(threadId) {
           ? 'failed'
           : (submission.state === 'completed'
             ? 'completed'
-            : (submission.state === 'running' || submission.state === 'submitted' || submission.state === 'resuming'
+            : (submission.state === 'running' || submission.state === 'submitted' || submission.state === 'submitted_to_app_server' || submission.state === 'ensuring_resume' || submission.state === 'resuming'
               ? 'running'
               : turn.status));
         if (turn.status !== nextStatus || turn.error !== submission.error) {
@@ -10945,25 +11563,38 @@ function singleSurfaceHtml(threadId) {
     }
     function mergeIncomingTurns(incoming) {
       const list = Array.isArray(incoming) ? incoming : [];
-      const known = new Set(state.items.map((item) => item.id));
+      const known = new Set(state.items.map(turnCanonicalKey));
       let changed = false;
       for (const turn of list) {
-        if (!turn?.id || known.has(turn.id)) continue;
+        const key = turnCanonicalKey(turn);
+        if (!turn?.id || known.has(key)) continue;
         if (turn.submissionId) {
           if (state.pendingTurns.delete(turn.submissionId)) changed = true;
           const optimisticIndex = state.items.findIndex((item) => item.id === turn.submissionId);
           if (optimisticIndex >= 0) {
             state.items.splice(optimisticIndex, 1, turn);
-            known.add(turn.id);
+            known.add(key);
             changed = true;
             continue;
           }
         }
         state.items.push(turn);
-        known.add(turn.id);
+        known.add(key);
         changed = true;
       }
+      if (changed) normalizeWindowItems();
       return changed;
+    }
+    function addOrReplaceTurn(turn, preferAppend) {
+      if (!turn || !turn.id) return false;
+      const existing = state.items.findIndex((item) => item.id === turn.id || item.submissionId === turn.submissionId);
+      if (existing >= 0) {
+        state.items.splice(existing, 1, turn);
+        return true;
+      }
+      if (preferAppend !== false) state.items.push(turn);
+      else state.items.unshift(turn);
+      return true;
     }
     function visibleTurns() {
       const turns = state.items.slice();
@@ -10975,8 +11606,41 @@ function singleSurfaceHtml(threadId) {
       }
       return turns;
     }
+    function turnCanonicalKey(turn) {
+      if (!turn) return '';
+      if (turn.sourceTurnId) return String(turn.sourceTurnId);
+      return String(turn.id || '').split('@')[0];
+    }
+    function turnOffsetValue(turn) {
+      const numeric = Number(turn?.offset);
+      if (Number.isFinite(numeric)) return numeric;
+      const match = String(turn?.id || '').match(/@(\d+)$/);
+      return match ? Number(match[1]) : Number.MAX_SAFE_INTEGER;
+    }
+    function turnCompletenessScore(turn) {
+      return (Array.isArray(turn?.items) ? turn.items : []).reduce((sum, item) => {
+        return sum + 1 + String(item.text || item.previewText || item.summary || item.message || '').length;
+      }, 0);
+    }
+    function betterDuplicateTurn(current, candidate) {
+      const currentScore = turnCompletenessScore(current);
+      const candidateScore = turnCompletenessScore(candidate);
+      if (candidateScore > currentScore) return candidate;
+      if (candidateScore < currentScore) return current;
+      return turnOffsetValue(candidate) < turnOffsetValue(current) ? candidate : current;
+    }
+    function normalizeWindowItems() {
+      const byKey = new Map();
+      for (const turn of state.items) {
+        if (!turn?.id) continue;
+        const key = turnCanonicalKey(turn);
+        const existing = byKey.get(key);
+        byKey.set(key, existing ? betterDuplicateTurn(existing, turn) : turn);
+      }
+      state.items = Array.from(byKey.values()).sort((a, b) => turnOffsetValue(a) - turnOffsetValue(b));
+    }
     function turnStatusLabel(value) {
-      return ({ optimistic:'已提交', accepted:'已接收', resuming:'接入中', submitted:'已转发', running:'运行中', failed:'失败', queued:'排队中' })[value] || value || '';
+      return ({ optimistic:'已提交', accepted:'已接收', ensuring_resume:'接入中', resuming:'接入中', submitted_to_app_server:'已转发', submitted:'已转发', running:'运行中', failed:'失败', queued:'排队中', completed:'已完成' })[value] || value || '';
     }
     function textNode(text) {
       return document.createTextNode(esc(text));
@@ -11007,6 +11671,7 @@ function singleSurfaceHtml(threadId) {
       const section = document.createElement('section');
       section.className = 'turn' + (turn.status === 'optimistic' ? ' optimistic' : '');
       section.dataset.turnId = turn.id;
+      section.dataset.fingerprint = turnFingerprint(turn);
       const items = Array.isArray(turn.items) ? turn.items : [];
       const userItems = items.filter((item) => item.type === 'user_text' || item.type === 'user_image');
       const otherItems = items.filter((item) => !userItems.includes(item));
@@ -11036,81 +11701,195 @@ function singleSurfaceHtml(threadId) {
       }
       for (const item of otherItems) {
         const wrap = document.createElement('div');
-        wrap.className = item.type === 'tool_call' || item.type === 'tool_result' ? 'tool' : 'assistant';
+        wrap.className = item.type === 'tool_call' || item.type === 'tool_result' || item.type === 'tool_delta' || item.type === 'tool_event' ? 'tool' : 'assistant';
         const bubble = document.createElement('div');
         bubble.className = 'bubble';
-        if (item.type === 'assistant_text' || item.type === 'reasoning_summary' || item.type === 'tool_result') renderTextItem(item, bubble);
-        else bubble.textContent = [item.name, item.status, item.summary].filter(Boolean).join(' · ');
+        if (item.type === 'assistant_text' || item.type === 'reasoning_summary' || item.type === 'tool_result' || item.type === 'tool_delta') renderTextItem(item, bubble);
+        else if (item.type === 'system_event' || item.type === 'tool_event') {
+          const row = document.createElement('div');
+          row.className = 'event-row strong';
+          row.textContent = [item.name, item.status, item.summary || item.message].filter(Boolean).join(' · ');
+          bubble.appendChild(row);
+        } else if (item.type === 'plan') {
+          bubble.textContent = item.text || item.previewText || '';
+        } else bubble.textContent = [item.name, item.status, item.summary].filter(Boolean).join(' · ');
         wrap.appendChild(bubble);
         section.appendChild(wrap);
       }
       if (turn.status && turn.status !== 'completed') {
         const meta = document.createElement('div');
-        meta.className = 'meta';
+        meta.className = 'meta' + (turn.status === 'failed' ? ' error' : '');
         meta.textContent = turn.error ? (turnStatusLabel(turn.status) + ': ' + turn.error) : turnStatusLabel(turn.status);
         section.appendChild(meta);
       }
       return section;
     }
+    function reconcileTurns(turns) {
+      const wanted = new Set(turns.map((turn) => turn.id));
+      let cursor = els.turns.firstChild;
+      for (const turn of turns) {
+        let node = state.nodeCache.get(turn.id);
+        const fp = turnFingerprint(turn);
+        if (!node || node.dataset.fingerprint !== fp) {
+          const nextNode = renderTurn(turn);
+          if (node && node.parentNode === els.turns) {
+            els.turns.replaceChild(nextNode, node);
+          }
+          node = nextNode;
+          state.nodeCache.set(turn.id, node);
+        }
+        if (node.parentNode !== els.turns) {
+          els.turns.insertBefore(node, cursor);
+        } else if (node !== cursor) {
+          els.turns.insertBefore(node, cursor);
+        }
+        cursor = node.nextSibling;
+      }
+      while (cursor) {
+        const next = cursor.nextSibling;
+        if (cursor.dataset?.turnId && !wanted.has(cursor.dataset.turnId)) {
+          state.nodeCache.delete(cursor.dataset.turnId);
+          cursor.remove();
+        }
+        cursor = next;
+      }
+    }
     function renderTurns(anchor) {
-      els.turns.replaceChildren(...visibleTurns().map(renderTurn));
+      measureHeights();
+      reconcileTurns(visibleTurns());
       setLoadingUi();
-      restoreAnchor(anchor);
+      requestAnimationFrame(() => {
+        measureHeights();
+        restoreAnchor(anchor);
+      });
+    }
+    function cursorForTurn(turn) {
+      return turn?.pageCursor || turn?.cursor || null;
+    }
+    function updateWindowCursors(page) {
+      if (page && Object.prototype.hasOwnProperty.call(page, 'olderCursor')) state.olderCursor = page.olderCursor || null;
+      if (page && Object.prototype.hasOwnProperty.call(page, 'newerCursor')) state.newerCursor = page.newerCursor || null;
+      state.hasOlder = !!page?.hasOlder;
+      state.hasNewer = !!page?.hasNewer || !!state.newerCursor || state.bottomSpacerHeight > 1;
+      const first = state.items[0];
+      if (!state.hasOlder && !state.olderCursor && Number.isFinite(Number(first?.offset)) && Number(first.offset) > 0) {
+        state.olderCursor = 'codexapp-window:' + String(Math.trunc(Number(first.offset)));
+        state.hasOlder = true;
+      }
+      if (state.hasNewer) scheduleTailWatch();
+    }
+    function pruneWindow(protectId, mode) {
+      measureHeights();
+      while (state.items.length > DOM_LIMIT) {
+        let removed = null;
+        if (mode === 'head') {
+          if (state.items[0]?.id === protectId && state.items.length > 1) removed = state.items.splice(1, 1)[0];
+          else removed = state.items.shift();
+          state.topSpacerHeight += estimateTurnHeight(removed);
+        } else {
+          if (state.items.at(-1)?.id === protectId && state.items.length > 1) removed = state.items.splice(state.items.length - 2, 1)[0];
+          else removed = state.items.pop();
+          state.bottomSpacerHeight += estimateTurnHeight(removed);
+        }
+      }
+    }
+    function reduceSpacer(side, turns) {
+      const amount = (Array.isArray(turns) ? turns : []).reduce((sum, turn) => sum + estimateTurnHeight(turn), 0);
+      if (side === 'top') state.topSpacerHeight = Math.max(0, state.topSpacerHeight - amount);
+      if (side === 'bottom') state.bottomSpacerHeight = Math.max(0, state.bottomSpacerHeight - amount);
     }
     async function loadLatest() {
-      state.loading = true;
+      const generation = ++state.loadGeneration.latest;
+      state.loadingLatest = true;
       setLoadingUi();
       const result = await api('/api/threads/' + encodeURIComponent(threadId) + '/window?direction=latest&limit=${canonicalWindowDefaultLimit}');
+      if (generation !== state.loadGeneration.latest) return;
       state.items = result.items || [];
-      state.olderCursor = result.page?.olderCursor || null;
-      state.hasOlder = !!result.page?.hasOlder;
+      normalizeWindowItems();
+      state.topSpacerHeight = 0;
+      state.bottomSpacerHeight = 0;
+      updateWindowCursors(result.page);
       mergeSubmissionStates(result.status?.submissions);
       els.title.textContent = result.thread?.title || threadId;
       els.status.textContent = statusLabel(result.status?.state);
-      state.loading = false;
+      state.loadingLatest = false;
       renderTurns();
-      requestAnimationFrame(() => { els.transcript.scrollTop = els.transcript.scrollHeight; queueViewportCheck(); });
+      requestAnimationFrame(() => { els.transcript.scrollTop = els.transcript.scrollHeight; state.tailAttached = true; queueViewportCheck(); });
     }
     async function loadOlder() {
-      if (state.restoring || state.loading || !state.hasOlder || !state.olderCursor) return;
+      if (state.restoring || state.loadingOlder || !state.hasOlder || !state.olderCursor) return;
       const anchor = captureAnchor();
-      state.loading = true;
+      const generation = ++state.loadGeneration.older;
+      state.loadingOlder = true;
       setLoadingUi();
       const result = await api('/api/threads/' + encodeURIComponent(threadId) + '/window?direction=older&cursor=' + encodeURIComponent(state.olderCursor) + '&limit=${canonicalWindowDefaultLimit}');
+      if (generation !== state.loadGeneration.older) return;
       const incoming = result.items || [];
-      const existing = new Set(state.items.map((item) => item.id));
-      state.items = incoming.filter((item) => !existing.has(item.id)).concat(state.items);
-      while (state.items.length > MAX_WINDOW) state.newerCache.unshift(state.items.pop());
-      state.olderCursor = result.page?.olderCursor || null;
-      state.hasOlder = !!result.page?.hasOlder;
+      const existing = new Set(state.items.map(turnCanonicalKey));
+      reduceSpacer('top', incoming);
+      state.items = incoming.filter((item) => !existing.has(turnCanonicalKey(item))).concat(state.items);
+      normalizeWindowItems();
+      updateWindowCursors(result.page);
       mergeSubmissionStates(result.status?.submissions);
-      state.loading = false;
+      pruneWindow(anchor?.id, 'tail');
+      state.loadingOlder = false;
       renderTurns(anchor);
     }
-    function loadNewerFromCache() {
-      if (state.restoring || state.loading || state.newerCache.length === 0) return;
+    async function loadNewer() {
+      if (state.restoring || state.loadingNewer || !state.hasNewer || !state.newerCursor) return;
       const anchor = captureAnchor();
-      const take = state.newerCache.splice(0, ${canonicalWindowDefaultLimit});
-      state.items = state.items.concat(take);
-      while (state.items.length > MAX_WINDOW) state.items.shift();
+      const generation = ++state.loadGeneration.newer;
+      state.loadingNewer = true;
+      const result = await api('/api/threads/' + encodeURIComponent(threadId) + '/window?direction=newer&cursor=' + encodeURIComponent(state.newerCursor) + '&limit=${canonicalWindowDefaultLimit}');
+      if (generation !== state.loadGeneration.newer) return;
+      const incoming = result.items || [];
+      const existing = new Set(state.items.map(turnCanonicalKey));
+      const filtered = incoming.filter((item) => !existing.has(turnCanonicalKey(item)));
+      reduceSpacer('bottom', filtered);
+      state.items = state.items.concat(filtered);
+      normalizeWindowItems();
+      updateWindowCursors(result.page);
+      if (result.page && !result.page.hasNewer) {
+        state.bottomSpacerHeight = 0;
+        state.hasNewer = false;
+        state.newerCursor = null;
+      }
+      mergeSubmissionStates(result.status?.submissions);
+      pruneWindow(anchor?.id, 'head');
+      state.loadingNewer = false;
       renderTurns(anchor);
     }
     async function loadThreads() {
       const result = await api('/api/threads?limit=80');
-      els.threadList.replaceChildren(...(result.items || []).map((thread) => {
-        const button = document.createElement('button');
-        button.type = 'button';
-        button.className = 'thread-row' + (thread.id === threadId ? ' active' : '');
-        const title = document.createElement('div');
-        title.className = 'thread-title';
-        title.textContent = thread.title || 'Untitled';
-        const preview = document.createElement('div');
-        preview.className = 'thread-preview';
-        preview.textContent = thread.preview || '';
-        button.append(title, preview);
-        button.addEventListener('click', () => { location.href = '/local/' + encodeURIComponent(thread.id); });
-        return button;
-      }));
+      const wanted = new Set();
+      let cursor = els.threadList.firstChild;
+      for (const thread of result.items || []) {
+        wanted.add(thread.id);
+        let row = state.threadRows.get(thread.id);
+        if (!row) {
+          row = document.createElement('button');
+          row.type = 'button';
+          row.className = 'thread-row';
+          row.innerHTML = '<div class="thread-title"></div><div class="thread-preview"></div>';
+          row.addEventListener('click', () => { if (thread.id !== threadId) location.href = '/local/' + encodeURIComponent(thread.id); });
+          state.threadRows.set(thread.id, row);
+        }
+        row.className = 'thread-row' + (thread.id === threadId ? ' active' : '');
+        row.querySelector('.thread-title').textContent = thread.title || 'Untitled';
+        row.querySelector('.thread-preview').textContent = thread.preview || '';
+        if (row.parentNode !== els.threadList) els.threadList.insertBefore(row, cursor);
+        else if (row !== cursor) els.threadList.insertBefore(row, cursor);
+        cursor = row.nextSibling;
+      }
+      while (cursor) {
+        const next = cursor.nextSibling;
+        const id = Array.from(state.threadRows.entries()).find(([, node]) => node === cursor)?.[0];
+        if (!id || !wanted.has(id)) {
+          if (id) state.threadRows.delete(id);
+          cursor.remove();
+        }
+        cursor = next;
+      }
     }
     async function pollStatus() {
       try {
@@ -11119,15 +11898,14 @@ function singleSurfaceHtml(threadId) {
         if (result.lastError) els.status.textContent += ' · ' + result.lastError;
         const submissionChanged = mergeSubmissionStates(result.submissions);
         if (result.state === 'running' || result.state === 'resuming' || result.state === 'queued') {
-          const nearBottom = els.transcript.scrollHeight - els.transcript.clientHeight - els.transcript.scrollTop < 280;
-          const anchor = nearBottom ? null : captureAnchor();
           const latest = await api('/api/threads/' + encodeURIComponent(threadId) + '/window?direction=latest&limit=${canonicalWindowDefaultLimit}');
-          const changed = mergeIncomingTurns(latest.items);
+          const changed = state.tailAttached ? mergeIncomingTurns(latest.items) : false;
           const latestSubmissionChanged = mergeSubmissionStates(latest.status?.submissions);
-          while (state.items.length > MAX_WINDOW) state.items.shift();
           if (changed || submissionChanged || latestSubmissionChanged) {
+            const anchor = state.tailAttached ? null : captureAnchor();
+            pruneWindow(anchor?.id, state.tailAttached ? 'head' : 'tail');
             renderTurns(anchor);
-            if (nearBottom) requestAnimationFrame(() => { els.transcript.scrollTop = els.transcript.scrollHeight; });
+            if (state.tailAttached) requestAnimationFrame(() => { els.transcript.scrollTop = els.transcript.scrollHeight; });
           }
         } else if (submissionChanged) {
           renderTurns(captureAnchor());
@@ -11157,7 +11935,8 @@ function singleSurfaceHtml(threadId) {
     }
     function renderAttachments() {
       els.attachments.classList.toggle('hidden', state.attachments.length === 0);
-      els.attachments.replaceChildren(...state.attachments.map((item) => {
+      while (els.attachments.firstChild) els.attachments.firstChild.remove();
+      for (const item of state.attachments) {
         const chip = document.createElement('span');
         chip.className = 'attachment-chip';
         const img = document.createElement('img');
@@ -11166,17 +11945,22 @@ function singleSurfaceHtml(threadId) {
         const label = document.createElement('span');
         label.textContent = item.name || 'image';
         chip.append(img, label);
-        return chip;
-      }));
+        els.attachments.appendChild(chip);
+      }
     }
     function maybeLoadAroundViewport() {
       if (state.restoring) return;
-      if (state.loading) return;
+      const notEnoughContent = els.transcript.scrollHeight <= els.transcript.clientHeight + 160;
+      if (notEnoughContent && state.hasOlder && state.olderCursor && !state.loadingOlder && state.autoFillCount < 6) {
+        state.autoFillCount += 1;
+        void loadOlder();
+        return;
+      }
       if (els.transcript.scrollTop < 80) {
         void loadOlder();
         return;
       }
-      if (els.transcript.scrollHeight - els.transcript.clientHeight - els.transcript.scrollTop < 80) loadNewerFromCache();
+      if (els.transcript.scrollHeight - els.transcript.clientHeight - els.transcript.scrollTop < 120) void loadNewer();
     }
     function queueViewportCheck() {
       if (state.viewportCheckRaf) return;
@@ -11186,10 +11970,22 @@ function singleSurfaceHtml(threadId) {
       });
     }
     els.loadOlder.addEventListener('click', loadOlder);
-    els.transcript.addEventListener('scroll', queueViewportCheck, { passive: true });
-    els.transcript.addEventListener('wheel', queueViewportCheck, { passive: true });
-    els.transcript.addEventListener('touchmove', queueViewportCheck, { passive: true });
+    els.transcript.addEventListener('scroll', () => { markUserScrollIntent(); queueViewportCheck(); }, { passive: true });
+    els.transcript.addEventListener('wheel', () => setTimeout(queueViewportCheck, 0), { passive: true });
+    els.transcript.addEventListener('touchmove', () => setTimeout(queueViewportCheck, 0), { passive: true });
     els.refreshThreads.addEventListener('click', loadThreads);
+    els.forkThread.addEventListener('click', async () => {
+      if (els.forkThread.disabled) return;
+      els.forkThread.disabled = true;
+      els.status.textContent = 'Fork 中';
+      try {
+        const result = await api('/api/threads/' + encodeURIComponent(threadId) + '/fork', { method:'POST', headers:{ 'content-type':'application/json' }, body:'{}' });
+        location.href = '/local/' + encodeURIComponent(result.threadId);
+      } catch (error) {
+        els.status.textContent = 'Fork 失败 · ' + (error.message || String(error));
+        els.forkThread.disabled = false;
+      }
+    });
     els.pickFile.addEventListener('click', () => els.fileInput.click());
     els.fileInput.addEventListener('change', async () => {
       const files = Array.from(els.fileInput.files || []);
@@ -11203,7 +11999,14 @@ function singleSurfaceHtml(threadId) {
       const text = els.draft.value.trim();
       if (!text && state.attachments.length === 0) return;
       const attachments = state.attachments.map((item) => ({ id: item.id, url: item.url, name: item.name, type: item.type }));
-      const body = { clientRequestId: crypto.randomUUID(), mode: els.mode.value, input: text, attachments };
+      const clientRequestId = crypto.randomUUID();
+      const body = { clientRequestId, mode: els.mode.value, input: text, attachments };
+      const localTurn = optimisticLocalTurn(clientRequestId, text, attachments);
+      addOrReplaceTurn(localTurn, true);
+      state.tailAttached = true;
+      pruneWindow(localTurn.id, 'head');
+      renderTurns();
+      requestAnimationFrame(() => { els.transcript.scrollTop = els.transcript.scrollHeight; });
       els.draft.value = '';
       state.attachments = [];
       renderAttachments();
@@ -11216,30 +12019,111 @@ function singleSurfaceHtml(threadId) {
           body: JSON.stringify(body)
         });
         if (result.optimisticTurn) {
+          state.pendingTurns.delete(localTurn.id);
           state.pendingTurns.set(result.optimisticTurn.id, result.optimisticTurn);
+          const index = state.items.findIndex((item) => item.id === localTurn.id);
+          if (index >= 0) state.items.splice(index, 1, result.optimisticTurn);
           renderTurns();
           requestAnimationFrame(() => { els.transcript.scrollTop = els.transcript.scrollHeight; });
         }
         els.status.textContent = statusLabel(result.state);
       } catch (error) {
-        const failed = optimisticFailureTurn(text, attachments, error.message || String(error));
-        state.pendingTurns.set(failed.id, failed);
+        localTurn.status = 'failed';
+        localTurn.error = error.message || String(error);
+        state.pendingTurns.set(localTurn.id, localTurn);
         renderTurns();
       } finally {
         state.submitting = false;
         els.send.disabled = false;
       }
     });
+    function optimisticLocalTurn(clientRequestId, text, attachments) {
+      return { id: 'local-' + clientRequestId, threadId, status: 'optimistic', items: [
+        ...(text ? [{ id:'local-text-' + clientRequestId, type:'user_text', text, previewText:text, fullTextAvailable:false, contentLength:text.length }] : []),
+        ...attachments.map((a, i) => ({ id:'local-image-' + clientRequestId + '-' + i, type:'user_image', url:a.previewUrl || a.url }))
+      ] };
+    }
     function optimisticFailureTurn(text, attachments, error) {
       return { id: 'failed-' + crypto.randomUUID(), threadId, status: 'failed', items: [
         ...(text ? [{ id:'failed-text', type:'user_text', text, previewText:text, fullTextAvailable:false, contentLength:text.length }] : []),
         ...attachments.map((a, i) => ({ id:'failed-image-' + i, type:'user_image', url:a.url }))
       ], error };
     }
+    function ensureLiveTurn(event) {
+      const id = event.turnId || event.submissionId || 'live-' + event.seq;
+      let turn = state.items.find((item) => item.id === id);
+      if (!turn) {
+        turn = { id, threadId, status:'running', items: [] };
+        addOrReplaceTurn(turn, true);
+      }
+      return turn;
+    }
+    function upsertLiveText(turn, itemId, type, text, append) {
+      const id = itemId || type;
+      let item = turn.items.find((part) => part.id === id);
+      if (!item) {
+        item = { id, type, text:'', previewText:'', fullTextAvailable:false, contentLength:0 };
+        turn.items.push(item);
+      }
+      item.text = append ? String(item.text || '') + String(text || '') : String(text || '');
+      item.previewText = item.text;
+      item.contentLength = item.text.length;
+    }
+    function handleThreadEvent(event) {
+      if (!event || Number(event.seq || 0) <= state.lastEventSeq) return;
+      state.lastEventSeq = Number(event.seq || state.lastEventSeq);
+      if (event.status) els.status.textContent = statusLabel(event.status);
+      let changed = false;
+      if (event.kind === 'submission') {
+        changed = mergeSubmissionStates([{ submissionId:event.submissionId, clientRequestId:event.clientRequestId, state:event.status, error:event.error, optimisticTurn:event.optimisticTurn }]);
+      } else if (event.kind === 'turn_started' || event.kind === 'turn_completed') {
+        const turn = ensureLiveTurn(event);
+        turn.status = event.kind === 'turn_completed' ? (event.status || 'completed') : 'running';
+        changed = true;
+      } else if (event.kind === 'assistant_delta' || event.kind === 'reasoning_delta' || event.kind === 'tool_delta') {
+        const turn = ensureLiveTurn(event);
+        const type = event.kind === 'assistant_delta' ? 'assistant_text' : (event.kind === 'tool_delta' ? 'tool_delta' : 'reasoning_summary');
+        upsertLiveText(turn, event.itemId || type, type, event.text || '', true);
+        changed = true;
+      } else if (event.kind === 'plan') {
+        const turn = ensureLiveTurn(event);
+        const text = (event.explanation ? event.explanation + '\\n' : '') + (Array.isArray(event.plan) ? event.plan.map((item, index) => String(index + 1) + '. ' + (item.step || item.text || item.status || JSON.stringify(item))).join('\\n') : '');
+        upsertLiveText(turn, event.itemId || 'plan', 'plan', text, false);
+        changed = true;
+      } else if (event.kind === 'tool_event' || event.kind === 'tool_progress' || event.kind === 'permission_request' || event.kind === 'system_event') {
+        const turn = ensureLiveTurn(event);
+        turn.items.push({ id:'event-' + event.seq, type:event.kind === 'tool_event' ? 'tool_event' : 'system_event', status:event.status || '', name:event.name || event.method || '', message:event.message || '', summary:event.message || '' });
+        changed = true;
+      }
+      if (changed) {
+        const anchor = state.tailAttached ? null : captureAnchor();
+        pruneWindow(anchor?.id, state.tailAttached ? 'head' : 'tail');
+        renderTurns(anchor);
+        if (state.tailAttached) requestAnimationFrame(() => { els.transcript.scrollTop = els.transcript.scrollHeight; });
+      }
+    }
+    function connectEvents() {
+      try {
+        if (state.events) state.events.close();
+        const source = new EventSource('/api/threads/' + encodeURIComponent(threadId) + '/events?since=' + encodeURIComponent(state.lastEventSeq));
+        state.events = source;
+        source.addEventListener('thread-event', (message) => {
+          try { handleThreadEvent(JSON.parse(message.data || '{}')); } catch {}
+        });
+        source.onerror = () => {
+          try { source.close(); } catch {}
+          state.events = null;
+          setTimeout(connectEvents, 1500);
+        };
+      } catch {
+        setTimeout(connectEvents, 2500);
+      }
+    }
     Promise.all([loadThreads(), loadLatest()]).catch((error) => {
       els.status.textContent = '加载失败';
       els.title.textContent = error.message || String(error);
     });
+    connectEvents();
     state.statusTimer = setInterval(pollStatus, 2000);
   })();
   </script>
@@ -11300,6 +12184,24 @@ const server = http.createServer((req, res) => {
       sendJson(res, 200, windowResult.status);
       return;
     }
+    const apiEventsMatch = url.pathname.match(/^\/api\/threads\/([^/]+)\/events$/);
+    if (req.method === "GET" && apiEventsMatch) {
+      const threadId = decodeURIComponent(apiEventsMatch[1]);
+      if (!threadRecord(threadId)) {
+        sendJson(res, 404, { error: "thread not found" });
+        return;
+      }
+      subscribeCanonicalThreadEvents(req, res, threadId, Number.parseInt(url.searchParams.get("since") || "0", 10));
+      return;
+    }
+    const apiForkMatch = url.pathname.match(/^\/api\/threads\/([^/]+)\/fork$/);
+    if (req.method === "POST" && apiForkMatch) {
+      readJsonRequest(req)
+        .then((body) => canonicalForkThread(decodeURIComponent(apiForkMatch[1]), body))
+        .then((result) => sendJson(res, 200, result))
+        .catch((error) => sendJson(res, 500, { error: error.message || String(error) }));
+      return;
+    }
     const apiSubmitMatch = url.pathname.match(/^\/api\/threads\/([^/]+)\/submit$/);
     if (req.method === "POST" && apiSubmitMatch) {
       readJsonRequest(req)
@@ -11324,11 +12226,12 @@ const server = http.createServer((req, res) => {
     if (req.method === "GET" && apiAttachmentMatch) {
       const token = decodeURIComponent(apiAttachmentMatch[1]);
       const entry = canonicalAttachmentTokens.get(token);
-      if (!entry || !entry.path || !fs.existsSync(entry.path)) {
+      const entryPath = entry?.path || entry?.filePath || null;
+      if (!entry || !entryPath || !fs.existsSync(entryPath)) {
         send(res, 404, { "Content-Type": "text/plain; charset=utf-8", "Cache-Control": "no-store" }, "Attachment not found");
         return;
       }
-      sendStaticFile(req, res, entry.path, {
+      sendStaticFile(req, res, entryPath, {
         "Content-Type": entry.mimeType || "application/octet-stream",
         "Cache-Control": "private, max-age=3600",
       }, url);

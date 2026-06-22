@@ -21,6 +21,7 @@ reject(/Error submitting message|创建任务时出错|提交消息出错/, "sub
 reject(/hideRecentSubmitErrors|hideSubmittedDuplicateBubbles|rememberSubmittedTurnUiCleanup|clearStaleComposerSubmissionResidue|cleanupSubmittedTurnUi/, "legacy DOM submit cleanup shims must not exist");
 reject(/codexappFastShell|codexapp-fast-thread-shell|scheduleCodexappFastThreadShell|legacy fast shell/i, "legacy fast shell must not exist");
 reject(/setInterval\(maybeLoadAroundViewport|viewportTimer|IntersectionObserver[\s\S]{0,240}loadOlder/, "thread window loading must be event/anchor driven, not polling or observer-loop driven");
+reject(/replaceChildren\([^)]*visibleTurns|threadList\.replaceChildren|attachments\.replaceChildren/, "single surface must use keyed DOM patching instead of wholesale replaceChildren");
 reject(/url\.pathname === "\/codexapp-thread-fast"/, "legacy /codexapp-thread-fast route must not be exposed");
 reject(/url\.pathname === "\/codexapp-thread-turns"/, "legacy /codexapp-thread-turns route must not be exposed");
 reject(/url\.pathname === "\/codexapp-thread-status"/, "legacy /codexapp-thread-status route must not be exposed");
@@ -30,6 +31,9 @@ requirePattern(/if \(!window\.__codexappSingleSurface\) \{\s*installSubmitDedupe
 requirePattern(/const singleSurfaceEnabled = parseBoolean\(process\.env\.CODEXAPP_SINGLE_SURFACE, true\);/, "single surface must default on");
 requirePattern(/apiWindowMatch = url\.pathname\.match\(\^?\/?\^\\\/api\\\/threads\\\/\(\[\^\/\]\+\)\\\/window/, "canonical thread window API route is missing");
 requirePattern(/apiSubmitMatch = url\.pathname\.match\(\^?\/?\^\\\/api\\\/threads\\\/\(\[\^\/\]\+\)\\\/submit/, "canonical submit API route is missing");
+requirePattern(/apiEventsMatch = url\.pathname\.match\(\^?\/?\^\\\/api\\\/threads\\\/\(\[\^\/\]\+\)\\\/events/, "canonical thread events API route is missing");
+requirePattern(/apiForkMatch = url\.pathname\.match\(\^?\/?\^\\\/api\\\/threads\\\/\(\[\^\/\]\+\)\\\/fork/, "canonical thread fork API route is missing");
+requirePattern(/class AppServerEventHub/, "canonical app-server EventHub is missing");
 
 if (failures.length > 0) {
   console.error("CodexApp guardrail failures:");
