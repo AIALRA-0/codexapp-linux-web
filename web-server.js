@@ -21,6 +21,7 @@ const stateDir = path.resolve(process.env.CODEXAPP_STATE_DIR || path.join(proces
 const browserUploadsRoot = path.join(stateDir, "browser-uploads");
 const browserWorkspaceRoot = path.join(stateDir, "browser-workspaces");
 const canonicalAttachmentsRoot = path.join(browserUploadsRoot, "canonical");
+const canonicalSubmissionsPath = path.join(stateDir, "canonical-submissions.json");
 const persistedAtomStatePath = path.join(stateDir, "persisted-atoms.json");
 const hostStatePath = path.join(stateDir, "host-state.json");
 const remoteControlDesiredPath = path.join(stateDir, "remote-control-desired.json");
@@ -176,6 +177,7 @@ const canonicalAttachmentTokens = new Map();
 const canonicalSubmissionStates = new Map();
 const canonicalAppRequests = new Map();
 const canonicalFullTextCache = new Map();
+let canonicalSubmissionsSaveTimer = null;
 
 function log(...args) {
   console.log(new Date().toISOString(), ...args);
@@ -3042,9 +3044,14 @@ function canonicalTextShape(text) {
 
 function cleanupCanonicalCaches() {
   const cutoff = Date.now() - canonicalSubmissionTtlMs;
+  let submissionsChanged = false;
   for (const [key, value] of canonicalSubmissionStates) {
-    if (Number(value?.createdAt || 0) < cutoff) canonicalSubmissionStates.delete(key);
+    if (Number(value?.createdAt || 0) < cutoff) {
+      canonicalSubmissionStates.delete(key);
+      submissionsChanged = true;
+    }
   }
+  if (submissionsChanged) saveCanonicalSubmissionsSoon();
   for (const [key, value] of canonicalAppRequests) {
     if (Number(value?.createdAt || 0) < cutoff) canonicalAppRequests.delete(key);
   }
@@ -3173,6 +3180,11 @@ function canonicalStatusFromTurns(turns = [], fallback = "idle") {
 function canonicalThreadStatus(threadId, turns = []) {
   cleanupCanonicalCaches();
   const submissions = Array.from(canonicalSubmissionStates.values()).filter((item) => item.threadId === threadId);
+  for (const submission of submissions) {
+    if (!["accepted", "resuming", "submitted", "running", "queued"].includes(submission.state)) continue;
+    const committed = turns.some((turn) => turn?.submissionId === submission.submissionId || turn?.id === submission.submissionId);
+    if (committed) updateCanonicalSubmission(submission, { state: "completed", error: null });
+  }
   const active = submissions.find((item) => ["accepted", "resuming", "submitted", "running", "queued"].includes(item.state));
   const latest = submissions.sort((a, b) => Number(b.updatedAt || 0) - Number(a.updatedAt || 0))[0] || null;
   const state = active?.state === "resuming"
@@ -3194,6 +3206,7 @@ function canonicalThreadStatus(threadId, turns = []) {
       state: item.state,
       error: item.error || null,
       updatedAt: item.updatedAt || item.createdAt || null,
+      optimisticTurn: item.optimisticTurn || null,
     })),
     updatedAt: latest?.updatedAt || Date.now(),
   };
@@ -3258,6 +3271,82 @@ function canonicalSubmissionKey(threadId, clientRequestId) {
   return `${threadId}:${clientRequestId}`;
 }
 
+function serializableCanonicalSubmission(entry) {
+  if (!entry || typeof entry !== "object") return null;
+  return {
+    key: entry.key,
+    threadId: entry.threadId,
+    clientRequestId: entry.clientRequestId,
+    submissionId: entry.submissionId,
+    mode: entry.mode,
+    state: entry.state,
+    method: entry.method || null,
+    optimisticTurn: entry.optimisticTurn || null,
+    submitBody: entry.submitBody || null,
+    error: entry.error || null,
+    createdAt: entry.createdAt || null,
+    updatedAt: entry.updatedAt || entry.createdAt || null,
+  };
+}
+
+function sanitizeCanonicalSubmissionEntry(raw) {
+  if (!isPlainObject(raw)) return null;
+  const threadId = typeof raw.threadId === "string" ? raw.threadId : null;
+  const clientRequestId = typeof raw.clientRequestId === "string" ? raw.clientRequestId : null;
+  const submissionId = typeof raw.submissionId === "string" ? raw.submissionId : null;
+  const key = typeof raw.key === "string" ? raw.key : canonicalSubmissionKey(threadId, clientRequestId);
+  if (!threadId || !clientRequestId || !submissionId || !key) return null;
+  const createdAt = Number(raw.createdAt || Date.now());
+  if (!Number.isFinite(createdAt) || createdAt < Date.now() - canonicalSubmissionTtlMs) return null;
+  return {
+    key,
+    threadId,
+    clientRequestId,
+    submissionId,
+    mode: ["normal", "steer", "plan", "goal"].includes(raw.mode) ? raw.mode : "normal",
+    state: ["accepted", "resuming", "submitted", "running", "queued", "failed", "completed"].includes(raw.state) ? raw.state : "accepted",
+    method: typeof raw.method === "string" ? raw.method : null,
+    optimisticTurn: isPlainObject(raw.optimisticTurn) ? raw.optimisticTurn : null,
+    submitBody: isPlainObject(raw.submitBody) ? raw.submitBody : null,
+    error: typeof raw.error === "string" ? raw.error : null,
+    createdAt,
+    updatedAt: Number(raw.updatedAt || createdAt),
+  };
+}
+
+function loadCanonicalSubmissions() {
+  const data = readJsonObjectFile(canonicalSubmissionsPath, {});
+  const rawItems = Array.isArray(data.submissions) ? data.submissions : [];
+  for (const raw of rawItems) {
+    const entry = sanitizeCanonicalSubmissionEntry(raw);
+    if (entry) canonicalSubmissionStates.set(entry.key, entry);
+  }
+}
+
+function saveCanonicalSubmissionsNow() {
+  const submissions = Array.from(canonicalSubmissionStates.values())
+    .map(serializableCanonicalSubmission)
+    .filter(Boolean);
+  writeJsonFile(canonicalSubmissionsPath, {
+    version: 1,
+    savedAt: Date.now(),
+    submissions,
+  });
+}
+
+function saveCanonicalSubmissionsSoon() {
+  clearTimeout(canonicalSubmissionsSaveTimer);
+  canonicalSubmissionsSaveTimer = setTimeout(() => {
+    canonicalSubmissionsSaveTimer = null;
+    try {
+      saveCanonicalSubmissionsNow();
+    } catch (error) {
+      log("failed to persist canonical submissions", error.message || String(error));
+    }
+  }, 50);
+  canonicalSubmissionsSaveTimer.unref?.();
+}
+
 function canonicalInputFromSubmitBody(body = {}) {
   const input = [];
   const raw = body.input;
@@ -3312,6 +3401,7 @@ function optimisticTurnForSubmission(threadId, submissionId, body = {}) {
 function updateCanonicalSubmission(entry, patch = {}) {
   Object.assign(entry, patch, { updatedAt: Date.now() });
   canonicalSubmissionStates.set(entry.key, entry);
+  saveCanonicalSubmissionsSoon();
   return entry;
 }
 
@@ -4131,25 +4221,7 @@ function localThreadIdFromRoute(routePath = "") {
 }
 
 function longThreadRescueHtml(threadId) {
-  return `<!doctype html>
-<html lang="zh-CN">
-<head>
-  <meta charset="UTF-8" />
-  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-  <title>Codex</title>
-  <style>
-    html, body, #root { height: 100%; margin: 0; }
-    body { background: #fff; color: #171717; font-family: system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; }
-    .startup-loader { min-height: 100%; display: grid; place-items: center; color: #777; font-size: 14px; }
-  </style>
-</head>
-<body>
-  <div id="root"><div class="startup-loader">正在打开长线程窗口...</div></div>
-  <script>window.__codexappLongThreadRescue = ${JSON.stringify({ threadId })};</script>
-  <script>window.__codexappSingleSurface = true;</script>
-  <script src="${bridgeScriptPath}"></script>
-</body>
-</html>`;
+  return singleSurfaceHtml(threadId);
 }
 
 function sendIndexHtml(req, res, initialRoute = null) {
@@ -4718,431 +4790,6 @@ function browserBridgeScript() {
     const index = parts.indexOf("local");
     return index >= 0 ? parts[index + 1] || null : null;
   }
-
-  function codexappFastShellText(value) {
-    if (value == null) return "";
-    if (typeof value === "string") return value;
-    if (Array.isArray(value)) return value.map(codexappFastShellText).filter(Boolean).join("\\n");
-    if (typeof value !== "object") return "";
-    if (typeof value.text === "string") return value.text;
-    if (typeof value.message === "string") return value.message;
-    if (typeof value.content === "string") return value.content;
-    if (Array.isArray(value.content)) return codexappFastShellText(value.content);
-    return "";
-  }
-
-  function codexappFastShellTurnText(turn) {
-    const items = Array.isArray(turn?.items) ? turn.items : [];
-    return items.map((item) => codexappFastShellText(item?.content ?? item?.text ?? item?.message ?? item))
-      .map((text) => text.trim())
-      .filter(Boolean)
-      .join("\\n\\n");
-  }
-
-  function codexappFastShellImages(turn) {
-    const images = [];
-    const collect = (value) => {
-      if (Array.isArray(value)) {
-        value.forEach(collect);
-        return;
-      }
-      if (!value || typeof value !== "object") return;
-      const src = value.url || value.imageUrl || value.image_url || value.path;
-      if ((value.type === "image" || value.type === "localImage" || value.type === "input_image") && typeof src === "string" && src.length > 0) {
-        images.push(src);
-      }
-      if (Array.isArray(value.content)) collect(value.content);
-    };
-    for (const item of Array.isArray(turn?.items) ? turn.items : []) collect(item?.content);
-    return images;
-  }
-
-  function codexappFastShellMcpRequest(method, params = {}, timeoutMs = 120000) {
-    const id = "fast-shell-" + randomBridgeId();
-    return new Promise((resolve, reject) => {
-      const bridge = window.electronBridge;
-      if (!bridge || typeof bridge.sendMessageFromView !== "function") {
-        reject(new Error("bridge is not ready"));
-        return;
-      }
-      let settled = false;
-      const cleanup = () => {
-        window.removeEventListener("message", onMessage);
-        clearTimeout(timeout);
-      };
-      const finish = (fn, value) => {
-        if (settled) return;
-        settled = true;
-        cleanup();
-        fn(value);
-      };
-      const onMessage = (event) => {
-        const data = event.data;
-        if (!data || data.type !== "mcp-response" || data.message?.id !== id) return;
-        if (data.message.error) {
-          finish(reject, new Error(data.message.error.message || "request failed"));
-          return;
-        }
-        finish(resolve, data.message.result ?? {});
-      };
-      const timeout = setTimeout(() => finish(reject, new Error(method + " timed out")), timeoutMs);
-      window.addEventListener("message", onMessage);
-      try {
-        bridge.sendMessageFromView({
-          type: "mcp-request",
-          hostId: "local",
-          request: { id, method, params }
-        });
-      } catch (error) {
-        finish(reject, error);
-      }
-    });
-  }
-
-  function codexappFastShellChronologicalFromResult(result) {
-    return Array.isArray(result?.data) ? result.data.slice().reverse() : [];
-  }
-
-  async function codexappFastShellFetchTurns(threadId, cursor, limit = 8) {
-    void threadId;
-    void cursor;
-    void limit;
-    throw new Error("legacy fast shell history is disabled");
-  }
-
-  function codexappFastShellTurnKey(turn, index = 0) {
-    return String(turn?.turnId || turn?.id || turn?.codexappFastLocalId || index);
-  }
-
-  function codexappBuildFastShellTurnBlock(turn, index = 0) {
-    const block = document.createElement("section");
-    block.dataset.codexappTurnKey = codexappFastShellTurnKey(turn, index);
-    block.style.cssText = "margin:14px 0;padding:14px 16px;border-radius:8px;background:" + (turn?.status === "inProgress" ? "#fff8ef" : "#f6f6f6") + ";white-space:pre-wrap;overflow-wrap:anywhere;";
-    const text = codexappFastShellTurnText(turn);
-    const textNode = document.createElement("div");
-    textNode.textContent = text || (turn?.status === "inProgress" ? "正在运行..." : "");
-    block.appendChild(textNode);
-    const images = codexappFastShellImages(turn);
-    if (images.length > 0) {
-      const gallery = document.createElement("div");
-      gallery.style.cssText = "display:flex;flex-wrap:wrap;gap:8px;margin-top:10px;";
-      images.slice(0, 8).forEach((src, imageIndex) => {
-        const img = document.createElement("img");
-        img.src = src;
-        img.alt = "attachment " + (imageIndex + 1);
-        img.loading = "lazy";
-        img.style.cssText = "max-width:min(220px,100%);max-height:180px;border-radius:8px;border:1px solid #ddd;object-fit:contain;background:#fff;";
-        gallery.appendChild(img);
-      });
-      block.appendChild(gallery);
-    }
-    return block;
-  }
-
-  function codexappFastShellSetStatus(shell, text) {
-    const status = shell?.querySelector?.("[data-codexapp-fast-status]");
-    if (status) status.textContent = text || "";
-  }
-
-  function codexappFastShellTrim(shell, direction = "older") {
-    const list = shell?.querySelector?.("[data-codexapp-fast-turns]");
-    if (!list) return;
-    while (list.children.length > 24) {
-      if (direction === "older") list.lastElementChild?.remove();
-      else list.firstElementChild?.remove();
-    }
-  }
-
-  function codexappFastShellPrependTurns(shell, turns) {
-    const list = shell?.querySelector?.("[data-codexapp-fast-turns]");
-    if (!list || !Array.isArray(turns) || turns.length === 0) return 0;
-    const beforeHeight = shell.scrollHeight;
-    const seen = new Set(Array.from(list.children).map((node) => node.dataset.codexappTurnKey));
-    const anchor = list.firstChild;
-    let inserted = 0;
-    turns.forEach((turn, index) => {
-      const key = codexappFastShellTurnKey(turn, index);
-      if (seen.has(key)) return;
-      list.insertBefore(codexappBuildFastShellTurnBlock(turn, index), anchor);
-      seen.add(key);
-      inserted += 1;
-    });
-    codexappFastShellTrim(shell, "older");
-    shell.scrollTop += Math.max(0, shell.scrollHeight - beforeHeight);
-    return inserted;
-  }
-
-  function codexappFastShellAppendTurn(shell, turn) {
-    const list = shell?.querySelector?.("[data-codexapp-fast-turns]");
-    if (!list || !turn) return;
-    list.appendChild(codexappBuildFastShellTurnBlock(turn, list.children.length));
-    codexappFastShellTrim(shell, "newer");
-    shell.scrollTop = shell.scrollHeight;
-  }
-
-  async function codexappFastShellLoadOlder(shell, state) {
-    if (!shell || !state || state.loadingOlder || !state.olderCursor) return;
-    state.loadingOlder = true;
-    const button = shell.querySelector("[data-codexapp-fast-load-older]");
-    if (button) button.disabled = true;
-    codexappFastShellSetStatus(shell, "正在加载更早历史...");
-    try {
-      let inserted = 0;
-      let pages = 0;
-      while (state.olderCursor && inserted === 0 && pages < 4) {
-        pages += 1;
-        const result = await codexappFastShellFetchTurns(state.threadId, state.olderCursor, 8);
-        const turns = codexappFastShellChronologicalFromResult(result);
-        state.olderCursor = result?.nextCursor ?? result?.backwardsCursor ?? null;
-        inserted += codexappFastShellPrependTurns(shell, turns);
-      }
-      if (inserted > 0) codexappFastShellSetStatus(shell, state.olderCursor ? "已加载更早历史，继续上滚可再加载。" : "已经到达最早历史。");
-      else codexappFastShellSetStatus(shell, state.olderCursor ? "这一段全是重叠内容，继续上滚会再补页。" : "已经到达最早历史。");
-      if (!state.olderCursor && button) button.textContent = "没有更早历史";
-    } catch (error) {
-      codexappFastShellSetStatus(shell, "加载历史失败：" + (error.message || String(error)));
-    } finally {
-      state.loadingOlder = false;
-      if (button) button.disabled = !state.olderCursor;
-    }
-  }
-
-  async function codexappFastShellSubmit(shell, state) {
-    const input = shell?.querySelector?.("[data-codexapp-fast-input]");
-    const button = shell?.querySelector?.("[data-codexapp-fast-send]");
-    const text = (input?.value || "").trim();
-    if (!text || state?.sending) return;
-    state.sending = true;
-    if (button) button.disabled = true;
-    if (input) input.value = "";
-    codexappFastShellAppendTurn(shell, {
-      codexappFastLocalId: "local-" + randomBridgeId(),
-      status: "inProgress",
-      items: [{ content: { text } }]
-    });
-    codexappFastShellSetStatus(shell, "已发送，正在接入长线程...");
-    try {
-      const method = state.hasActiveTurn ? "turn/steer" : "turn/start";
-      await codexappFastShellMcpRequest(method, {
-        threadId: state.threadId,
-        input: [{ type: "text", text, text_elements: [] }],
-        clientRequestId: "fast-shell-" + randomBridgeId()
-      }, 20000);
-      state.hasActiveTurn = true;
-      codexappFastShellSetStatus(shell, "已提交；后台继续执行，窗口会持续可查。");
-    } catch (error) {
-      codexappFastShellSetStatus(shell, "发送失败：" + (error.message || String(error)));
-    } finally {
-      state.sending = false;
-      if (button) button.disabled = false;
-    }
-  }
-
-  function codexappRootHasOfficialThread(root, threadId = null) {
-    if (!root) return false;
-    const activeThreadId = typeof threadId === "string" && threadId.length > 0 ? threadId : codexappThreadIdFromPath();
-    const managers = window.__codexappHistoryManagers instanceof Set
-      ? Array.from(window.__codexappHistoryManagers)
-      : [];
-    if (activeThreadId && managers.some((manager) => {
-      try {
-        const conversation = manager?.conversations?.get?.(activeThreadId);
-        return Array.isArray(conversation?.turns) && conversation.turns.length > 0;
-      } catch {
-        return false;
-      }
-    })) {
-      return true;
-    }
-    const marked = root.querySelector("[data-codexapp-conversation-id]");
-    if (activeThreadId && marked?.getAttribute?.("data-codexapp-conversation-id") === activeThreadId) {
-      return !!root.querySelector(".thread-scroll-container [data-testid^='conversation-turn'], .thread-scroll-container [data-message-author-role]");
-    }
-    return false;
-  }
-
-  function codexappRootHasVisibleOfficialThread(root, threadId = null) {
-    if (!root) return false;
-    const rootStyle = getComputedStyle(root);
-    if (rootStyle.display === "none" || rootStyle.visibility === "hidden") return false;
-    const activeThreadId = typeof threadId === "string" && threadId.length > 0 ? threadId : codexappThreadIdFromPath();
-    const marked = root.querySelector("[data-codexapp-conversation-id]");
-    if (activeThreadId && marked?.getAttribute?.("data-codexapp-conversation-id") !== activeThreadId) return false;
-    const scroller = root.querySelector(".thread-scroll-container");
-    if (!(scroller instanceof HTMLElement) || !visibleElement(scroller)) return false;
-    return (scroller.innerText || scroller.textContent || "").trim().length > 20;
-  }
-
-  function codexappDismissFastThreadShellIfReady() {
-    const root = document.getElementById("root");
-    const shell = document.getElementById("codexapp-fast-thread-shell");
-    const threadId = shell?.__codexappFastShellState?.threadId || codexappThreadIdFromPath();
-    if (!shell || !codexappRootHasOfficialThread(root, threadId)) return false;
-    const now = performance.now();
-    if (root && (getComputedStyle(root).display === "none" || getComputedStyle(root).visibility === "hidden")) {
-      root.style.display = "";
-      root.style.visibility = "";
-      delete root.dataset.codexappFastHidden;
-      root.removeAttribute("aria-hidden");
-      shell.__codexappOfficialShownAt = now;
-      return false;
-    }
-    if (!codexappRootHasVisibleOfficialThread(root, threadId)) {
-      shell.__codexappOfficialReadyAt = 0;
-      return false;
-    }
-    if (!shell.__codexappOfficialShownAt) {
-      shell.__codexappOfficialShownAt = now;
-      return false;
-    }
-    if (now - shell.__codexappOfficialShownAt < 700) return false;
-    if (!shell.__codexappOfficialReadyAt) {
-      shell.__codexappOfficialReadyAt = now;
-      return false;
-    }
-    if (now - shell.__codexappOfficialReadyAt < 700) return false;
-    if (root) {
-      root.style.display = "";
-      root.style.visibility = "";
-      delete root.dataset.codexappFastHidden;
-      root.removeAttribute("aria-hidden");
-    }
-    shell.remove();
-    codexappLoadMarks.fastShellDismissedAt ??= performance.now();
-    return true;
-  }
-
-  function codexappWatchFastThreadShellDismissal() {
-    if (window.__codexappFastThreadShellDismissWatcher) return;
-    window.__codexappFastThreadShellDismissWatcher = setInterval(() => {
-      if (codexappDismissFastThreadShellIfReady()) {
-        clearInterval(window.__codexappFastThreadShellDismissWatcher);
-        window.__codexappFastThreadShellDismissWatcher = null;
-      }
-    }, 100);
-    setTimeout(() => {
-      if (window.__codexappFastThreadShellDismissWatcher) {
-        clearInterval(window.__codexappFastThreadShellDismissWatcher);
-        window.__codexappFastThreadShellDismissWatcher = null;
-      }
-    }, 45000);
-  }
-
-  function codexappRenderFastThreadShell(payload) {
-    const root = document.getElementById("root");
-    codexappLoadMarks.fastShellRenderAttemptAt = performance.now();
-    if (root && codexappRootHasOfficialThread(root, payload?.thread?.id || codexappThreadIdFromPath())) return false;
-    const thread = payload?.thread;
-    const turns = Array.isArray(thread?.turns) ? thread.turns : [];
-    if (!thread || turns.length === 0) return false;
-    const mount = document.body || document.documentElement;
-    if (!mount) return false;
-    const existingShell = document.getElementById("codexapp-fast-thread-shell");
-    const existingThreadId = existingShell?.__codexappFastShellState?.threadId;
-    const nextThreadId = thread.id || thread.sessionId || codexappThreadIdFromPath();
-    if (existingShell && existingThreadId === nextThreadId) return true;
-    existingShell?.remove();
-    if (window.__codexappLongThreadRescue && root) {
-      root.style.display = "";
-      root.style.visibility = "hidden";
-      root.dataset.codexappFastHidden = "1";
-      root.setAttribute("aria-hidden", "true");
-    }
-    const shell = document.createElement("div");
-    shell.id = "codexapp-fast-thread-shell";
-    shell.style.cssText = "position:fixed;inset:0;z-index:2147483000;overflow:auto;background:#fff;color:#171717;font:14px/1.55 system-ui,-apple-system,BlinkMacSystemFont,Segoe UI,sans-serif;";
-    shell.setAttribute("role", "status");
-    shell.setAttribute("aria-live", "polite");
-    const inner = document.createElement("div");
-    inner.style.cssText = "max-width:860px;margin:0 auto;padding:28px 24px 128px;";
-    const title = document.createElement("div");
-    title.style.cssText = "position:sticky;top:0;background:#fff;padding:8px 0 16px;margin-bottom:8px;border-bottom:1px solid #eee;color:#555;font-size:13px;";
-    title.textContent = (thread.title || thread.name || "Codex thread") + " · 快速长线程窗口";
-    inner.appendChild(title);
-    const state = {
-      threadId: nextThreadId,
-      olderCursor: thread.turnsPagination?.olderCursor ?? payload?.initialTurnsPage?.nextCursor ?? null,
-      hasActiveTurn: turns.some((turn) => turn?.status === "inProgress"),
-      loadingOlder: false,
-      sending: false
-    };
-    shell.__codexappFastShellState = state;
-    const loadOlder = document.createElement("button");
-    loadOlder.type = "button";
-    loadOlder.dataset.codexappFastLoadOlder = "1";
-    loadOlder.style.cssText = "display:block;width:100%;margin:12px 0 16px;padding:10px 12px;border:1px solid #ddd;border-radius:8px;background:#fff;color:#555;font:13px system-ui;cursor:pointer;";
-    loadOlder.textContent = state.olderCursor ? "加载更早历史" : "没有更早历史";
-    loadOlder.disabled = !state.olderCursor;
-    loadOlder.addEventListener("click", () => { void codexappFastShellLoadOlder(shell, state); });
-    inner.appendChild(loadOlder);
-    const list = document.createElement("div");
-    list.dataset.codexappFastTurns = "1";
-    turns.forEach((turn, index) => list.appendChild(codexappBuildFastShellTurnBlock(turn, index)));
-    inner.appendChild(list);
-    const footer = document.createElement("div");
-    footer.dataset.codexappFastStatus = "1";
-    footer.style.cssText = "color:#777;font-size:13px;margin:20px 0;";
-    footer.textContent = "完整界面正在接管；此窗口可先查历史和提交消息。";
-    inner.appendChild(footer);
-    const composer = document.createElement("form");
-    composer.style.cssText = "position:sticky;bottom:0;margin:18px 0 0;padding:12px;background:#fff;border:1px solid #ddd;border-radius:10px;box-shadow:0 8px 24px rgba(0,0,0,.08);";
-    const textarea = document.createElement("textarea");
-    textarea.dataset.codexappFastInput = "1";
-    textarea.rows = 3;
-    textarea.placeholder = "输入消息";
-    textarea.style.cssText = "box-sizing:border-box;width:100%;resize:vertical;border:0;outline:0;font:14px/1.45 system-ui;background:#fff;color:#171717;";
-    const actions = document.createElement("div");
-    actions.style.cssText = "display:flex;align-items:center;justify-content:space-between;gap:12px;margin-top:8px;color:#777;font-size:12px;";
-    const hint = document.createElement("span");
-    hint.textContent = "Enter 发送，Shift+Enter 换行";
-    const sendButton = document.createElement("button");
-    sendButton.type = "submit";
-    sendButton.dataset.codexappFastSend = "1";
-    sendButton.textContent = "发送";
-    sendButton.style.cssText = "border:0;border-radius:999px;background:#171717;color:#fff;padding:8px 16px;font:13px system-ui;cursor:pointer;";
-    actions.appendChild(hint);
-    actions.appendChild(sendButton);
-    composer.appendChild(textarea);
-    composer.appendChild(actions);
-    composer.addEventListener("submit", (event) => {
-      event.preventDefault();
-      void codexappFastShellSubmit(shell, state);
-    });
-    textarea.addEventListener("keydown", (event) => {
-      if (event.key === "Enter" && !event.shiftKey && !event.altKey && !event.ctrlKey && !event.metaKey && !event.isComposing) {
-        event.preventDefault();
-        void codexappFastShellSubmit(shell, state);
-      }
-    });
-    inner.appendChild(composer);
-    shell.appendChild(inner);
-    shell.addEventListener("scroll", () => {
-      if (shell.scrollTop < 96) void codexappFastShellLoadOlder(shell, state);
-    }, { passive: true });
-    mount.appendChild(shell);
-    const now = performance.now();
-    codexappLoadMarks.firstFastShellAt ??= now;
-    codexappLoadMarks.firstBodyTextAt ??= now;
-    codexappLoadMarks.fastShellTurns = turns.length;
-    codexappWatchFastThreadShellDismissal();
-    return true;
-  }
-
-  function installCodexappFastThreadShell() {
-    codexappLoadMarks.fastShellSkipReason = "single-surface";
-    return false;
-  }
-  function scheduleCodexappFastThreadShell() {
-    setTimeout(installCodexappFastThreadShell, 0);
-    setTimeout(installCodexappFastThreadShell, 100);
-    setTimeout(installCodexappFastThreadShell, 500);
-    if (document.readyState === "loading") {
-      document.addEventListener("DOMContentLoaded", installCodexappFastThreadShell, { once: true });
-    } else {
-      installCodexappFastThreadShell();
-    }
-  }
-  if (!window.__codexappSingleSurface) scheduleCodexappFastThreadShell();
 
   function codexappActiveThreadId() {
     return activeThreadIdFromDocument?.() || codexappThreadIdFromPath();
@@ -6087,8 +5734,6 @@ function browserBridgeScript() {
   const browserStaleMs = ${bridgeBrowserStaleMs};
   const mcpRequests = new Map();
   const pendingTurnSubmissions = new Map();
-  const submittedTurnUiCleanups = new Map();
-  let lastTrustedComposerInputAt = 0;
   const turnSubmitLockMs = ${browserTurnSubmitLockMs};
   const queue = [];
   const browserRequests = new Map();
@@ -6169,157 +5814,6 @@ function browserBridgeScript() {
     return (activeComposer()?.innerText || "").trim();
   }
 
-  function clearComposerByElement(composer) {
-    if (!(composer instanceof HTMLElement)) return false;
-    try { composer.focus({ preventScroll: true }); } catch {}
-    try {
-      const selection = window.getSelection?.();
-      const range = document.createRange();
-      range.selectNodeContents(composer);
-      selection?.removeAllRanges();
-      selection?.addRange(range);
-      document.execCommand?.("delete");
-      selection?.removeAllRanges();
-    } catch {}
-    if ((composer.innerText || composer.textContent || "").trim()) {
-      composer.textContent = "";
-    }
-    try {
-      composer.dispatchEvent(new InputEvent("input", {
-        bubbles: true,
-        inputType: "deleteContentBackward",
-        data: null,
-      }));
-    } catch {
-      composer.dispatchEvent(new Event("input", { bubbles: true }));
-    }
-    return true;
-  }
-
-  function clearActiveComposerIfMatching(text) {
-    const composer = activeComposer();
-    if (!(composer instanceof HTMLElement)) return false;
-    const expected = normalizeClientVisibleText(text);
-    const actual = normalizeClientVisibleText(activeComposerText());
-    if (!expected || actual !== expected) return false;
-    return clearComposerByElement(composer);
-  }
-
-  function composerSurfaceFromElement(element) {
-    let current = element;
-    for (let depth = 0; current instanceof HTMLElement && depth < 10; depth += 1, current = current.parentElement) {
-      const className = String(current.className || "");
-      if (className.includes("_multilineSurface_") || className.includes("bg-token-input-background")) return current;
-    }
-    return element instanceof HTMLElement ? element.parentElement : null;
-  }
-
-  function clearComposerAttachmentResidue(text) {
-    const composer = activeComposer();
-    if (!(composer instanceof HTMLElement)) return;
-    const surface = composerSurfaceFromElement(composer);
-    if (!(surface instanceof HTMLElement)) return;
-    const expected = normalizeClientVisibleText(text);
-    if (!expected) return;
-    const surfaceText = normalizeClientVisibleText(surface.innerText || surface.textContent || "");
-    if (surfaceText && !surfaceText.includes(expected.slice(0, Math.min(expected.length, 80)))) return;
-    for (const button of Array.from(surface.querySelectorAll("button"))) {
-      if (!(button instanceof HTMLElement) || !visibleElement(button)) continue;
-      const label = normalizeClientVisibleText([
-        button.getAttribute("aria-label"),
-        button.getAttribute("title"),
-        button.innerText,
-        button.textContent,
-      ].filter(Boolean).join(" "));
-      const rect = button.getBoundingClientRect();
-      const likelyRemove = /remove|delete|clear|dismiss|close|移除|删除|清除|关闭/i.test(label)
-        || (rect.width <= 28 && rect.height <= 28 && rect.y < composer.getBoundingClientRect().top);
-      if (!likelyRemove) continue;
-      try { button.click(); } catch {}
-    }
-  }
-
-  function hideSubmittedDuplicateBubbles(text, signature) {
-    const root = document.querySelector(".thread-scroll-container");
-    if (!(root instanceof HTMLElement)) return;
-    const expected = normalizeClientVisibleText(text);
-    if (expected.length < 12) return;
-    const candidates = Array.from(root.querySelectorAll("[class*='whitespace-pre-wrap'], [class*='text-size-chat']"))
-      .filter((element) => element instanceof HTMLElement)
-      .filter((element) => !element.isContentEditable && !element.closest("[contenteditable='true']"))
-      .filter((element) => visibleElement(element))
-      .filter((element) => normalizeClientVisibleText(element.innerText || element.textContent || "") === expected)
-      .sort((a, b) => a.getBoundingClientRect().y - b.getBoundingClientRect().y);
-    if (candidates.length <= 1) return;
-    const keep = candidates.at(-1);
-    for (const element of candidates) {
-      if (element === keep) continue;
-      element.dataset.codexappHiddenDuplicateSubmission = signature || "1";
-      element.style.display = "none";
-    }
-  }
-
-  function transcriptExactTextMatchCount(text) {
-    const root = document.querySelector(".thread-scroll-container");
-    if (!(root instanceof HTMLElement)) return 0;
-    const expected = normalizeClientVisibleText(text);
-    if (expected.length < 12) return 0;
-    return Array.from(root.querySelectorAll("[class*='whitespace-pre-wrap'], [class*='text-size-chat']"))
-      .filter((element) => element instanceof HTMLElement)
-      .filter((element) => !element.isContentEditable && !element.closest("[contenteditable='true']"))
-      .filter((element) => visibleElement(element))
-      .filter((element) => normalizeClientVisibleText(element.innerText || element.textContent || "") === expected)
-      .length;
-  }
-
-  function hideRecentSubmitErrors() {
-    const root = document.querySelector(".thread-scroll-container") || document;
-    const nodes = Array.from(root.querySelectorAll("div,section,[role='alert'],[data-sonner-toast]"))
-      .filter((element) => element instanceof HTMLElement)
-      .filter((element) => visibleElement(element))
-      .filter((element) => /Error submitting message|创建任务时出错|提交消息出错/i.test(element.innerText || element.textContent || ""));
-    for (const node of nodes.slice(-4)) {
-      node.dataset.codexappHiddenSubmitError = "1";
-      node.style.display = "none";
-    }
-  }
-
-  function cleanupSubmittedTurnUi(signature, text, hideErrors = false) {
-    clearActiveComposerIfMatching(text);
-    clearComposerAttachmentResidue(text);
-    hideSubmittedDuplicateBubbles(text, signature);
-    if (hideErrors) hideRecentSubmitErrors();
-  }
-
-  function rememberSubmittedTurnUiCleanup(signature, text, source = "submit") {
-    if (!signature || !normalizeClientVisibleText(text)) return;
-    submittedTurnUiCleanups.set(signature, {
-      text,
-      source,
-      storedAt: Date.now(),
-    });
-    const hideErrors = source !== "mcp-request";
-    const delays = [0, 80, 250, 700, 1500, 3000];
-    for (const delayMs of delays) {
-      setTimeout(() => cleanupSubmittedTurnUi(signature, text, hideErrors), delayMs);
-    }
-    const cutoff = Date.now() - 5 * 60 * 1000;
-    for (const [key, entry] of submittedTurnUiCleanups) {
-      if (Number(entry?.storedAt || 0) < cutoff) submittedTurnUiCleanups.delete(key);
-    }
-  }
-
-  function clearStaleComposerSubmissionResidue(reason = "watchdog") {
-    if (Date.now() - lastTrustedComposerInputAt < 2500) return false;
-    const text = activeComposerText();
-    const normalized = normalizeClientVisibleText(text);
-    if (normalized.length < 12) return false;
-    if (transcriptExactTextMatchCount(text) <= 0) return false;
-    const signature = clientTurnSignature(activeThreadIdFromDocument(), text) || ("stale:" + clientHashText(text));
-    cleanupSubmittedTurnUi(signature, text, true);
-    return true;
-  }
-
   function isLikelySubmitButton(button) {
     if (!(button instanceof HTMLButtonElement)) return false;
     if (button.disabled || button.getAttribute("aria-disabled") === "true") return false;
@@ -6344,11 +5838,6 @@ function browserBridgeScript() {
   }
 
   function installSubmitDeduper() {
-    document.addEventListener("beforeinput", (event) => {
-      const composer = activeComposer();
-      if (!event.isTrusted || !composer || !(event.target instanceof Node) || !composer.contains(event.target)) return;
-      lastTrustedComposerInputAt = Date.now();
-    }, true);
     document.addEventListener("click", (event) => {
       const button = event.target instanceof Element ? event.target.closest("button") : null;
       if (!isLikelySubmitButton(button)) return;
@@ -6381,13 +5870,6 @@ function browserBridgeScript() {
         if (entry?.source === "enter" && entry.requestId == null) pendingTurnSubmissions.delete(signature);
       }, 5000);
     }, true);
-    const staleCleanerStartedAt = Date.now();
-    const staleCleaner = setInterval(() => {
-      clearStaleComposerSubmissionResidue("interval");
-      if (Date.now() - staleCleanerStartedAt > 30000) clearInterval(staleCleaner);
-    }, 900);
-    setTimeout(() => clearStaleComposerSubmissionResidue("startup"), 1200);
-    setTimeout(() => clearStaleComposerSubmissionResidue("startup-late"), 3000);
   }
 
   function postToView(message) {
@@ -6774,7 +6256,6 @@ function browserBridgeScript() {
         }
       }
       rememberPendingTurnSubmission(signature, request.id, "mcp-request");
-      rememberSubmittedTurnUiCleanup(signature, inputText, "mcp-request");
     }
     if (mcpRequests.size <= 500) return;
     const cutoff = Date.now() - 10 * 60 * 1000;
@@ -7021,9 +6502,6 @@ function browserBridgeScript() {
         const request = responseId == null ? null : mcpRequests.get(String(responseId));
         if (request) mcpRequests.delete(String(responseId));
         if (request?.signature) releasePendingTurnSubmission(request.signature);
-        if (request?.signature && !message.message?.error) {
-          rememberSubmittedTurnUiCleanup(request.signature, request.inputText || textFromClientTurnInput(request.params?.input), "mcp-response");
-        }
         if (request?.method === "thread/turns/list" && hasActiveTurns(message.message?.result)) {
           scheduleActiveTranscriptRepair("active-thread-open");
         }
@@ -11214,11 +10692,13 @@ function acceptCanonicalSubmission(threadId, body = {}) {
     mode: ["normal", "steer", "plan", "goal"].includes(body.mode) ? body.mode : "normal",
     state: "accepted",
     optimisticTurn: optimisticTurnForSubmission(threadId, submissionId, body),
+    submitBody: isPlainObject(body) ? body : {},
     error: null,
     createdAt: Date.now(),
     updatedAt: Date.now(),
   };
   canonicalSubmissionStates.set(key, entry);
+  saveCanonicalSubmissionsSoon();
   runCanonicalSubmission(entry, body).catch((error) => {
     updateCanonicalSubmission(entry, { state: "failed", error: error.message || String(error) });
   });
@@ -11229,6 +10709,19 @@ function acceptCanonicalSubmission(threadId, body = {}) {
     optimisticTurn: entry.optimisticTurn,
   };
 }
+
+function resumePersistedCanonicalSubmissions() {
+  for (const entry of canonicalSubmissionStates.values()) {
+    if (!["accepted", "resuming", "queued"].includes(entry.state)) continue;
+    if (!isPlainObject(entry.submitBody)) continue;
+    runCanonicalSubmission(entry, entry.submitBody).catch((error) => {
+      updateCanonicalSubmission(entry, { state: "failed", error: error.message || String(error) });
+    });
+  }
+}
+
+loadCanonicalSubmissions();
+setImmediate(resumePersistedCanonicalSubmissions);
 
 function readJsonRequest(req, maxBytes = 25 * 1024 * 1024) {
   return new Promise((resolve, reject) => {
@@ -11306,7 +10799,7 @@ function singleSurfaceHtml(threadId) {
     .top { border-bottom: 1px solid var(--line); display: flex; align-items: center; gap: 12px; padding: 0 18px; min-width: 0; }
     .title { font-weight: 650; overflow: hidden; white-space: nowrap; text-overflow: ellipsis; min-width: 0; }
     .status { margin-left: auto; color: var(--muted); font-size: 12px; white-space: nowrap; }
-    .transcript { min-height: 0; overflow: auto; padding: 20px 20px 120px; overflow-anchor: none; }
+    .transcript { min-height: 0; overflow: auto; padding: 20px 20px 120px; overflow-anchor: none; scrollbar-gutter: stable; }
     .inner { max-width: 860px; margin: 0 auto; }
     .loader { width: 100%; border: 1px solid var(--line); border-radius: 7px; background: #fff; color: var(--muted); padding: 8px 10px; margin: 4px 0 16px; cursor: pointer; overflow-anchor: none; }
     .turn { margin: 16px 0; contain: layout paint; overflow-anchor: none; }
@@ -11363,12 +10856,11 @@ function singleSurfaceHtml(threadId) {
     </main>
   </div>
   <script>window.__codexappSingleSurface = true;</script>
-  <script src="${bridgeScriptPath}"></script>
   <script>
   (() => {
     const threadId = ${safeThreadId};
     const MAX_WINDOW = ${canonicalWindowCacheLimit};
-    const state = { items: [], newerCache: [], olderCursor: null, hasOlder: true, loading: false, restoring: false, submitting: false, attachments: [], statusTimer: null };
+    const state = { items: [], pendingTurns: new Map(), newerCache: [], olderCursor: null, hasOlder: true, loading: false, restoring: false, submitting: false, attachments: [], statusTimer: null, viewportCheckRaf: 0 };
     const els = {
       threadList: document.getElementById('threadList'),
       refreshThreads: document.getElementById('refreshThreads'),
@@ -11403,7 +10895,7 @@ function singleSurfaceHtml(threadId) {
     function restoreAnchor(anchor, attempts) {
       if (!anchor) return;
       state.restoring = true;
-      let remaining = Number.isFinite(attempts) ? attempts : 8;
+      let remaining = Number.isFinite(attempts) ? attempts : 2;
       const apply = () => {
         const node = els.turns.querySelector('[data-turn-id="' + CSS.escape(anchor.id) + '"]');
         if (node) {
@@ -11415,9 +10907,10 @@ function singleSurfaceHtml(threadId) {
           requestAnimationFrame(apply);
         } else {
           state.restoring = false;
+          queueViewportCheck();
         }
       };
-      requestAnimationFrame(apply);
+      apply();
     }
     function setLoadingUi() {
       els.loadOlder.disabled = state.loading || !state.hasOlder;
@@ -11428,9 +10921,20 @@ function singleSurfaceHtml(threadId) {
       let changed = false;
       for (const submission of submissions) {
         if (!submission?.submissionId) continue;
-        const turn = state.items.find((item) => item.id === submission.submissionId);
+        let turn = state.pendingTurns.get(submission.submissionId) || state.items.find((item) => item.id === submission.submissionId || item.submissionId === submission.submissionId);
+        if (!turn && submission.optimisticTurn) {
+          turn = JSON.parse(JSON.stringify(submission.optimisticTurn));
+          state.pendingTurns.set(submission.submissionId, turn);
+          changed = true;
+        }
         if (!turn) continue;
-        const nextStatus = submission.state === 'failed' ? 'failed' : (submission.state === 'running' || submission.state === 'submitted' || submission.state === 'resuming' ? 'running' : turn.status);
+        const nextStatus = submission.state === 'failed'
+          ? 'failed'
+          : (submission.state === 'completed'
+            ? 'completed'
+            : (submission.state === 'running' || submission.state === 'submitted' || submission.state === 'resuming'
+              ? 'running'
+              : turn.status));
         if (turn.status !== nextStatus || turn.error !== submission.error) {
           turn.status = nextStatus;
           turn.error = submission.error || null;
@@ -11446,6 +10950,7 @@ function singleSurfaceHtml(threadId) {
       for (const turn of list) {
         if (!turn?.id || known.has(turn.id)) continue;
         if (turn.submissionId) {
+          if (state.pendingTurns.delete(turn.submissionId)) changed = true;
           const optimisticIndex = state.items.findIndex((item) => item.id === turn.submissionId);
           if (optimisticIndex >= 0) {
             state.items.splice(optimisticIndex, 1, turn);
@@ -11459,6 +10964,19 @@ function singleSurfaceHtml(threadId) {
         changed = true;
       }
       return changed;
+    }
+    function visibleTurns() {
+      const turns = state.items.slice();
+      const ids = new Set(turns.map((item) => item.id));
+      for (const turn of state.pendingTurns.values()) {
+        if (!turn?.id || ids.has(turn.id)) continue;
+        turns.push(turn);
+        ids.add(turn.id);
+      }
+      return turns;
+    }
+    function turnStatusLabel(value) {
+      return ({ optimistic:'已提交', accepted:'已接收', resuming:'接入中', submitted:'已转发', running:'运行中', failed:'失败', queued:'排队中' })[value] || value || '';
     }
     function textNode(text) {
       return document.createTextNode(esc(text));
@@ -11529,13 +11047,13 @@ function singleSurfaceHtml(threadId) {
       if (turn.status && turn.status !== 'completed') {
         const meta = document.createElement('div');
         meta.className = 'meta';
-        meta.textContent = turn.error ? (turn.status + ': ' + turn.error) : (turn.status === 'optimistic' ? '已本地提交' : turn.status);
+        meta.textContent = turn.error ? (turnStatusLabel(turn.status) + ': ' + turn.error) : turnStatusLabel(turn.status);
         section.appendChild(meta);
       }
       return section;
     }
     function renderTurns(anchor) {
-      els.turns.replaceChildren(...state.items.map(renderTurn));
+      els.turns.replaceChildren(...visibleTurns().map(renderTurn));
       setLoadingUi();
       restoreAnchor(anchor);
     }
@@ -11551,10 +11069,10 @@ function singleSurfaceHtml(threadId) {
       els.status.textContent = statusLabel(result.status?.state);
       state.loading = false;
       renderTurns();
-      requestAnimationFrame(() => { els.transcript.scrollTop = els.transcript.scrollHeight; });
+      requestAnimationFrame(() => { els.transcript.scrollTop = els.transcript.scrollHeight; queueViewportCheck(); });
     }
     async function loadOlder() {
-      if (state.loading || !state.hasOlder || !state.olderCursor) return;
+      if (state.restoring || state.loading || !state.hasOlder || !state.olderCursor) return;
       const anchor = captureAnchor();
       state.loading = true;
       setLoadingUi();
@@ -11570,7 +11088,7 @@ function singleSurfaceHtml(threadId) {
       renderTurns(anchor);
     }
     function loadNewerFromCache() {
-      if (state.loading || state.newerCache.length === 0) return;
+      if (state.restoring || state.loading || state.newerCache.length === 0) return;
       const anchor = captureAnchor();
       const take = state.newerCache.splice(0, ${canonicalWindowDefaultLimit});
       state.items = state.items.concat(take);
@@ -11605,9 +11123,9 @@ function singleSurfaceHtml(threadId) {
           const anchor = nearBottom ? null : captureAnchor();
           const latest = await api('/api/threads/' + encodeURIComponent(threadId) + '/window?direction=latest&limit=${canonicalWindowDefaultLimit}');
           const changed = mergeIncomingTurns(latest.items);
-          mergeSubmissionStates(latest.status?.submissions);
+          const latestSubmissionChanged = mergeSubmissionStates(latest.status?.submissions);
           while (state.items.length > MAX_WINDOW) state.items.shift();
-          if (changed || submissionChanged) {
+          if (changed || submissionChanged || latestSubmissionChanged) {
             renderTurns(anchor);
             if (nearBottom) requestAnimationFrame(() => { els.transcript.scrollTop = els.transcript.scrollHeight; });
           }
@@ -11653,18 +11171,24 @@ function singleSurfaceHtml(threadId) {
     }
     function maybeLoadAroundViewport() {
       if (state.restoring) return;
-      if (els.transcript.scrollTop < 80) void loadOlder();
+      if (state.loading) return;
+      if (els.transcript.scrollTop < 80) {
+        void loadOlder();
+        return;
+      }
       if (els.transcript.scrollHeight - els.transcript.clientHeight - els.transcript.scrollTop < 80) loadNewerFromCache();
     }
-    els.loadOlder.addEventListener('click', loadOlder);
-    els.transcript.addEventListener('scroll', maybeLoadAroundViewport, { passive: true });
-    if ('IntersectionObserver' in window) {
-      const olderObserver = new IntersectionObserver((entries) => {
-        if (entries.some((entry) => entry.isIntersecting)) void loadOlder();
-      }, { root: els.transcript, rootMargin: '160px 0px 0px 0px' });
-      olderObserver.observe(els.loadOlder);
+    function queueViewportCheck() {
+      if (state.viewportCheckRaf) return;
+      state.viewportCheckRaf = requestAnimationFrame(() => {
+        state.viewportCheckRaf = 0;
+        maybeLoadAroundViewport();
+      });
     }
-    state.viewportTimer = setInterval(maybeLoadAroundViewport, 300);
+    els.loadOlder.addEventListener('click', loadOlder);
+    els.transcript.addEventListener('scroll', queueViewportCheck, { passive: true });
+    els.transcript.addEventListener('wheel', queueViewportCheck, { passive: true });
+    els.transcript.addEventListener('touchmove', queueViewportCheck, { passive: true });
     els.refreshThreads.addEventListener('click', loadThreads);
     els.pickFile.addEventListener('click', () => els.fileInput.click());
     els.fileInput.addEventListener('change', async () => {
@@ -11692,15 +11216,14 @@ function singleSurfaceHtml(threadId) {
           body: JSON.stringify(body)
         });
         if (result.optimisticTurn) {
-          state.items.push(result.optimisticTurn);
-          while (state.items.length > MAX_WINDOW) state.items.shift();
+          state.pendingTurns.set(result.optimisticTurn.id, result.optimisticTurn);
           renderTurns();
           requestAnimationFrame(() => { els.transcript.scrollTop = els.transcript.scrollHeight; });
         }
         els.status.textContent = statusLabel(result.state);
       } catch (error) {
         const failed = optimisticFailureTurn(text, attachments, error.message || String(error));
-        state.items.push(failed);
+        state.pendingTurns.set(failed.id, failed);
         renderTurns();
       } finally {
         state.submitting = false;
