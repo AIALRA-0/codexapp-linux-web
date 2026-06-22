@@ -116,6 +116,8 @@ const promptHistorySteerRecoveryEnabled = parseBoolean(process.env.CODEXAPP_PROM
 const promptHistorySteerRecoveryImmediateDelayMs = numberFromEnv("CODEXAPP_PROMPT_HISTORY_STEER_RECOVERY_IMMEDIATE_DELAY_MS", 50, 0, 5000);
 const promptHistorySteerRecoveryDelayMs = numberFromEnv("CODEXAPP_PROMPT_HISTORY_STEER_RECOVERY_DELAY_MS", 2000, 250, 15000);
 const turnInputSubmissionTtlMs = numberFromEnv("CODEXAPP_TURN_INPUT_SUBMISSION_TTL_MS", 30000, 1000, 300000);
+const turnInputCoalesceTtlMs = numberFromEnv("CODEXAPP_TURN_INPUT_COALESCE_TTL_MS", 10 * 60 * 1000, 1000, 30 * 60 * 1000);
+const browserTurnSubmitLockMs = numberFromEnv("CODEXAPP_BROWSER_TURN_SUBMIT_LOCK_MS", 10 * 60 * 1000, 1000, 30 * 60 * 1000);
 const activeTurnWatchdogEnabled = parseBoolean(process.env.CODEXAPP_ACTIVE_TURN_WATCHDOG, true);
 const activeTurnWatchdogFastIntervalMs = numberFromEnv("CODEXAPP_ACTIVE_TURN_WATCHDOG_FAST_MS", 1500, 500, 30000);
 const activeTurnWatchdogSlowAfterMs = numberFromEnv("CODEXAPP_ACTIVE_TURN_WATCHDOG_SLOW_AFTER_MS", 30000, 5000, 300000);
@@ -2510,7 +2512,7 @@ function fullAccessThreadSettings(settings = {}) {
 
 function applySelectedPermissionModeToParams(method, params) {
   if (selectedLocalAgentMode() !== "full-access" || !isPlainObject(params)) return params;
-  if (!["thread/start", "thread/resume", "turn/start", "thread/settings/update"].includes(String(method || ""))) return params;
+  if (!["thread/start", "thread/resume", "turn/start", "turn/steer", "thread/settings/update"].includes(String(method || ""))) return params;
   const next = {
     ...params,
     approvalPolicy: "never",
@@ -3825,6 +3827,77 @@ function browserBridgeScript() {
     return threadHistoryDistanceFromBottom(container) <= Math.max(640, Math.round(container.clientHeight * 0.75));
   }
 
+  let threadScrollAnchorCounter = 0;
+
+  function visibleTextElement(element, containerRect) {
+    if (!(element instanceof HTMLElement)) return false;
+    if (element === container) return false;
+    const text = (element.innerText || element.textContent || "").trim();
+    if (text.length < 8) return false;
+    const rect = element.getBoundingClientRect();
+    if (rect.height < 8 || rect.width < 40) return false;
+    return rect.bottom > containerRect.top + 24 && rect.top < containerRect.bottom - 24;
+  }
+
+  function captureThreadScrollAnchor(container) {
+    if (!(container instanceof HTMLElement)) return null;
+    const containerRect = container.getBoundingClientRect();
+    const targetY = containerRect.top + Math.min(
+      Math.max(96, Math.round(container.clientHeight * 0.35)),
+      Math.max(96, container.clientHeight - 96),
+    );
+    const candidates = Array.from(container.querySelectorAll("[data-testid], article, [role='article'], [data-message-id], [data-turn-id], div, p"))
+      .filter((element) => visibleTextElement(element, containerRect));
+    if (candidates.length === 0) return {
+      id: null,
+      top: null,
+      scrollTop: container.scrollTop,
+      scrollHeight: container.scrollHeight,
+    };
+    candidates.sort((a, b) => {
+      const ar = a.getBoundingClientRect();
+      const br = b.getBoundingClientRect();
+      const distance = Math.abs(ar.top - targetY) - Math.abs(br.top - targetY);
+      if (distance !== 0) return distance;
+      return (ar.height * ar.width) - (br.height * br.width);
+    });
+    const element = candidates[0];
+    const id = "anchor-" + (++threadScrollAnchorCounter) + "-" + Math.random().toString(16).slice(2);
+    try { element.dataset.codexappScrollAnchor = id; } catch {}
+    return {
+      id,
+      top: element.getBoundingClientRect().top,
+      scrollTop: container.scrollTop,
+      scrollHeight: container.scrollHeight,
+    };
+  }
+
+  function restoreThreadScrollAnchor(container, anchor) {
+    if (!(container instanceof HTMLElement) || !anchor) return;
+    let attempts = 0;
+    const fallback = () => {
+      const delta = container.scrollHeight - Number(anchor.scrollHeight || 0);
+      if (Math.abs(delta) > 1) container.scrollTop = Number(anchor.scrollTop || 0) + delta;
+      else container.scrollTop = Number(anchor.scrollTop || 0);
+    };
+    const apply = () => {
+      attempts += 1;
+      let restored = false;
+      if (anchor.id) {
+        const element = container.querySelector("[data-codexapp-scroll-anchor='" + anchor.id + "']");
+        if (element instanceof HTMLElement) {
+          const delta = element.getBoundingClientRect().top - Number(anchor.top || 0);
+          if (Math.abs(delta) > 1) container.scrollTop += delta;
+          try { delete element.dataset.codexappScrollAnchor; } catch {}
+          restored = true;
+        }
+      }
+      if (!restored && attempts >= 2) fallback();
+      if (attempts < 3) requestAnimationFrame(apply);
+    };
+    requestAnimationFrame(apply);
+  }
+
   function canLoadOlderThreadHistory(threadId) {
     const getter = window.__codexappGetThreadHistoryPagination;
     const pagination = typeof getter === "function" ? getter(threadId) : null;
@@ -3840,7 +3913,14 @@ function browserBridgeScript() {
     const threadId = conversationIdFromThreadContainer(container);
     if (!threadId) return;
     const shifter = window.__codexappShiftThreadHistoryWindow;
-    if (typeof shifter === "function" && shifter(threadId, "older")) return;
+    let anchor = null;
+    if (typeof shifter === "function") {
+      anchor = captureThreadScrollAnchor(container);
+      if (shifter(threadId, "older")) {
+        restoreThreadScrollAnchor(container, anchor);
+        return;
+      }
+    }
     if (!canLoadOlderThreadHistory(threadId)) return;
     const loader = window.__codexappLoadOlderThreadHistory;
     if (typeof loader !== "function") return;
@@ -3856,19 +3936,13 @@ function browserBridgeScript() {
     state.lastStartedAt = now;
     threadHistoryLoadState.set(threadId, state);
     const startedAt = state.lastStartedAt;
-    const previousScrollHeight = container.scrollHeight;
-    const previousScrollTop = container.scrollTop;
-    const isReverse = /reverse/.test(getComputedStyle(container).flexDirection || "");
+    anchor = anchor || captureThreadScrollAnchor(container);
     setTimeout(() => {
       if (state.loading && state.lastStartedAt === startedAt) state.loading = false;
     }, 12000);
     Promise.resolve(loader(threadId))
       .then(() => {
-        if (isReverse) return;
-        requestAnimationFrame(() => {
-          const delta = container.scrollHeight - previousScrollHeight;
-          if (delta > 0) container.scrollTop = previousScrollTop + delta;
-        });
+        restoreThreadScrollAnchor(container, anchor);
       })
       .catch((error) => rawConsoleWarn("[codexapp] older history load failed", reason, error))
       .finally(() => {
@@ -3883,18 +3957,9 @@ function browserBridgeScript() {
     if (!threadId) return;
     const shifter = window.__codexappShiftThreadHistoryWindow;
     if (typeof shifter !== "function") return;
-    const previousScrollHeight = container.scrollHeight;
-    const previousScrollTop = container.scrollTop;
-    const isReverse = /reverse/.test(getComputedStyle(container).flexDirection || "");
+    const anchor = captureThreadScrollAnchor(container);
     if (!shifter(threadId, "newer")) return;
-    requestAnimationFrame(() => {
-      if (isReverse) {
-        container.scrollTop = Math.min(0, previousScrollTop);
-        return;
-      }
-      const delta = container.scrollHeight - previousScrollHeight;
-      if (delta > 0) container.scrollTop = previousScrollTop + delta;
-    });
+    restoreThreadScrollAnchor(container, anchor);
   }
 
   function installThreadHistoryLoader(container) {
@@ -4135,11 +4200,140 @@ function browserBridgeScript() {
   let lastServerMessageAt = Date.now();
   const browserStaleMs = ${bridgeBrowserStaleMs};
   const mcpRequests = new Map();
+  const pendingTurnSubmissions = new Map();
+  const turnSubmitLockMs = ${browserTurnSubmitLockMs};
   const queue = [];
   const browserRequests = new Map();
   const uploadMaxFilesPerBatch = 8;
   const uploadMaxBase64BytesPerBatch = 32 * 1024 * 1024;
   const uploadReadConcurrency = 3;
+
+  function textFromClientTurnInput(input) {
+    if (typeof input === "string") return input.trim();
+    if (!Array.isArray(input)) return "";
+    return input.map((item) => {
+      if (typeof item === "string") return item;
+      if (!item || typeof item !== "object") return "";
+      if (typeof item.text === "string") return item.text;
+      if (Array.isArray(item.content)) return textFromClientTurnInput(item.content);
+      return "";
+    }).filter((part) => part.length > 0).join("\\n").trim();
+  }
+
+  function clientHashText(text) {
+    let hash = 2166136261;
+    const value = String(text || "");
+    for (let index = 0; index < value.length; index += 1) {
+      hash ^= value.charCodeAt(index);
+      hash = Math.imul(hash, 16777619);
+    }
+    return (hash >>> 0).toString(16);
+  }
+
+  function clientTurnSignature(threadId, inputOrText) {
+    const id = typeof threadId === "string" && threadId.length > 0 ? threadId : activeThreadIdFromDocument();
+    const text = typeof inputOrText === "string" ? inputOrText.trim() : textFromClientTurnInput(inputOrText);
+    if (!id || !text) return null;
+    return id + ":" + clientHashText(text);
+  }
+
+  function cleanupPendingTurnSubmissions(now = Date.now()) {
+    for (const [signature, entry] of pendingTurnSubmissions) {
+      if (now - Number(entry?.storedAt || 0) > turnSubmitLockMs) pendingTurnSubmissions.delete(signature);
+    }
+  }
+
+  function rememberPendingTurnSubmission(signature, requestId = null, source = "request") {
+    if (!signature) return;
+    cleanupPendingTurnSubmissions();
+    pendingTurnSubmissions.set(signature, { requestId: requestId == null ? null : String(requestId), storedAt: Date.now(), source });
+  }
+
+  function releasePendingTurnSubmission(signature) {
+    if (signature) pendingTurnSubmissions.delete(signature);
+  }
+
+  function hasPendingTurnSubmission(signature) {
+    if (!signature) return false;
+    cleanupPendingTurnSubmissions();
+    return pendingTurnSubmissions.has(signature);
+  }
+
+  function activeThreadIdFromDocument() {
+    const node = document.querySelector("[data-codexapp-conversation-id]");
+    const id = node?.getAttribute?.("data-codexapp-conversation-id") || "";
+    return id || null;
+  }
+
+  function activeComposer() {
+    return Array.from(document.querySelectorAll("[contenteditable='true']")).filter((element) => {
+      if (!(element instanceof HTMLElement)) return false;
+      const rect = element.getBoundingClientRect();
+      return rect.width > 0 && rect.height > 0;
+    }).at(-1) || null;
+  }
+
+  function activeComposerText() {
+    return (activeComposer()?.innerText || "").trim();
+  }
+
+  function isLikelySubmitButton(button) {
+    if (!(button instanceof HTMLButtonElement)) return false;
+    if (button.disabled || button.getAttribute("aria-disabled") === "true") return false;
+    const label = ((button.innerText || button.textContent || "") + " " + (button.getAttribute("aria-label") || "")).trim();
+    if (/发送|send|submit/i.test(label)) return true;
+    const className = String(button.className || "");
+    return className.includes("size-token-button-composer") && className.includes("bg-token-foreground");
+  }
+
+  function activeSubmitSignature() {
+    return clientTurnSignature(activeThreadIdFromDocument(), activeComposerText());
+  }
+
+  function preventDuplicateSubmitGesture(event, reason) {
+    const signature = activeSubmitSignature();
+    if (!signature || !hasPendingTurnSubmission(signature)) return false;
+    event.preventDefault();
+    event.stopPropagation();
+    event.stopImmediatePropagation?.();
+    rawConsoleWarn("[codexapp] duplicate submit gesture blocked", reason);
+    return true;
+  }
+
+  function installSubmitDeduper() {
+    document.addEventListener("click", (event) => {
+      const button = event.target instanceof Element ? event.target.closest("button") : null;
+      if (!isLikelySubmitButton(button)) return;
+      const signature = activeSubmitSignature();
+      if (!signature) return;
+      if (hasPendingTurnSubmission(signature)) {
+        preventDuplicateSubmitGesture(event, "click");
+        return;
+      }
+      rememberPendingTurnSubmission(signature, null, "click");
+      setTimeout(() => {
+        const entry = pendingTurnSubmissions.get(signature);
+        if (entry?.source === "click" && entry.requestId == null) pendingTurnSubmissions.delete(signature);
+      }, 5000);
+    }, true);
+    document.addEventListener("keydown", (event) => {
+      if (event.isComposing || event.shiftKey || event.altKey || event.ctrlKey || event.metaKey) return;
+      if (event.key !== "Enter") return;
+      const composer = activeComposer();
+      if (!composer || !(event.target instanceof Node) || !composer.contains(event.target)) return;
+      const signature = activeSubmitSignature();
+      if (!signature) return;
+      if (hasPendingTurnSubmission(signature)) {
+        preventDuplicateSubmitGesture(event, "enter");
+        return;
+      }
+      rememberPendingTurnSubmission(signature, null, "enter");
+      setTimeout(() => {
+        const entry = pendingTurnSubmissions.get(signature);
+        if (entry?.source === "enter" && entry.requestId == null) pendingTurnSubmissions.delete(signature);
+      }, 5000);
+    }, true);
+  }
 
   function postToView(message) {
     window.postMessage(message, location.origin);
@@ -4506,11 +4700,24 @@ function browserBridgeScript() {
   function rememberMcpRequest(message) {
     const request = message?.request;
     if (!request || request.id == null || typeof request.method !== "string") return;
+    const signature = /^(turn\\/start|turn\\/steer)$/.test(request.method)
+      ? clientTurnSignature(request.params?.threadId, request.params?.input)
+      : null;
     mcpRequests.set(String(request.id), {
       method: request.method,
       params: request.params || {},
+      signature,
       storedAt: Date.now()
     });
+    if (signature) {
+      if (hasPendingTurnSubmission(signature)) {
+        const existing = pendingTurnSubmissions.get(signature);
+        if (existing?.requestId != null && existing.requestId !== String(request.id)) {
+          rawConsoleWarn("[codexapp] duplicate turn request observed; server will coalesce", request.method);
+        }
+      }
+      rememberPendingTurnSubmission(signature, request.id, "mcp-request");
+    }
     if (mcpRequests.size <= 500) return;
     const cutoff = Date.now() - 10 * 60 * 1000;
     for (const [key, entry] of mcpRequests) {
@@ -4745,6 +4952,7 @@ function browserBridgeScript() {
         const responseId = message.message?.id;
         const request = responseId == null ? null : mcpRequests.get(String(responseId));
         if (request) mcpRequests.delete(String(responseId));
+        if (request?.signature) releasePendingTurnSubmission(request.signature);
         if (request?.method === "thread/turns/list" && hasActiveTurns(message.message?.result)) {
           scheduleActiveTranscriptRepair("active-thread-open");
         }
@@ -4838,6 +5046,7 @@ function browserBridgeScript() {
     sendToServer(event.detail);
   });
 
+  installSubmitDeduper();
   installUiShim();
   installBrowserFileDropUploadShim();
   connect();
@@ -5851,6 +6060,7 @@ class BridgeSession {
     this.forwardedRequests = new Map();
     this.abortControllers = new Map();
     this.recentTurnInputSubmissions = new Map();
+    this.pendingTurnInputSubmissions = new Map();
     this.promptHistoryRecoveryTimers = new Map();
     this.promptHistoryEligibleThreads = new Map();
     this.activeTurnWatchdogs = new Map();
@@ -5921,6 +6131,7 @@ class BridgeSession {
     this.pending.clear();
     this.forwardedRequests.clear();
     this.recentTurnInputSubmissions.clear();
+    this.pendingTurnInputSubmissions.clear();
     this.largeThreadAppResumePromises.clear();
     for (const timer of this.promptHistoryRecoveryTimers.values()) {
       clearTimeout(timer);
@@ -6169,15 +6380,17 @@ class BridgeSession {
           method: message.method || null,
         });
       }
+      const browserResponseMessage = {
+        id: message.id,
+        ...("result" in message ? { result } : {}),
+        ...("error" in message ? { error: message.error } : {}),
+      };
       this.sendToBrowser({
         type: "mcp-response",
         hostId: "local",
-        message: {
-          id: message.id,
-          ...("result" in message ? { result } : {}),
-          ...("error" in message ? { error: message.error } : {}),
-        },
+        message: browserResponseMessage,
       });
+      if (forwarded) this.finishPendingTurnInputSubmission(message.id, browserResponseMessage);
       return;
     }
 
@@ -6483,17 +6696,19 @@ class BridgeSession {
             error: error.stack || error.message || String(error),
           });
           if (requestId !== undefined) {
+            const errorMessage = {
+              id: requestId,
+              error: {
+                code: -32603,
+                message: error.message || "request forwarding failed",
+              },
+            };
             this.sendToBrowser({
               type: "mcp-response",
               hostId: "local",
-              message: {
-                id: requestId,
-                error: {
-                  code: -32603,
-                  message: error.message || "request forwarding failed",
-                },
-              },
+              message: errorMessage,
             });
+            this.finishPendingTurnInputSubmission(requestId, errorMessage);
           }
         }
         break;
@@ -6788,6 +7003,64 @@ class BridgeSession {
     if (!signature) return false;
     this.cleanupRecentTurnInputSubmissions();
     return this.recentTurnInputSubmissions.has(signature);
+  }
+
+  cleanupPendingTurnInputSubmissions(now = Date.now()) {
+    for (const [signature, entry] of this.pendingTurnInputSubmissions) {
+      if (now - Number(entry?.storedAt || 0) > turnInputCoalesceTtlMs) this.pendingTurnInputSubmissions.delete(signature);
+    }
+  }
+
+  registerPendingTurnInputSubmission(method, params = {}, requestId = null) {
+    if (method !== "turn/start" && method !== "turn/steer") return null;
+    const threadId = typeof params.threadId === "string" ? params.threadId : null;
+    const signature = turnInputSignature(threadId, params.input);
+    if (!signature || requestId == null) return null;
+    this.cleanupPendingTurnInputSubmissions();
+    const existing = this.pendingTurnInputSubmissions.get(signature);
+    if (existing) {
+      const duplicateId = String(requestId);
+      if (duplicateId !== existing.primaryRequestId && !existing.duplicateRequestIds.includes(duplicateId)) {
+        existing.duplicateRequestIds.push(duplicateId);
+      }
+      log("coalesced duplicate turn submission", {
+        method,
+        threadId,
+        primaryRequestId: existing.primaryRequestId,
+        duplicateRequestId: duplicateId,
+      });
+      return { duplicate: true, signature };
+    }
+    this.pendingTurnInputSubmissions.set(signature, {
+      method,
+      threadId,
+      primaryRequestId: String(requestId),
+      duplicateRequestIds: [],
+      storedAt: Date.now(),
+    });
+    return { duplicate: false, signature };
+  }
+
+  finishPendingTurnInputSubmission(requestId, responseMessage = null) {
+    if (requestId == null) return;
+    const id = String(requestId);
+    for (const [signature, entry] of this.pendingTurnInputSubmissions) {
+      if (entry?.primaryRequestId !== id) continue;
+      this.pendingTurnInputSubmissions.delete(signature);
+      const duplicateIds = Array.isArray(entry.duplicateRequestIds) ? entry.duplicateRequestIds.slice() : [];
+      if (!responseMessage || duplicateIds.length === 0) return;
+      for (const duplicateId of duplicateIds) {
+        this.sendToBrowser({
+          type: "mcp-response",
+          hostId: "local",
+          message: {
+            ...responseMessage,
+            id: duplicateId,
+          },
+        });
+      }
+      return;
+    }
   }
 
   cleanupEphemeralThreads(now = Date.now()) {
@@ -7205,6 +7478,11 @@ class BridgeSession {
         });
         return;
       }
+    }
+    const turnSubmission = this.registerPendingTurnInputSubmission(request.method, params || {}, request.id);
+    if (turnSubmission?.duplicate) {
+      this.observeActiveTurnFromRequest(request.method, params || {}, null);
+      return;
     }
     if (shouldInvalidateThreadTurns(request.method, params)) {
       invalidateThreadTurnsCache(params.threadId);
