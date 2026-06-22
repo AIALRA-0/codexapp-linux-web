@@ -1,9 +1,12 @@
 {
   "name": "codexapp-linux-web",
-  "private": true,
   "version": "0.1.0",
+  "license": "MIT",
   "type": "commonjs",
+  "scripts": {
+    "check": "node --check web-server.js && node --check login-proxy.js"
+  },
   "dependencies": {
-    "ws": "^8.18.3"
+    "ws": "^8.21.0"
   }
 }

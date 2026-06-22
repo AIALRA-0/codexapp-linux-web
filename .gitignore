@@ -10,6 +10,7 @@ __pycache__/
 *.tmp
 *.tmp.*
 *.log
+sync-auth.sh
 npm-debug.log*
 yarn-debug.log*
 yarn-error.log*

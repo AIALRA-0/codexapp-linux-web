@@ -14,8 +14,10 @@ Environment=NODE_ENV=production
 Environment=CODEX_HOME=/var/lib/codexapp-linux-web/.codex
 Environment=CODEXAPP_CODEX_CLI=/usr/bin/codex
 Environment=CODEXAPP_APP_VERSION=0.141.0
+Environment=CODEXAPP_APP_SERVER_LISTEN=ws://127.0.0.1:12911
+Environment=CODEXAPP_ADOPT_EXISTING_APP_SERVER=1
 EnvironmentFile=-/etc/codexapp-linux-web/codexapp.env
-ExecStart=/usr/bin/codex app-server --remote-control --listen ws://127.0.0.1:12911 --analytics-default-enabled
+ExecStart=/opt/codexapp-linux-web/scripts/codexapp-app-server-supervisor.sh
 Restart=always
 RestartSec=3
 KillMode=process

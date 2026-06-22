@@ -6,7 +6,8 @@ const fs = require("node:fs");
 const http = require("node:http");
 const os = require("node:os");
 const path = require("node:path");
-const { spawn, execFileSync } = require("node:child_process");
+const zlib = require("node:zlib");
+const { spawn, spawnSync, execFileSync } = require("node:child_process");
 const { WebSocket, WebSocketServer } = require("ws");
 
 const host = process.env.CODEXAPP_WEB_HOST || "127.0.0.1";
@@ -81,6 +82,15 @@ const bridgeBrowserStaleMs = numberFromEnv(
 );
 const startupPrewarmEnabled = parseBoolean(process.env.CODEXAPP_STARTUP_PREWARM, true);
 const startupThreadListPrewarmEnabled = parseBoolean(process.env.CODEXAPP_STARTUP_THREAD_LIST_PREWARM, false);
+const deviceAuthStartTimeoutMs = numberFromEnv("CODEXAPP_DEVICE_AUTH_START_TIMEOUT_MS", 10000, 1000, 60000);
+const deviceAuthSessionTtlMs = numberFromEnv("CODEXAPP_DEVICE_AUTH_SESSION_TTL_MS", 15 * 60 * 1000, 60 * 1000, 60 * 60 * 1000);
+const patchedJavaScriptCacheMaxEntries = numberFromEnv("CODEXAPP_PATCHED_JS_CACHE_MAX_ENTRIES", 2048, 0, 5000);
+const patchedJavaScriptPrewarmEnabled = parseBoolean(process.env.CODEXAPP_PATCHED_JS_PREWARM, false);
+const patchedJavaScriptPrewarmBatchSize = numberFromEnv("CODEXAPP_PATCHED_JS_PREWARM_BATCH_SIZE", 32, 1, 256);
+const staticCompressionEnabled = parseBoolean(process.env.CODEXAPP_STATIC_COMPRESSION, true);
+const staticCompressionMinBytes = numberFromEnv("CODEXAPP_STATIC_COMPRESSION_MIN_BYTES", 1024, 0, 1024 * 1024);
+const staticCompressionCacheMaxEntries = numberFromEnv("CODEXAPP_STATIC_COMPRESSION_CACHE_MAX_ENTRIES", 2048, 0, 5000);
+const sqliteBusyTimeoutMs = numberFromEnv("CODEXAPP_SQLITE_BUSY_TIMEOUT_MS", 5000, 0, 60000);
 const terminalSnapshotMaxBytes = numberFromEnv("CODEXAPP_TERMINAL_SNAPSHOT_MAX_BYTES", 120000, 4000, 1000000);
 const codexStateDbPath = process.env.CODEXAPP_CODEX_STATE_DB || path.join(codexHome, "state_5.sqlite");
 const fastThreadListEnabled = parseBoolean(process.env.CODEXAPP_FAST_THREAD_LIST, true);
@@ -101,8 +111,9 @@ const largeThreadFastPathEnabled = parseBoolean(process.env.CODEXAPP_LARGE_THREA
 const largeThreadFastPathMinBytes = numberFromEnv("CODEXAPP_LARGE_THREAD_FAST_PATH_MIN_BYTES", 50 * 1024 * 1024, 1024 * 1024, 1024 * 1024 * 1024);
 const largeThreadFastPathChunkBytes = numberFromEnv("CODEXAPP_LARGE_THREAD_FAST_PATH_CHUNK_BYTES", 1024 * 1024, 128 * 1024, 128 * 1024 * 1024);
 const largeThreadFastPathInitialChunkBytes = numberFromEnv("CODEXAPP_LARGE_THREAD_FAST_PATH_INITIAL_CHUNK_BYTES", 512 * 1024, 128 * 1024, 512 * 1024 * 1024);
-const largeThreadFastPathMaxTurns = numberFromEnv("CODEXAPP_LARGE_THREAD_FAST_PATH_MAX_TURNS", 3, 1, 5000);
-const largeThreadFastPathInitialMaxTurns = numberFromEnv("CODEXAPP_LARGE_THREAD_FAST_PATH_INITIAL_MAX_TURNS", 1, 1, 5000);
+const largeThreadFastPathMaxScanBytes = numberFromEnv("CODEXAPP_LARGE_THREAD_FAST_PATH_MAX_SCAN_BYTES", 4 * 1024 * 1024, 128 * 1024, 128 * 1024 * 1024);
+const largeThreadFastPathMaxTurns = numberFromEnv("CODEXAPP_LARGE_THREAD_FAST_PATH_MAX_TURNS", 8, 1, 5000);
+const largeThreadFastPathInitialMaxTurns = numberFromEnv("CODEXAPP_LARGE_THREAD_FAST_PATH_INITIAL_MAX_TURNS", 8, 1, 5000);
 const largeThreadFastPathMaxItemTextBytes = numberFromEnv("CODEXAPP_LARGE_THREAD_FAST_PATH_MAX_ITEM_TEXT_BYTES", 4096, 1024, 1024 * 1024);
 const largeThreadFastPathMaxItemsPerTurn = numberFromEnv("CODEXAPP_LARGE_THREAD_FAST_PATH_MAX_ITEMS_PER_TURN", 8, 2, 100);
 const largeThreadStaleInProgressMs = numberFromEnv("CODEXAPP_LARGE_THREAD_STALE_IN_PROGRESS_MS", 2 * 60 * 60 * 1000, 5 * 60 * 1000, 7 * 24 * 60 * 60 * 1000);
@@ -112,6 +123,8 @@ const largeThreadSubmitResumeTimeoutMs = numberFromEnv("CODEXAPP_LARGE_THREAD_SU
 const largeThreadPrewarmOnResumeEnabled = parseBoolean(process.env.CODEXAPP_LARGE_THREAD_PREWARM_ON_RESUME, false);
 const historyWindowMaxTurns = numberFromEnv("CODEXAPP_HISTORY_WINDOW_MAX_TURNS", 8, 4, 100);
 const historyWindowCacheMaxTurns = numberFromEnv("CODEXAPP_HISTORY_WINDOW_CACHE_MAX_TURNS", 32, historyWindowMaxTurns, 500);
+const threadTurnsWindowDefaultLimit = numberFromEnv("CODEXAPP_THREAD_TURNS_WINDOW_LIMIT", historyWindowMaxTurns, 4, 100);
+const activeTurnWatchdogPageLimit = numberFromEnv("CODEXAPP_ACTIVE_TURN_WATCHDOG_PAGE_LIMIT", Math.max(8, threadTurnsWindowDefaultLimit), 4, 100);
 const promptHistorySteerRecoveryEnabled = parseBoolean(process.env.CODEXAPP_PROMPT_HISTORY_STEER_RECOVERY, true);
 const promptHistorySteerRecoveryImmediateDelayMs = numberFromEnv("CODEXAPP_PROMPT_HISTORY_STEER_RECOVERY_IMMEDIATE_DELAY_MS", 50, 0, 5000);
 const promptHistorySteerRecoveryDelayMs = numberFromEnv("CODEXAPP_PROMPT_HISTORY_STEER_RECOVERY_DELAY_MS", 2000, 250, 15000);
@@ -952,10 +965,10 @@ function existingPaths(paths) {
 function sqliteRows(dbPath, sql) {
   if (!fs.existsSync(dbPath)) return [];
   try {
-    const output = execFileSync("sqlite3", ["-json", dbPath, sql], {
+    const output = execFileSync("sqlite3", ["-cmd", `.timeout ${sqliteBusyTimeoutMs}`, "-json", dbPath, sql], {
       encoding: "utf8",
       maxBuffer: 10 * 1024 * 1024,
-      timeout: 10000,
+      timeout: Math.max(10000, sqliteBusyTimeoutMs + 5000),
     }).trim();
     return output ? JSON.parse(output) : [];
   } catch (error) {
@@ -967,10 +980,10 @@ function sqliteRows(dbPath, sql) {
 function sqliteRun(dbPath, sql) {
   if (!fs.existsSync(dbPath)) return false;
   try {
-    execFileSync("sqlite3", [dbPath, sql], {
+    execFileSync("sqlite3", ["-cmd", `.timeout ${sqliteBusyTimeoutMs}`, dbPath, sql], {
       encoding: "utf8",
       maxBuffer: 1024 * 1024,
-      timeout: 10000,
+      timeout: Math.max(10000, sqliteBusyTimeoutMs + 5000),
     });
     return true;
   } catch (error) {
@@ -1625,6 +1638,8 @@ function parseLargeRolloutTurns(lines, chunkStart) {
       const startedAt = timestampSeconds || 0;
       current = {
         id: turnId || `large-${chunkStart}-${syntheticIndex}`,
+        turnId: turnId || null,
+        params: { cwd: null },
         items: [],
         itemsView: "summary",
         status: "inProgress",
@@ -1637,6 +1652,7 @@ function parseLargeRolloutTurns(lines, chunkStart) {
     }
     largeThreadSetTurnOffset(current, startOffset);
     if (turnId && String(current.id).startsWith("large-")) current.id = turnId;
+    if (turnId && !current.turnId) current.turnId = turnId;
     if (timestampSeconds && !current.startedAt) current.startedAt = timestampSeconds;
     largeThreadSetTurnLastEventAt(current, timestampSeconds);
     return current;
@@ -1719,7 +1735,8 @@ function parseLargeRolloutTurns(lines, chunkStart) {
 function largeThreadRequestedTurnLimit(params = {}, fallback) {
   const candidate = Number.parseInt(String(params.limit ?? params.initialTurnsPage?.limit ?? ""), 10);
   if (!Number.isFinite(candidate) || candidate <= 0) return fallback;
-  return Math.max(1, Math.min(fallback, candidate));
+  const configured = Number.isFinite(Number(fallback)) && Number(fallback) > 0 ? Number(fallback) : historyWindowMaxTurns;
+  return Math.max(1, Math.min(configured, candidate));
 }
 
 function largeThreadTurnsFastPathPage(params = {}) {
@@ -1732,8 +1749,24 @@ function largeThreadTurnsFastPathPage(params = {}) {
   const chunkBytes = isInitialPage ? largeThreadFastPathInitialChunkBytes : largeThreadFastPathChunkBytes;
   const configuredMaxTurns = isInitialPage ? largeThreadFastPathInitialMaxTurns : largeThreadFastPathMaxTurns;
   const maxTurns = largeThreadRequestedTurnLimit(params, configuredMaxTurns);
-  const chunk = readLargeRolloutChunk(info.rolloutPath, endOffset, chunkBytes);
-  const parsedTurns = parseLargeRolloutTurns(chunk.entries || chunk.lines, chunk.start);
+  const maxScanBytes = Math.max(chunkBytes, largeThreadFastPathMaxScanBytes);
+  let nextEndOffset = endOffset;
+  let scannedBytes = 0;
+  let chunk = null;
+  let entries = [];
+  let parsedTurns = [];
+  while (nextEndOffset > 0 && scannedBytes < maxScanBytes) {
+    chunk = readLargeRolloutChunk(info.rolloutPath, nextEndOffset, chunkBytes);
+    const chunkEntries = chunk.entries || [];
+    entries = [...chunkEntries, ...entries];
+    scannedBytes += Math.max(0, chunk.end - chunk.start);
+    const parseStart = entries[0]?.offset ?? chunk.start;
+    parsedTurns = parseLargeRolloutTurns(entries, parseStart);
+    if (parsedTurns.length >= maxTurns || chunk.start <= 0) break;
+    if (chunk.start >= nextEndOffset) break;
+    nextEndOffset = chunk.start;
+  }
+  if (!chunk) return null;
   const turns = parsedTurns.length > maxTurns ? parsedTurns.slice(-maxTurns) : parsedTurns;
   let nextOffset = chunk.start;
   if (parsedTurns.length > turns.length) {
@@ -1787,19 +1820,28 @@ function largeThreadReadFastPathResponse(params = {}, turnsPage = null) {
   const updatedAt = epochSecondsFromRow(record, "updated_at");
   const page = turnsPage || largeThreadTurnsFastPathPage({ ...params, cursor: null });
   const turns = Array.isArray(page?.turns) ? page.turns : [];
+  const runtimeSettings = largeThreadRuntimeSettings(record);
+  const currentPermissions = {
+    approvalPolicy: runtimeSettings.approvalPolicy,
+    approvalsReviewer: runtimeSettings.approvalsReviewer,
+    sandboxPolicy: runtimeSettings.sandbox,
+  };
   return {
     thread: {
       id: params.threadId,
       sessionId: params.threadId,
       forkedFromId: null,
       parentThreadId: null,
+      hostId: "local",
       preview: truncateUiText(record.preview || record.first_user_message || record.title || "", 500),
       ephemeral: false,
       modelProvider: record.model_provider || "",
       createdAt,
       updatedAt,
       status: { type: "idle" },
+      threadRuntimeStatus: { type: "idle" },
       path: record.rollout_path,
+      rolloutPath: record.rollout_path,
       cwd: record.cwd || "",
       cliVersion: record.cli_version || "",
       source: record.source || "",
@@ -1812,10 +1854,78 @@ function largeThreadReadFastPathResponse(params = {}, turnsPage = null) {
         originUrl: record.git_origin_url || null,
       },
       name: truncateUiText(record.title || "", 240),
+      title: truncateUiText(record.title || "", 240),
       turns,
+      requests: [],
+      resumeState: "resumed",
+      latestModel: runtimeSettings.model,
+      latestReasoningEffort: runtimeSettings.reasoningEffort,
+      previousTurnModel: null,
+      latestCollaborationMode: {
+        mode: "default",
+        settings: {
+          reasoning_effort: runtimeSettings.reasoningEffort,
+          model: runtimeSettings.model,
+          developer_instructions: null,
+        },
+      },
+      hasUnreadTurn: false,
+      threadGoal: null,
+      latestTokenUsageInfo: null,
+      workspaceKind: "project",
+      workspaceBrowserRoot: null,
+      projectlessOutputDirectory: null,
       turnsPagination: largeThreadTurnsPaginationFromPage(page),
+      currentPermissions,
+      latestThreadSettings: {
+        cwd: record.cwd || "",
+        approvalPolicy: currentPermissions.approvalPolicy,
+        approvalsReviewer: currentPermissions.approvalsReviewer,
+        sandboxPolicy: currentPermissions.sandboxPolicy,
+        permissions: null,
+        model: runtimeSettings.model,
+        serviceTier: runtimeSettings.serviceTier,
+        effort: runtimeSettings.reasoningEffort,
+        collaborationMode: {
+          mode: "default",
+          settings: {
+            reasoning_effort: runtimeSettings.reasoningEffort,
+            model: runtimeSettings.model,
+            developer_instructions: null,
+          },
+        },
+        activePermissionProfile: runtimeSettings.activePermissionProfile,
+      },
     },
     initialTurnsPage: largeThreadInitialTurnsPageFromPage(page),
+  };
+}
+
+function largeThreadStatusFastPathResponse(params = {}) {
+  const threadId = typeof params?.threadId === "string" ? params.threadId : "";
+  const info = largeThreadFastPathInfo(threadId);
+  if (!info) return null;
+  const record = threadRecord(threadId);
+  if (!record) return null;
+  const page = largeThreadTurnsFastPathPage({ threadId, cursor: null, limit: Math.min(5, historyWindowMaxTurns) });
+  const turns = Array.isArray(page?.turns) ? page.turns : [];
+  const latestTurn = turns.at(-1) || null;
+  const running = turns.some((turn) => turn?.status === "inProgress");
+  const login = codexLoginStatus();
+  return {
+    threadId,
+    status: { type: running ? "inProgress" : "idle" },
+    running,
+    queue: { state: "idle" },
+    updatedAt: epochSecondsFromRow(record, "updated_at") ?? Date.now(),
+    waiting: {
+      permission: false,
+      login: !login.loggedIn,
+    },
+    error: null,
+    source: "large-thread-fast-path",
+    latestTurnId: latestTurn?.turnId || latestTurn?.id || null,
+    latestTurnStatus: latestTurn?.status || null,
   };
 }
 
@@ -1892,6 +2002,7 @@ function largeThreadAppResumeParams(params = {}) {
     developerInstructions: typeof params.developerInstructions === "string" ? params.developerInstructions : "",
     personality: typeof params.personality === "string" ? params.personality : "friendly",
     excludeTurns: true,
+    initialTurnsPage: { limit: 5, itemsView: "full" },
   };
   return applySelectedPermissionModeToParams("thread/resume", base);
 }
@@ -2602,6 +2713,51 @@ function setCachedThreadTurns(params = {}, result) {
   }
 }
 
+function boundedTurnPageLimit(value, fallback = threadTurnsWindowDefaultLimit) {
+  const requested = Number.parseInt(String(value ?? ""), 10);
+  const fallbackLimit = Number.isFinite(Number(fallback)) && Number(fallback) > 0
+    ? Math.trunc(Number(fallback))
+    : threadTurnsWindowDefaultLimit;
+  const effective = Number.isFinite(requested) && requested > 0 ? requested : fallbackLimit;
+  const upper = Math.max(1, Math.min(completeThreadTurnsPageLimit, 100));
+  return Math.max(1, Math.min(effective, upper));
+}
+
+function threadReadInitialTurnsLimit(params = {}) {
+  return boundedTurnPageLimit(params?.initialTurnsPage?.limit ?? params?.limit, threadTurnsWindowDefaultLimit);
+}
+
+function chronologicalTurnsFromTurnsPage(result = null) {
+  return Array.isArray(result?.data) ? result.data.slice().reverse() : [];
+}
+
+function turnStableId(turn = null) {
+  return typeof turn?.turnId === "string" && turn.turnId.length > 0
+    ? turn.turnId
+    : (typeof turn?.id === "string" && turn.id.length > 0 ? turn.id : null);
+}
+
+function turnsPaginationFromTurnsPage(result = null, chronologicalTurns = []) {
+  const olderCursor = result?.nextCursor ?? result?.backwardsCursor ?? null;
+  const oldestLoadedTurn = chronologicalTurns.find((turn) => turnStableId(turn));
+  return {
+    olderCursor,
+    oldestLoadedTurnId: turnStableId(oldestLoadedTurn),
+    isLoadingOlder: false,
+    hasLoadedOldest: olderCursor == null,
+  };
+}
+
+function initialTurnsPageFromTurnsResult(result = null) {
+  if (!result || !Array.isArray(result.data)) return null;
+  const nextCursor = result.nextCursor ?? result.backwardsCursor ?? null;
+  return {
+    data: result.data,
+    nextCursor,
+    backwardsCursor: result.backwardsCursor ?? nextCursor,
+  };
+}
+
 function invalidateThreadTurnsCache(threadId = null) {
   if (!threadId) {
     threadTurnsCache.clear();
@@ -2827,6 +2983,111 @@ function send(res, status, headers, body = "") {
   res.end(body);
 }
 
+const compressedStaticResponseCache = new Map();
+
+function appendVaryAcceptEncoding(headers = {}) {
+  const next = { ...headers };
+  const existing = String(next.Vary || next.vary || "").trim();
+  if (!existing) {
+    next.Vary = "Accept-Encoding";
+  } else if (!/(^|,\s*)accept-encoding(\s*,|$)/i.test(existing)) {
+    next.Vary = `${existing}, Accept-Encoding`;
+  }
+  return next;
+}
+
+function bodyBuffer(body = "") {
+  if (Buffer.isBuffer(body)) return body;
+  if (body instanceof Uint8Array) return Buffer.from(body);
+  return Buffer.from(String(body ?? ""));
+}
+
+function compressibleContentType(contentType = "") {
+  const normalized = String(contentType || "").toLowerCase();
+  return normalized.startsWith("text/")
+    || normalized.includes("javascript")
+    || normalized.includes("json")
+    || normalized.includes("xml")
+    || normalized.includes("svg");
+}
+
+function acceptedStaticEncoding(req) {
+  if (!staticCompressionEnabled) return null;
+  const value = String(req?.headers?.["accept-encoding"] || "");
+  if (/\bgzip\b/i.test(value)) return "gzip";
+  if (/\bbr\b/i.test(value)) return "br";
+  return null;
+}
+
+function compressedBodyForBuffer(buffer, encoding, cacheKey = null) {
+  if (!encoding || !buffer || buffer.length < staticCompressionMinBytes) return null;
+  const key = cacheKey && staticCompressionCacheMaxEntries > 0 ? `${encoding}:${cacheKey}` : null;
+  if (key) {
+    const cached = compressedStaticResponseCache.get(key);
+    if (cached) {
+      compressedStaticResponseCache.delete(key);
+      compressedStaticResponseCache.set(key, cached);
+      return cached;
+    }
+  }
+  const compressed = encoding === "br"
+    ? zlib.brotliCompressSync(buffer, {
+        params: {
+          [zlib.constants.BROTLI_PARAM_QUALITY]: 1,
+        },
+      })
+    : zlib.gzipSync(buffer, { level: 1 });
+  if (key) {
+    compressedStaticResponseCache.set(key, compressed);
+    while (compressedStaticResponseCache.size > staticCompressionCacheMaxEntries) {
+      const oldestKey = compressedStaticResponseCache.keys().next().value;
+      if (oldestKey === undefined) break;
+      compressedStaticResponseCache.delete(oldestKey);
+    }
+  }
+  return compressed;
+}
+
+function sendStaticBody(req, res, status, headers, body = "", cacheKey = null) {
+  const buffer = bodyBuffer(body);
+  const method = String(req?.method || "GET").toUpperCase();
+  const contentType = headers?.["Content-Type"] || headers?.["content-type"] || "";
+  const encoding = compressibleContentType(contentType) ? acceptedStaticEncoding(req) : null;
+  const compressed = encoding ? compressedBodyForBuffer(buffer, encoding, cacheKey) : null;
+  const payload = compressed || buffer;
+  const responseHeaders = compressed
+    ? appendVaryAcceptEncoding({ ...headers, "Content-Encoding": encoding, "Content-Length": payload.length })
+    : { ...headers, "Content-Length": payload.length };
+  res.writeHead(status, responseHeaders);
+  res.end(method === "HEAD" ? undefined : payload);
+}
+
+function staticFileCompressionCacheKey(filePath, requestUrl = null) {
+  try {
+    const stat = fs.statSync(filePath);
+    return [
+      "file",
+      assetPatchVersion,
+      path.relative(webviewDir, filePath),
+      Math.trunc(stat.mtimeMs),
+      stat.size,
+      requestUrl?.searchParams?.has("codexapp_patch") ? "patched-url" : "plain-url",
+    ].join(":");
+  } catch {
+    return null;
+  }
+}
+
+function sendStaticFile(req, res, filePath, headers, requestUrl = null) {
+  const contentType = headers?.["Content-Type"] || headers?.["content-type"] || "";
+  if (!compressibleContentType(contentType)) {
+    res.writeHead(200, headers);
+    fs.createReadStream(filePath).pipe(res);
+    return;
+  }
+  sendStaticBody(req, res, 200, headers, fs.readFileSync(filePath), staticFileCompressionCacheKey(filePath, requestUrl));
+}
+
 function safeJoin(root, requestPath) {
   const decoded = decodeURIComponent(requestPath.split("?")[0]);
   const normalized = path.normalize(decoded)
@@ -2911,11 +3172,13 @@ function appServerManagerHistoryPatchSource() {
     "function codexappStoreAfter(e,t){if(!Array.isArray(t)||t.length===0)return;let n=codexappHistoryCacheMax();e.after=codexappUniqueTurns([...codexappPlainTurns(t),...(e.after||[])]).slice(0,n)}",
     "function codexappWindowMeta(e,t){return{before:e.before?.length??0,after:e.after?.length??0,max:codexappHistoryWindowMax(),reason:t??null}}",
     "function codexappWithWindowMeta(e,t,n){let r=codexappWindowCache(e.id);return{...e,codexappWindow:codexappWindowMeta(r,n),turns:t}}",
-    "function codexappClampHydratedConversation(e,t){if(t==null||!Array.isArray(t.turns))return t;let n=t.turns,r=t.turnsPagination??null,i=codexappLargeCursorOffset(r?.olderCursor),a=codexappLargeCursorOffset(e?.turnsPagination?.olderCursor),o=i!=null||a!=null||codexappHasWindowCache(t.id);if(!o)return t;let s=codexappWindowCache(t.id),c=codexappHistoryWindowMax();if(n.length<=c)return{...t,codexappWindow:codexappWindowMeta(s,`within-window`)};let l=Array.isArray(e?.turns)?e.turns:[],u=n.some(e=>e?.status===`inProgress`),d=a!=null&&i!=null&&i<a&&n.length>l.length&&codexappLastTurnId(l)===codexappLastTurnId(n)&&!u,f,p,m;return d?(f=n.slice(0,c),p=n.slice(c),codexappStoreAfter(s,p),m=`older-window`):(p=n.slice(0,n.length-c),f=n.slice(-c),codexappStoreBefore(s,p),m=`newer-window`),{...t,turns:f,turnsPagination:r?{...r,oldestLoadedTurnId:codexappFirstTurnId(f)??r.oldestLoadedTurnId,isLoadingOlder:!1}:r,codexappWindow:codexappWindowMeta(s,m)}}",
+    "function codexappIsEmptyGhostTurn(e){return e?.status===`inProgress`&&e?.turnId==null&&e?.id==null&&(!Array.isArray(e?.items)||e.items.length===0)}",
+    "function codexappDropEmptyGhostTurns(e){if(!Array.isArray(e)||e.length<2)return e;let t=-1;for(let n=e.length-1;n>=0;n--){let r=e[n];if(!codexappIsEmptyGhostTurn(r)&&(r?.status!==`inProgress`||Array.isArray(r?.items)&&r.items.length>0)){t=n;break}}if(t<0)return e;let n=e.filter((e,n)=>!(n<t&&codexappIsEmptyGhostTurn(e)));return n.length===e.length?e:n}",
+    "function codexappClampHydratedConversation(e,t){if(t==null||!Array.isArray(t.turns))return t;let n=codexappDropEmptyGhostTurns(t.turns);t=n===t.turns?t:{...t,turns:n};let r=t.turns,i=t.turnsPagination??null,a=codexappLargeCursorOffset(i?.olderCursor),o=codexappLargeCursorOffset(e?.turnsPagination?.olderCursor),s=a!=null||o!=null||codexappHasWindowCache(t.id);if(!s)return t;let c=codexappWindowCache(t.id),l=codexappHistoryWindowMax();if(r.length<=l)return{...t,codexappWindow:codexappWindowMeta(c,`within-window`)};let u=Array.isArray(e?.turns)?e.turns:[],d=r.some(e=>e?.status===`inProgress`),f=o!=null&&a!=null&&a<o&&r.length>u.length&&codexappLastTurnId(u)===codexappLastTurnId(r)&&!d,p,m,h;return f?(p=r.slice(0,l),m=r.slice(l),codexappStoreAfter(c,m),h=`older-window`):(m=r.slice(0,r.length-l),p=r.slice(-l),codexappStoreBefore(c,m),h=`newer-window`),{...t,turns:p,turnsPagination:i?{...i,oldestLoadedTurnId:codexappFirstTurnId(p)??i.oldestLoadedTurnId,isLoadingOlder:!1}:i,codexappWindow:codexappWindowMeta(c,h)}}",
     "function codexappShiftHistoryWindow(e,t,n){let r=e?.getConversation?.(t);if(r==null||!Array.isArray(r.turns))return!1;let i=codexappWindowCache(t),a=codexappHistoryWindowMax(),o=Math.max(1,Math.ceil(a/2)),s=n===`newer`?i.after.splice(0,o):i.before.splice(Math.max(0,i.before.length-o));if(s.length===0)return!1;e.updateConversationState(t,e=>{let r=Array.isArray(e.turns)?e.turns:[],c=n===`newer`?codexappMergeWindowTurns(r,s):codexappMergeWindowTurns(s,r);if(c.length>a)if(n===`newer`){codexappStoreBefore(i,c.slice(0,c.length-a));c=c.slice(-a)}else{codexappStoreAfter(i,c.slice(a));c=c.slice(0,a)}e.turns=c,e.turnsPagination={...(e.turnsPagination??{}),oldestLoadedTurnId:codexappFirstTurnId(c)??e.turnsPagination?.oldestLoadedTurnId,isLoadingOlder:!1},e.codexappWindow=codexappWindowMeta(i,`shift-`+n)});return!0}",
     "function codexappPreferPagination(e,t){if(e==null)return t??null;if(t==null)return e;let n=codexappLargeCursorOffset(e.olderCursor),r=codexappLargeCursorOffset(t.olderCursor),i=e.hasLoadedOldest===!0&&t.hasLoadedOldest!==!0,a=n!=null&&(r==null||n<r);return i||a?{...e,isLoadingOlder:!1}:t}",
-    "function codexappMergeHydratedConversation(e,t){if(e==null||t==null||!Array.isArray(e.turns)||!Array.isArray(t.turns))return codexappClampHydratedConversation(e,t);let n=e.turnsPagination??null,r=t.turnsPagination??null;if(codexappLargeCursorOffset(n?.olderCursor)==null&&codexappLargeCursorOffset(r?.olderCursor)==null&&!codexappHasWindowCache(t.id))return t;let i=codexappPreferPagination(n,r),a=i===n,o=e.turns.length>t.turns.length;if(!a&&!o)return codexappClampHydratedConversation(e,t);let s=new Map,c=[],l=t.turns.filter(e=>e?.turnId==null),u=0;for(let e of t.turns)e?.turnId!=null&&s.set(e.turnId,e);for(let t of e.turns)if(t?.turnId!=null){let e=s.get(t.turnId);e?(c.push(e),s.delete(t.turnId)):c.push(t)}else c.push(u<l.length?l[u++]:t);for(let e of t.turns)e?.turnId!=null&&s.has(e.turnId)&&(c.push(e),s.delete(e.turnId));for(;u<l.length;)c.push(l[u++]);return codexappClampHydratedConversation(e,{...t,turns:c,turnsPagination:i})}",
-    "function codexappRegisterHistoryManager(e){let t=globalThis.__codexappHistoryManagers??new Set;globalThis.__codexappHistoryManagers=t,t.add(e);let n=r=>{for(let e of Array.from(t))if(e?.conversations?.get(r)!=null)return e;return e};globalThis.__codexappLoadOlderThreadHistory=async r=>{let e=n(r);return e?ip(e,r):null},globalThis.__codexappShiftThreadHistoryWindow=(r,i)=>{let e=n(r);return e?codexappShiftHistoryWindow(e,r,i):!1},globalThis.__codexappGetThreadHistoryWindow=r=>{let e=codexappWindowCache(r);return codexappWindowMeta(e,`inspect`)},globalThis.__codexappGetThreadHistoryPagination=r=>n(r)?.conversations?.get(r)?.turnsPagination??null}",
+    "function codexappMergeHydratedConversation(e,t){if(e==null||t==null||!Array.isArray(e.turns)||!Array.isArray(t.turns))return codexappClampHydratedConversation(e,t);let n=e.turnsPagination??null,r=t.turnsPagination??null;if(codexappLargeCursorOffset(n?.olderCursor)==null&&codexappLargeCursorOffset(r?.olderCursor)==null&&!codexappHasWindowCache(t.id))return codexappClampHydratedConversation(e,t);let i=codexappPreferPagination(n,r),a=i===n,o=e.turns.length>t.turns.length;if(!a&&!o)return codexappClampHydratedConversation(e,t);let s=new Map,c=[],l=t.turns.filter(e=>codexappTurnKey(e)==null),u=0;for(let e of t.turns){let t=codexappTurnKey(e);t!=null&&s.set(t,e)}for(let t of e.turns){let e=codexappTurnKey(t);if(e!=null){let n=s.get(e);n?(c.push(n),s.delete(e)):c.push(t)}else c.push(u<l.length?l[u++]:t)}for(let e of t.turns){let t=codexappTurnKey(e);t!=null&&s.has(t)&&(c.push(e),s.delete(t))}for(;u<l.length;)c.push(l[u++]);return codexappClampHydratedConversation(e,{...t,turns:c,turnsPagination:i})}",
+    "function codexappRegisterHistoryManager(e){let t=globalThis.__codexappHistoryManagers??new Set;globalThis.__codexappHistoryManagers=t,t.add(e);let n=r=>{for(let e of Array.from(t))if(e?.conversations?.get(r)!=null)return e;return e},r=()=>{for(let e of Array.from(t)){let t=e?.currentConversationId??e?.activeConversationId??e?.conversationId??null;if(typeof t==`string`&&e?.conversations?.get(t)!=null)return t;let n=Array.from(e?.conversations?.keys?.()??[]).at(-1);if(typeof n==`string`)return n}return null};globalThis.__codexappResolveActiveThreadId=()=>r(),globalThis.__codexappLoadOlderThreadHistory=async r=>{let e=n(r);return e?ip(e,r):null},globalThis.__codexappShiftThreadHistoryWindow=(r,i)=>{let e=n(r);return e?codexappShiftHistoryWindow(e,r,i):!1},globalThis.__codexappGetThreadHistoryWindow=r=>{let e=codexappWindowCache(r);return codexappWindowMeta(e,`inspect`)},globalThis.__codexappGetThreadHistoryPagination=r=>n(r)?.conversations?.get(r)?.turnsPagination??null}",
     "function ap(){",
   ].join("");
 }
@@ -3123,6 +3386,36 @@ function patchJavaScript(filePath, source) {
   return cacheBustOnly();
 }
 
+const patchedJavaScriptCache = new Map();
+
+function cachedPatchedJavaScript(filePath) {
+  if (patchedJavaScriptCacheMaxEntries <= 0) {
+    return patchJavaScript(filePath, fs.readFileSync(filePath, "utf8"));
+  }
+  const stat = fs.statSync(filePath);
+  const key = filePath;
+  const cached = patchedJavaScriptCache.get(key);
+  if (cached
+    && cached.mtimeMs === stat.mtimeMs
+    && cached.size === stat.size
+    && cached.patchVersion === assetPatchVersion) {
+    return cached.body;
+  }
+  const body = patchJavaScript(filePath, fs.readFileSync(filePath, "utf8"));
+  patchedJavaScriptCache.set(key, {
+    body,
+    mtimeMs: stat.mtimeMs,
+    patchVersion: assetPatchVersion,
+    size: stat.size,
+  });
+  while (patchedJavaScriptCache.size > patchedJavaScriptCacheMaxEntries) {
+    const oldestKey = patchedJavaScriptCache.keys().next().value;
+    if (oldestKey === undefined) break;
+    patchedJavaScriptCache.delete(oldestKey);
+  }
+  return body;
+}
+
 function shouldPatchJavaScript(filePath) {
   if (path.extname(filePath).toLowerCase() === ".js") return true;
   const base = path.basename(filePath);
@@ -3136,6 +3429,62 @@ function shouldPatchJavaScript(filePath) {
     || base.startsWith("remote-connections-settings-")
     || base.startsWith("remote-connection-visibility-")
     || base.startsWith("zh-CN-");
+}
+
+function patchPrewarmPriority(filePath) {
+  const base = path.basename(filePath);
+  if (/^(index-|app-main-|app-shell-|app-server-manager-signals-|local-conversation-thread-)/.test(base)) return 0;
+  if (/^(sidebar-|thread-|local-|app-)/.test(base)) return 1;
+  return 2;
+}
+
+function patchableJavaScriptFilesForPrewarm() {
+  const files = [];
+  const roots = [
+    webviewDir,
+    path.join(webviewDir, "assets"),
+  ];
+  for (const root of roots) {
+    let entries = [];
+    try {
+      entries = fs.readdirSync(root, { withFileTypes: true });
+    } catch {
+      continue;
+    }
+    for (const entry of entries) {
+      if (!entry.isFile() || !entry.name.endsWith(".js")) continue;
+      const filePath = path.join(root, entry.name);
+      if (shouldPatchJavaScript(filePath)) files.push(filePath);
+    }
+  }
+  return files.sort((a, b) => patchPrewarmPriority(a) - patchPrewarmPriority(b) || a.localeCompare(b));
+}
+
+function prewarmPatchedJavaScriptCache() {
+  if (!patchedJavaScriptPrewarmEnabled || patchedJavaScriptCacheMaxEntries <= 0) return;
+  const files = patchableJavaScriptFilesForPrewarm().slice(0, patchedJavaScriptCacheMaxEntries);
+  if (files.length === 0) return;
+  const startedAt = Date.now();
+  let index = 0;
+  const step = () => {
+    const end = Math.min(files.length, index + patchedJavaScriptPrewarmBatchSize);
+    for (; index < end; index += 1) {
+      try {
+        cachedPatchedJavaScript(files[index]);
+      } catch (error) {
+        if (index < 5) log("patched javascript prewarm failed", path.basename(files[index]), error.message || String(error));
+      }
+    }
+    if (index < files.length) {
+      setImmediate(step);
+      return;
+    }
+    log("patched javascript cache prewarmed", {
+      files: files.length,
+      durationMs: Date.now() - startedAt,
+    });
+  };
+  setImmediate(step);
 }
 
 function assetCacheControl(filePath, ext, requestUrl = null) {
@@ -3165,12 +3514,49 @@ function shouldServeSpaFallback(req, urlPath) {
   return accept === "" || accept.includes("text/html") || accept.includes("*/*");
 }
 
-function sendIndexHtml(res, initialRoute = null) {
+function localThreadIdFromRoute(routePath = "") {
+  const parts = String(routePath || "").split("/").filter(Boolean);
+  const index = parts.indexOf("local");
+  return index >= 0 ? parts[index + 1] || null : null;
+}
+
+function longThreadRescueHtml(threadId) {
+  return `<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Codex</title>
+  <style>
+    html, body, #root { height: 100%; margin: 0; }
+    body { background: #fff; color: #171717; font-family: system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; }
+    .startup-loader { min-height: 100%; display: grid; place-items: center; color: #777; font-size: 14px; }
+  </style>
+</head>
+<body>
+  <div id="root"><div class="startup-loader">正在打开长线程窗口...</div></div>
+  <script>window.__codexappLongThreadRescue = ${JSON.stringify({ threadId })};</script>
+  <script src="${bridgeScriptPath}"></script>
+</body>
+</html>`;
+}
+
+function sendIndexHtml(req, res, initialRoute = null) {
+  const requestUrl = new URL(req.url || "/", `http://${req.headers.host || "localhost"}`);
+  const routePath = typeof initialRoute === "string" ? initialRoute : requestUrl.pathname;
+  const threadId = localThreadIdFromRoute(routePath);
+  if (threadId && largeThreadFastPathInfo(threadId) && requestUrl.searchParams.get("codexapp_official") !== "1") {
+    sendStaticBody(req, res, 200, {
+      "Content-Type": MIME_TYPES.get(".html"),
+      "Cache-Control": "no-store",
+    }, longThreadRescueHtml(threadId), `long-thread-rescue:${bridgeScriptVersion}:${assetPatchVersion}:${threadId}`);
+    return;
+  }
   const indexPath = path.join(webviewDir, "index.html");
-  send(res, 200, {
+  sendStaticBody(req, res, 200, {
     "Content-Type": MIME_TYPES.get(".html"),
     "Cache-Control": assetCacheControl(indexPath, ".html"),
-  }, injectBridge(fs.readFileSync(indexPath, "utf8"), initialRoute));
+  }, injectBridge(fs.readFileSync(indexPath, "utf8"), routePath), `index:${assetPatchVersion}:${routePath || ""}`);
 }
 
 function delay(ms) {
@@ -3478,6 +3864,133 @@ function initialSharedObjectSnapshot() {
   };
 }
 
+let deviceAuthSession = null;
+
+function stripAnsi(value) {
+  return String(value || "").replace(/\u001b\[[0-9;]*m/g, "");
+}
+
+function parseDeviceAuthOutput(output) {
+  const text = stripAnsi(output);
+  const verificationUrl = text.match(/https:\/\/auth\.openai\.com\/codex\/device[^\s]*/)?.[0] || null;
+  const userCode = text.match(/\b[A-Z0-9]{4,6}-[A-Z0-9]{4,8}\b/)?.[0] || null;
+  return { verificationUrl, userCode };
+}
+
+function codexLoginStatus() {
+  const result = spawnSync("codex", ["login", "status"], {
+    encoding: "utf8",
+    timeout: 5000,
+    maxBuffer: 1024 * 1024,
+  });
+  const text = stripAnsi(`${result.stdout || ""}${result.stderr || ""}`).trim();
+  if (result.error) {
+    return {
+      loggedIn: false,
+      text: text || result.error.message || "login status unavailable",
+    };
+  }
+  return {
+    loggedIn: result.status === 0 && text.length > 0 && !/not logged in/i.test(text),
+    text: text || "login status unavailable",
+  };
+}
+
+function publicDeviceAuthSession() {
+  const status = codexLoginStatus();
+  if (!deviceAuthSession) {
+    return { state: status.loggedIn ? "complete" : "idle", loginStatus: status };
+  }
+  const expired = Date.now() - deviceAuthSession.startedAt > deviceAuthSessionTtlMs;
+  if (expired && deviceAuthSession.state === "pending") {
+    try { deviceAuthSession.process?.kill("SIGTERM"); } catch {}
+    deviceAuthSession.state = "expired";
+    deviceAuthSession.exitedAt = Date.now();
+  }
+  return {
+    state: status.loggedIn ? "complete" : deviceAuthSession.state,
+    verificationUrl: deviceAuthSession.verificationUrl || null,
+    userCode: deviceAuthSession.userCode || null,
+    startedAt: deviceAuthSession.startedAt,
+    expiresAt: deviceAuthSession.startedAt + deviceAuthSessionTtlMs,
+    exitCode: deviceAuthSession.exitCode ?? null,
+    error: deviceAuthSession.error || null,
+    loginStatus: status,
+  };
+}
+
+function startDeviceAuthSession() {
+  const current = publicDeviceAuthSession();
+  if (current.state === "pending" && current.verificationUrl && current.userCode) return Promise.resolve(current);
+  if (current.loginStatus?.loggedIn) return Promise.resolve(current);
+
+  if (deviceAuthSession?.process && deviceAuthSession.state === "pending") {
+    try { deviceAuthSession.process.kill("SIGTERM"); } catch {}
+  }
+
+  const child = spawn("codex", ["login", "--device-auth"], {
+    env: process.env,
+    stdio: ["ignore", "pipe", "pipe"],
+  });
+  deviceAuthSession = {
+    process: child,
+    state: "starting",
+    startedAt: Date.now(),
+    output: "",
+    verificationUrl: null,
+    userCode: null,
+    exitCode: null,
+    error: null,
+  };
+
+  const updateFromOutput = () => {
+    const parsed = parseDeviceAuthOutput(deviceAuthSession.output);
+    if (parsed.verificationUrl) deviceAuthSession.verificationUrl = parsed.verificationUrl;
+    if (parsed.userCode) deviceAuthSession.userCode = parsed.userCode;
+    if (deviceAuthSession.verificationUrl && deviceAuthSession.userCode && deviceAuthSession.state === "starting") {
+      deviceAuthSession.state = "pending";
+    }
+  };
+
+  child.stdout.on("data", (chunk) => {
+    deviceAuthSession.output += chunk.toString("utf8");
+    updateFromOutput();
+  });
+  child.stderr.on("data", (chunk) => {
+    deviceAuthSession.output += chunk.toString("utf8");
+    updateFromOutput();
+  });
+  child.on("error", (error) => {
+    deviceAuthSession.state = "failed";
+    deviceAuthSession.error = error.message || String(error);
+  });
+  child.on("exit", (code, signal) => {
+    deviceAuthSession.exitCode = code;
+    deviceAuthSession.exitedAt = Date.now();
+    if (codexLoginStatus().loggedIn) {
+      deviceAuthSession.state = "complete";
+    } else if (deviceAuthSession.state !== "expired") {
+      deviceAuthSession.state = code === 0 ? "complete" : "failed";
+      if (signal) deviceAuthSession.error = `device auth exited with ${signal}`;
+    }
+  });
+
+  return new Promise((resolve) => {
+    const deadline = Date.now() + deviceAuthStartTimeoutMs;
+    const timer = setInterval(() => {
+      const snapshot = publicDeviceAuthSession();
+      if (snapshot.verificationUrl && snapshot.userCode) {
+        clearInterval(timer);
+        resolve(snapshot);
+      } else if (snapshot.state === "failed" || Date.now() >= deadline) {
+        clearInterval(timer);
+        resolve(snapshot);
+      }
+    }, 100);
+    timer.unref?.();
+  });
+}
+
 function browserBridgeScript() {
   return `(() => {
   const clientIdKey = "codexapp.bridge.clientId.v1";
@@ -3529,6 +4042,48 @@ function browserBridgeScript() {
     if (matchesNoise([event.message, event.error], statsigNoisePatterns)) event.preventDefault();
   });
 
+  const codexappLoadMarks = {
+    startedAt: performance.now(),
+    firstBodyTextAt: null,
+    firstThreadScrollerAt: null,
+    firstHistoryManagerAt: null,
+    firstThreadTurnsAt: null,
+    lastSampleAt: null,
+  };
+  window.__codexappLoadMarks = codexappLoadMarks;
+  function markCodexappLoadProgress() {
+    const now = performance.now();
+    codexappLoadMarks.lastSampleAt = now;
+    if (codexappLoadMarks.firstBodyTextAt == null && (document.body?.innerText || "").trim().length > 0) {
+      codexappLoadMarks.firstBodyTextAt = now;
+    }
+    if (codexappLoadMarks.firstThreadScrollerAt == null && document.querySelector(".thread-scroll-container")) {
+      codexappLoadMarks.firstThreadScrollerAt = now;
+    }
+    const managers = window.__codexappHistoryManagers instanceof Set
+      ? Array.from(window.__codexappHistoryManagers)
+      : [];
+    if (codexappLoadMarks.firstHistoryManagerAt == null && managers.length > 0) {
+      codexappLoadMarks.firstHistoryManagerAt = now;
+    }
+    if (codexappLoadMarks.firstThreadTurnsAt == null && managers.some((manager) => {
+      try {
+        return Array.from(manager?.conversations?.values?.() || []).some((conversation) => Array.isArray(conversation?.turns) && conversation.turns.length > 0);
+      } catch {
+        return false;
+      }
+    })) {
+      codexappLoadMarks.firstThreadTurnsAt = now;
+    }
+  }
+  const codexappLoadMarksTimer = setInterval(() => {
+    markCodexappLoadProgress();
+    if (codexappLoadMarks.firstThreadTurnsAt != null || performance.now() - codexappLoadMarks.startedAt > 30000) {
+      clearInterval(codexappLoadMarksTimer);
+    }
+  }, 50);
+  setTimeout(markCodexappLoadProgress, 0);
+
   function isStatsigEventUrl(input) {
     const url = typeof input === "string" ? input : input?.url;
     return typeof url === "string" && (url.includes("chatgpt.com/ces/v1/rgstr") || url.includes("/ces/v1/rgstr"));
@@ -3546,6 +4101,398 @@ function browserBridgeScript() {
       return rawFetch(input, init);
     };
   }
+
+  function codexappThreadIdFromPath() {
+    const parts = String(location.pathname || "").split("/").filter(Boolean);
+    const index = parts.indexOf("local");
+    return index >= 0 ? parts[index + 1] || null : null;
+  }
+
+  function codexappFastShellText(value) {
+    if (value == null) return "";
+    if (typeof value === "string") return value;
+    if (Array.isArray(value)) return value.map(codexappFastShellText).filter(Boolean).join("\\n");
+    if (typeof value !== "object") return "";
+    if (typeof value.text === "string") return value.text;
+    if (typeof value.message === "string") return value.message;
+    if (typeof value.content === "string") return value.content;
+    if (Array.isArray(value.content)) return codexappFastShellText(value.content);
+    return "";
+  }
+
+  function codexappFastShellTurnText(turn) {
+    const items = Array.isArray(turn?.items) ? turn.items : [];
+    return items.map((item) => codexappFastShellText(item?.content ?? item?.text ?? item?.message ?? item))
+      .map((text) => text.trim())
+      .filter(Boolean)
+      .join("\\n\\n");
+  }
+
+  function codexappFastShellMcpRequest(method, params = {}, timeoutMs = 120000) {
+    const id = "fast-shell-" + randomBridgeId();
+    return new Promise((resolve, reject) => {
+      const bridge = window.electronBridge;
+      if (!bridge || typeof bridge.sendMessageFromView !== "function") {
+        reject(new Error("bridge is not ready"));
+        return;
+      }
+      let settled = false;
+      const cleanup = () => {
+        window.removeEventListener("message", onMessage);
+        clearTimeout(timeout);
+      };
+      const finish = (fn, value) => {
+        if (settled) return;
+        settled = true;
+        cleanup();
+        fn(value);
+      };
+      const onMessage = (event) => {
+        const data = event.data;
+        if (!data || data.type !== "mcp-response" || data.message?.id !== id) return;
+        if (data.message.error) {
+          finish(reject, new Error(data.message.error.message || "request failed"));
+          return;
+        }
+        finish(resolve, data.message.result ?? {});
+      };
+      const timeout = setTimeout(() => finish(reject, new Error(method + " timed out")), timeoutMs);
+      window.addEventListener("message", onMessage);
+      try {
+        bridge.sendMessageFromView({
+          type: "mcp-request",
+          hostId: "local",
+          request: { id, method, params }
+        });
+      } catch (error) {
+        finish(reject, error);
+      }
+    });
+  }
+
+  function codexappFastShellChronologicalFromResult(result) {
+    return Array.isArray(result?.data) ? result.data.slice().reverse() : [];
+  }
+
+  async function codexappFastShellFetchTurns(threadId, cursor, limit = 8) {
+    if (!rawFetch) throw new Error("fetch is not ready");
+    const url = "/codexapp-thread-turns?threadId=" + encodeURIComponent(threadId)
+      + (cursor ? "&cursor=" + encodeURIComponent(cursor) : "")
+      + "&limit=" + encodeURIComponent(String(limit));
+    const response = await rawFetch(url, { headers: { "accept": "application/json" }, cache: "no-store" });
+    if (!response.ok) throw new Error("history request failed with " + response.status);
+    return await response.json();
+  }
+
+  function codexappFastShellTurnKey(turn, index = 0) {
+    return String(turn?.turnId || turn?.id || turn?.codexappFastLocalId || index);
+  }
+
+  function codexappBuildFastShellTurnBlock(turn, index = 0) {
+    const block = document.createElement("section");
+    block.dataset.codexappTurnKey = codexappFastShellTurnKey(turn, index);
+    block.style.cssText = "margin:14px 0;padding:14px 16px;border-radius:8px;background:" + (turn?.status === "inProgress" ? "#fff8ef" : "#f6f6f6") + ";white-space:pre-wrap;overflow-wrap:anywhere;";
+    const text = codexappFastShellTurnText(turn);
+    block.textContent = text || (turn?.status === "inProgress" ? "正在运行..." : "");
+    return block;
+  }
+
+  function codexappFastShellSetStatus(shell, text) {
+    const status = shell?.querySelector?.("[data-codexapp-fast-status]");
+    if (status) status.textContent = text || "";
+  }
+
+  function codexappFastShellTrim(shell, direction = "older") {
+    const list = shell?.querySelector?.("[data-codexapp-fast-turns]");
+    if (!list) return;
+    while (list.children.length > 24) {
+      if (direction === "older") list.lastElementChild?.remove();
+      else list.firstElementChild?.remove();
+    }
+  }
+
+  function codexappFastShellPrependTurns(shell, turns) {
+    const list = shell?.querySelector?.("[data-codexapp-fast-turns]");
+    if (!list || !Array.isArray(turns) || turns.length === 0) return 0;
+    const beforeHeight = shell.scrollHeight;
+    const seen = new Set(Array.from(list.children).map((node) => node.dataset.codexappTurnKey));
+    const anchor = list.firstChild;
+    let inserted = 0;
+    turns.forEach((turn, index) => {
+      const key = codexappFastShellTurnKey(turn, index);
+      if (seen.has(key)) return;
+      list.insertBefore(codexappBuildFastShellTurnBlock(turn, index), anchor);
+      seen.add(key);
+      inserted += 1;
+    });
+    codexappFastShellTrim(shell, "older");
+    shell.scrollTop += Math.max(0, shell.scrollHeight - beforeHeight);
+    return inserted;
+  }
+
+  function codexappFastShellAppendTurn(shell, turn) {
+    const list = shell?.querySelector?.("[data-codexapp-fast-turns]");
+    if (!list || !turn) return;
+    list.appendChild(codexappBuildFastShellTurnBlock(turn, list.children.length));
+    codexappFastShellTrim(shell, "newer");
+    shell.scrollTop = shell.scrollHeight;
+  }
+
+  async function codexappFastShellLoadOlder(shell, state) {
+    if (!shell || !state || state.loadingOlder || !state.olderCursor) return;
+    state.loadingOlder = true;
+    const button = shell.querySelector("[data-codexapp-fast-load-older]");
+    if (button) button.disabled = true;
+    codexappFastShellSetStatus(shell, "正在加载更早历史...");
+    try {
+      let inserted = 0;
+      let pages = 0;
+      while (state.olderCursor && inserted === 0 && pages < 4) {
+        pages += 1;
+        const result = await codexappFastShellFetchTurns(state.threadId, state.olderCursor, 8);
+        const turns = codexappFastShellChronologicalFromResult(result);
+        state.olderCursor = result?.nextCursor ?? result?.backwardsCursor ?? null;
+        inserted += codexappFastShellPrependTurns(shell, turns);
+      }
+      if (inserted > 0) codexappFastShellSetStatus(shell, state.olderCursor ? "已加载更早历史，继续上滚可再加载。" : "已经到达最早历史。");
+      else codexappFastShellSetStatus(shell, state.olderCursor ? "这一段全是重叠内容，继续上滚会再补页。" : "已经到达最早历史。");
+      if (!state.olderCursor && button) button.textContent = "没有更早历史";
+    } catch (error) {
+      codexappFastShellSetStatus(shell, "加载历史失败：" + (error.message || String(error)));
+    } finally {
+      state.loadingOlder = false;
+      if (button) button.disabled = !state.olderCursor;
+    }
+  }
+
+  async function codexappFastShellSubmit(shell, state) {
+    const input = shell?.querySelector?.("[data-codexapp-fast-input]");
+    const button = shell?.querySelector?.("[data-codexapp-fast-send]");
+    const text = (input?.value || "").trim();
+    if (!text || state?.sending) return;
+    state.sending = true;
+    if (button) button.disabled = true;
+    if (input) input.value = "";
+    codexappFastShellAppendTurn(shell, {
+      codexappFastLocalId: "local-" + randomBridgeId(),
+      status: "inProgress",
+      items: [{ content: { text } }]
+    });
+    codexappFastShellSetStatus(shell, "已发送，正在接入长线程...");
+    try {
+      const method = state.hasActiveTurn ? "turn/steer" : "turn/start";
+      await codexappFastShellMcpRequest(method, {
+        threadId: state.threadId,
+        input: [{ type: "text", text, text_elements: [] }],
+        clientRequestId: "fast-shell-" + randomBridgeId()
+      }, 20000);
+      state.hasActiveTurn = true;
+      codexappFastShellSetStatus(shell, "已提交；后台继续执行，窗口会持续可查。");
+    } catch (error) {
+      codexappFastShellSetStatus(shell, "发送失败：" + (error.message || String(error)));
+    } finally {
+      state.sending = false;
+      if (button) button.disabled = false;
+    }
+  }
+
+  function codexappRootHasOfficialThread(root, threadId = null) {
+    if (!root) return false;
+    const activeThreadId = typeof threadId === "string" && threadId.length > 0 ? threadId : codexappThreadIdFromPath();
+    const managers = window.__codexappHistoryManagers instanceof Set
+      ? Array.from(window.__codexappHistoryManagers)
+      : [];
+    if (activeThreadId && managers.some((manager) => {
+      try {
+        const conversation = manager?.conversations?.get?.(activeThreadId);
+        return Array.isArray(conversation?.turns) && conversation.turns.length > 0;
+      } catch {
+        return false;
+      }
+    })) {
+      return true;
+    }
+    const marked = root.querySelector("[data-codexapp-conversation-id]");
+    if (activeThreadId && marked?.getAttribute?.("data-codexapp-conversation-id") === activeThreadId) {
+      return !!root.querySelector(".thread-scroll-container [data-testid^='conversation-turn'], .thread-scroll-container [data-message-author-role]");
+    }
+    return false;
+  }
+
+  function codexappDismissFastThreadShellIfReady() {
+    const root = document.getElementById("root");
+    const shell = document.getElementById("codexapp-fast-thread-shell");
+    const threadId = shell?.__codexappFastShellState?.threadId || codexappThreadIdFromPath();
+    if (!shell || !codexappRootHasOfficialThread(root, threadId)) return false;
+    shell.remove();
+    codexappLoadMarks.fastShellDismissedAt ??= performance.now();
+    return true;
+  }
+
+  function codexappWatchFastThreadShellDismissal() {
+    if (window.__codexappFastThreadShellDismissWatcher) return;
+    window.__codexappFastThreadShellDismissWatcher = setInterval(() => {
+      if (codexappDismissFastThreadShellIfReady()) {
+        clearInterval(window.__codexappFastThreadShellDismissWatcher);
+        window.__codexappFastThreadShellDismissWatcher = null;
+      }
+    }, 100);
+    setTimeout(() => {
+      if (window.__codexappFastThreadShellDismissWatcher) {
+        clearInterval(window.__codexappFastThreadShellDismissWatcher);
+        window.__codexappFastThreadShellDismissWatcher = null;
+      }
+    }, 45000);
+  }
+
+  function codexappRenderFastThreadShell(payload) {
+    const root = document.getElementById("root");
+    codexappLoadMarks.fastShellRenderAttemptAt = performance.now();
+    if (root && codexappRootHasOfficialThread(root, payload?.thread?.id || codexappThreadIdFromPath())) return false;
+    const thread = payload?.thread;
+    const turns = Array.isArray(thread?.turns) ? thread.turns : [];
+    if (!thread || turns.length === 0) return false;
+    const mount = document.body || document.documentElement;
+    if (!mount) return false;
+    document.getElementById("codexapp-fast-thread-shell")?.remove();
+    if (window.__codexappLongThreadRescue && root) {
+      root.style.display = "none";
+      root.setAttribute("aria-hidden", "true");
+    }
+    const shell = document.createElement("div");
+    shell.id = "codexapp-fast-thread-shell";
+    shell.style.cssText = "position:fixed;inset:0;z-index:2147483000;overflow:auto;background:#fff;color:#171717;font:14px/1.55 system-ui,-apple-system,BlinkMacSystemFont,Segoe UI,sans-serif;";
+    shell.setAttribute("role", "status");
+    shell.setAttribute("aria-live", "polite");
+    const inner = document.createElement("div");
+    inner.style.cssText = "max-width:860px;margin:0 auto;padding:28px 24px 128px;";
+    const title = document.createElement("div");
+    title.style.cssText = "position:sticky;top:0;background:#fff;padding:8px 0 16px;margin-bottom:8px;border-bottom:1px solid #eee;color:#555;font-size:13px;";
+    title.textContent = (thread.title || thread.name || "Codex thread") + " · 快速长线程窗口";
+    inner.appendChild(title);
+    const state = {
+      threadId: thread.id || thread.sessionId || codexappThreadIdFromPath(),
+      olderCursor: thread.turnsPagination?.olderCursor ?? payload?.initialTurnsPage?.nextCursor ?? null,
+      hasActiveTurn: turns.some((turn) => turn?.status === "inProgress"),
+      loadingOlder: false,
+      sending: false
+    };
+    shell.__codexappFastShellState = state;
+    const loadOlder = document.createElement("button");
+    loadOlder.type = "button";
+    loadOlder.dataset.codexappFastLoadOlder = "1";
+    loadOlder.style.cssText = "display:block;width:100%;margin:12px 0 16px;padding:10px 12px;border:1px solid #ddd;border-radius:8px;background:#fff;color:#555;font:13px system-ui;cursor:pointer;";
+    loadOlder.textContent = state.olderCursor ? "加载更早历史" : "没有更早历史";
+    loadOlder.disabled = !state.olderCursor;
+    loadOlder.addEventListener("click", () => { void codexappFastShellLoadOlder(shell, state); });
+    inner.appendChild(loadOlder);
+    const list = document.createElement("div");
+    list.dataset.codexappFastTurns = "1";
+    turns.forEach((turn, index) => list.appendChild(codexappBuildFastShellTurnBlock(turn, index)));
+    inner.appendChild(list);
+    const footer = document.createElement("div");
+    footer.dataset.codexappFastStatus = "1";
+    footer.style.cssText = "color:#777;font-size:13px;margin:20px 0;";
+    footer.textContent = "完整界面正在接管；此窗口可先查历史和提交消息。";
+    inner.appendChild(footer);
+    const composer = document.createElement("form");
+    composer.style.cssText = "position:sticky;bottom:0;margin:18px 0 0;padding:12px;background:#fff;border:1px solid #ddd;border-radius:10px;box-shadow:0 8px 24px rgba(0,0,0,.08);";
+    const textarea = document.createElement("textarea");
+    textarea.dataset.codexappFastInput = "1";
+    textarea.rows = 3;
+    textarea.placeholder = "输入消息";
+    textarea.style.cssText = "box-sizing:border-box;width:100%;resize:vertical;border:0;outline:0;font:14px/1.45 system-ui;background:#fff;color:#171717;";
+    const actions = document.createElement("div");
+    actions.style.cssText = "display:flex;align-items:center;justify-content:space-between;gap:12px;margin-top:8px;color:#777;font-size:12px;";
+    const hint = document.createElement("span");
+    hint.textContent = "Enter 发送，Shift+Enter 换行";
+    const sendButton = document.createElement("button");
+    sendButton.type = "submit";
+    sendButton.dataset.codexappFastSend = "1";
+    sendButton.textContent = "发送";
+    sendButton.style.cssText = "border:0;border-radius:999px;background:#171717;color:#fff;padding:8px 16px;font:13px system-ui;cursor:pointer;";
+    actions.appendChild(hint);
+    actions.appendChild(sendButton);
+    composer.appendChild(textarea);
+    composer.appendChild(actions);
+    composer.addEventListener("submit", (event) => {
+      event.preventDefault();
+      void codexappFastShellSubmit(shell, state);
+    });
+    textarea.addEventListener("keydown", (event) => {
+      if (event.key === "Enter" && !event.shiftKey && !event.altKey && !event.ctrlKey && !event.metaKey && !event.isComposing) {
+        event.preventDefault();
+        void codexappFastShellSubmit(shell, state);
+      }
+    });
+    inner.appendChild(composer);
+    shell.appendChild(inner);
+    shell.addEventListener("scroll", () => {
+      if (shell.scrollTop < 96) void codexappFastShellLoadOlder(shell, state);
+    }, { passive: true });
+    mount.appendChild(shell);
+    const now = performance.now();
+    codexappLoadMarks.firstFastShellAt ??= now;
+    codexappLoadMarks.firstBodyTextAt ??= now;
+    codexappLoadMarks.fastShellTurns = turns.length;
+    codexappWatchFastThreadShellDismissal();
+    return true;
+  }
+
+  function installCodexappFastThreadShell() {
+    if (!rawFetch) {
+      codexappLoadMarks.fastShellSkipReason = "fetch-unavailable";
+      return false;
+    }
+    const threadId = codexappThreadIdFromPath();
+    if (!threadId) {
+      codexappLoadMarks.fastShellSkipReason = "not-thread-route";
+      return false;
+    }
+    if (window.__codexappFastThreadShellStarted === threadId) return true;
+    const root = document.getElementById("root");
+    if (root && codexappRootHasOfficialThread(root, threadId)) {
+      codexappLoadMarks.fastShellSkipReason = "official-thread-ready";
+      return false;
+    }
+    window.__codexappFastThreadShellStarted = threadId;
+    codexappLoadMarks.fastShellRequestedAt = performance.now();
+    rawFetch("/codexapp-thread-fast?threadId=" + encodeURIComponent(threadId), {
+      headers: { "accept": "application/json" },
+      cache: "no-store",
+    })
+      .then((response) => {
+        codexappLoadMarks.fastShellResponseAt = performance.now();
+        codexappLoadMarks.fastShellStatus = response.status;
+        return response.ok ? response.json() : null;
+      })
+      .then((payload) => {
+        if (payload) {
+          const rendered = codexappRenderFastThreadShell(payload);
+          codexappLoadMarks.fastShellRendered = rendered;
+          if (!rendered) {
+            setTimeout(() => { codexappLoadMarks.fastShellRendered = codexappRenderFastThreadShell(payload); }, 50);
+            setTimeout(() => { codexappLoadMarks.fastShellRendered = codexappRenderFastThreadShell(payload); }, 250);
+          }
+        }
+      })
+      .catch((error) => {
+        codexappLoadMarks.fastShellError = String(error?.message || error || "unknown");
+      });
+    return true;
+  }
+  function scheduleCodexappFastThreadShell() {
+    setTimeout(installCodexappFastThreadShell, 0);
+    setTimeout(installCodexappFastThreadShell, 100);
+    setTimeout(installCodexappFastThreadShell, 500);
+    if (document.readyState === "loading") {
+      document.addEventListener("DOMContentLoaded", installCodexappFastThreadShell, { once: true });
+    } else {
+      installCodexappFastThreadShell();
+    }
+  }
+  scheduleCodexappFastThreadShell();
+
   try {
     const rawSendBeacon = navigator.sendBeacon?.bind(navigator);
     if (rawSendBeacon) {
@@ -3771,17 +4718,200 @@ function browserBridgeScript() {
 
   const threadHistoryLoadState = new Map();
 
+  function threadIdFromLocationPath() {
+    const parts = String(location.pathname || "").split("/").filter(Boolean);
+    const index = parts.indexOf("local");
+    const value = index >= 0 ? parts[index + 1] : null;
+    return value ? decodeURIComponent(value) : null;
+  }
+
+  function activeThreadIdFallback() {
+    const fromPath = threadIdFromLocationPath();
+    if (fromPath) return fromPath;
+    const resolver = window.__codexappResolveActiveThreadId;
+    const resolved = typeof resolver === "function" ? resolver() : null;
+    return typeof resolved === "string" && resolved.length > 0 ? resolved : null;
+  }
+
+  const routeThreadHydrationState = new Map();
+
+  function threadHistoryManagers() {
+    const managers = window.__codexappHistoryManagers;
+    return managers instanceof Set ? Array.from(managers) : [];
+  }
+
+  function managerConversation(manager, threadId) {
+    if (!manager || !threadId) return null;
+    try {
+      if (typeof manager.getConversation === "function") {
+        const conversation = manager.getConversation(threadId);
+        if (conversation != null) return conversation;
+      }
+      return manager.conversations?.get?.(threadId) ?? null;
+    } catch {
+      return null;
+    }
+  }
+
+  function historyManagerForThreadId(threadId) {
+    const managers = threadHistoryManagers();
+    for (const manager of managers) {
+      if (managerConversation(manager, threadId) != null) return manager;
+    }
+    for (const manager of managers) {
+      if (typeof manager?.readThread === "function") return manager;
+    }
+    return null;
+  }
+
+  function routeThreadNeedsHydration(conversation) {
+    if (!conversation) return true;
+    const turns = Array.isArray(conversation.turns) ? conversation.turns : [];
+    const pagination = conversation.turnsPagination ?? null;
+    if (conversation.resumeState !== "resumed") return true;
+    if (turns.length <= 1) return true;
+    if (!pagination) return true;
+    if (pagination.hasLoadedOldest === true && turns.length <= 1) return true;
+    if (pagination.olderCursor == null && pagination.hasLoadedOldest !== true) return true;
+    return false;
+  }
+
+  function normalizeRouteTurnForManager(turn, fallbackCwd) {
+    if (!isPlainObject(turn)) return turn;
+    return {
+      ...turn,
+      turnId: turn.turnId || turn.id || null,
+      params: isPlainObject(turn.params) ? turn.params : { cwd: fallbackCwd ?? null },
+      items: Array.isArray(turn.items) ? turn.items : []
+    };
+  }
+
+  function normalizeRouteThreadForManager(thread, previous, threadId) {
+    const fallbackCwd = thread?.cwd || previous?.cwd || thread?.latestThreadSettings?.cwd || previous?.latestThreadSettings?.cwd || null;
+    const turns = (Array.isArray(thread?.turns)
+      ? thread.turns
+      : (Array.isArray(previous?.turns) ? previous.turns : []))
+      .map((turn) => normalizeRouteTurnForManager(turn, fallbackCwd));
+    const requests = Array.isArray(thread?.requests)
+      ? thread.requests.map((request) => ({
+        ...(isPlainObject(request) ? request : {}),
+        params: isPlainObject(request?.params) ? request.params : { cwd: null },
+        items: Array.isArray(request?.items) ? request.items : []
+      }))
+      : [];
+    const currentPermissions = thread?.currentPermissions || previous?.currentPermissions || null;
+    const latestModel = thread?.latestModel || previous?.latestModel || thread?.model || "";
+    const latestReasoningEffort = thread?.latestReasoningEffort ?? previous?.latestReasoningEffort ?? null;
+    return {
+      ...(previous || {}),
+      ...(thread || {}),
+      id: thread?.id || previous?.id || threadId,
+      sessionId: thread?.sessionId || previous?.sessionId || thread?.id || threadId,
+      hostId: thread?.hostId || previous?.hostId || "local",
+      title: thread?.title || thread?.name || previous?.title || previous?.name || "",
+      name: thread?.name || thread?.title || previous?.name || previous?.title || "",
+      turns,
+      requests,
+      resumeState: "resumed",
+      threadRuntimeStatus: thread?.threadRuntimeStatus || thread?.status || previous?.threadRuntimeStatus || { type: "idle" },
+      turnsPagination: thread?.turnsPagination || previous?.turnsPagination || {
+        olderCursor: null,
+        oldestLoadedTurnId: null,
+        isLoadingOlder: false,
+        hasLoadedOldest: true
+      },
+      rolloutPath: thread?.rolloutPath || thread?.path || previous?.rolloutPath || previous?.path || null,
+      latestModel,
+      latestReasoningEffort,
+      previousTurnModel: thread?.previousTurnModel ?? previous?.previousTurnModel ?? null,
+      latestCollaborationMode: thread?.latestCollaborationMode || previous?.latestCollaborationMode || {
+        mode: "default",
+        settings: {
+          reasoning_effort: latestReasoningEffort,
+          model: latestModel,
+          developer_instructions: null
+        }
+      },
+      hasUnreadTurn: Boolean(thread?.hasUnreadTurn ?? previous?.hasUnreadTurn ?? false),
+      threadGoal: thread?.threadGoal ?? previous?.threadGoal ?? null,
+      latestTokenUsageInfo: thread?.latestTokenUsageInfo ?? previous?.latestTokenUsageInfo ?? null,
+      workspaceKind: thread?.workspaceKind || previous?.workspaceKind || "project",
+      workspaceBrowserRoot: thread?.workspaceBrowserRoot ?? previous?.workspaceBrowserRoot ?? null,
+      projectlessOutputDirectory: thread?.projectlessOutputDirectory ?? previous?.projectlessOutputDirectory ?? null,
+      currentPermissions,
+      latestThreadSettings: thread?.latestThreadSettings || previous?.latestThreadSettings || null
+    };
+  }
+
+  function applyRouteThreadConversation(manager, threadId, conversation) {
+    if (!manager || !conversation) return false;
+    try {
+      if (typeof manager.setConversation === "function") {
+        manager.setConversation(conversation);
+        return true;
+      }
+      if (typeof manager.applyConversationState === "function") {
+        manager.applyConversationState(threadId, conversation);
+        return true;
+      }
+      if (manager.conversations instanceof Map) {
+        manager.conversations.set(threadId, conversation);
+        return true;
+      }
+    } catch (error) {
+      rawConsoleWarn("[codexapp] route thread apply failed", threadId, error);
+    }
+    return false;
+  }
+
+  function hydrateCurrentRouteThread() {
+    const threadId = threadIdFromLocationPath();
+    if (!threadId) return;
+    const manager = historyManagerForThreadId(threadId);
+    if (!manager || typeof manager.readThread !== "function") return;
+    const current = managerConversation(manager, threadId);
+    const now = Date.now();
+    const state = routeThreadHydrationState.get(threadId) || {
+      inFlight: false,
+      lastAttemptAt: 0,
+      completedAt: 0
+    };
+    if (!routeThreadNeedsHydration(current)) {
+      state.completedAt = now;
+      routeThreadHydrationState.set(threadId, state);
+      return;
+    }
+    if (state.inFlight && now - state.lastAttemptAt < 15000) return;
+    if (!state.inFlight && now - state.lastAttemptAt < 1500) return;
+    state.inFlight = true;
+    state.lastAttemptAt = now;
+    routeThreadHydrationState.set(threadId, state);
+    Promise.resolve(manager.readThread(threadId, { includeTurns: true }))
+      .then((result) => {
+        const thread = result?.thread || result?.conversation || result;
+        if (!isPlainObject(thread)) return;
+        const previous = managerConversation(manager, threadId);
+        const next = normalizeRouteThreadForManager(thread, previous, threadId);
+        if (applyRouteThreadConversation(manager, threadId, next)) {
+          state.completedAt = Date.now();
+        }
+      })
+      .catch((error) => rawConsoleWarn("[codexapp] route thread hydrate failed", threadId, error))
+      .finally(() => {
+        state.inFlight = false;
+      });
+  }
+
   function conversationIdFromThreadContainer(container) {
     const ownThreadId = container?.getAttribute?.("data-codexapp-conversation-id") || "";
     if (ownThreadId.length > 0) return ownThreadId;
     const node = container?.querySelector?.("[data-codexapp-conversation-id]");
     const threadId = node?.getAttribute?.("data-codexapp-conversation-id") || "";
-    return threadId.length > 0 ? threadId : null;
+    return threadId.length > 0 ? threadId : activeThreadIdFallback();
   }
 
   function elementLooksLikeThreadHistoryScroller(element) {
     if (!(element instanceof HTMLElement)) return false;
-    if (element.scrollHeight <= element.clientHeight + 24) return false;
     const style = getComputedStyle(element);
     const overflow = String(style.overflowY || "") + " " + String(style.overflow || "");
     const className = typeof element.className === "string" ? element.className : "";
@@ -3829,7 +4959,7 @@ function browserBridgeScript() {
 
   let threadScrollAnchorCounter = 0;
 
-  function visibleTextElement(element, containerRect) {
+  function visibleTextElement(element, containerRect, container) {
     if (!(element instanceof HTMLElement)) return false;
     if (element === container) return false;
     const text = (element.innerText || element.textContent || "").trim();
@@ -3847,7 +4977,7 @@ function browserBridgeScript() {
       Math.max(96, container.clientHeight - 96),
     );
     const candidates = Array.from(container.querySelectorAll("[data-testid], article, [role='article'], [data-message-id], [data-turn-id], div, p"))
-      .filter((element) => visibleTextElement(element, containerRect));
+      .filter((element) => visibleTextElement(element, containerRect, container));
     if (candidates.length === 0) return {
       id: null,
       top: null,
@@ -3991,6 +5121,7 @@ function browserBridgeScript() {
     const tick = () => {
       styleUsageRemaining();
       styleManagedPermissionState();
+      hydrateCurrentRouteThread();
       installThreadHistoryLoaders();
     };
     tick();
@@ -4262,7 +5393,7 @@ function browserBridgeScript() {
   function activeThreadIdFromDocument() {
     const node = document.querySelector("[data-codexapp-conversation-id]");
     const id = node?.getAttribute?.("data-codexapp-conversation-id") || "";
-    return id || null;
+    return id || activeThreadIdFallback();
   }
 
   function activeComposer() {
@@ -5167,10 +6298,10 @@ function readRemoteControlEnrollments() {
       "from remote_control_enrollments",
       "order by updated_at desc",
     ].join(" ");
-    const output = execFileSync("sqlite3", ["-json", codexStateDbPath, sql], {
+    const output = execFileSync("sqlite3", ["-cmd", `.timeout ${sqliteBusyTimeoutMs}`, "-json", codexStateDbPath, sql], {
       encoding: "utf8",
       stdio: ["ignore", "pipe", "ignore"],
-      timeout: 3000,
+      timeout: Math.max(3000, sqliteBusyTimeoutMs + 1000),
     }).trim();
     const rows = output ? JSON.parse(output) : [];
     return Array.isArray(rows) ? rows : [];
@@ -6058,6 +7189,7 @@ class BridgeSession {
     this.appSocket = null;
     this.pending = new Map();
     this.forwardedRequests = new Map();
+    this.ackedDeferredTurnRequestIds = new Set();
     this.abortControllers = new Map();
     this.recentTurnInputSubmissions = new Map();
     this.pendingTurnInputSubmissions = new Map();
@@ -6130,6 +7262,7 @@ class BridgeSession {
     }
     this.pending.clear();
     this.forwardedRequests.clear();
+    this.ackedDeferredTurnRequestIds.clear();
     this.recentTurnInputSubmissions.clear();
     this.pendingTurnInputSubmissions.clear();
     this.largeThreadAppResumePromises.clear();
@@ -6347,6 +7480,7 @@ class BridgeSession {
     if (message.id !== undefined && ("result" in message || "error" in message)) {
       debugLog("app-server response", message.id, "error" in message ? "error" : "result");
       const forwarded = this.forwardedRequests.get(message.id);
+      const deferredAcked = this.ackedDeferredTurnRequestIds.delete(String(message.id));
       let result = message.result;
       if (forwarded) {
         this.forwardedRequests.delete(message.id);
@@ -6379,6 +7513,25 @@ class BridgeSession {
           error: message.error,
           method: message.method || null,
         });
+      }
+      if (deferredAcked) {
+        if ("error" in message) {
+          const threadId = threadIdFromParams(forwarded?.params || {});
+          if (threadId) {
+            this.broadcastThreadActivity(threadId, {
+              reason: "large-thread-deferred-turn-error",
+              status: "errored",
+              error: message.error?.message || "Deferred turn failed",
+            });
+          }
+          log("deferred turn request failed after browser ack", {
+            requestId: message.id,
+            method: forwarded?.method || null,
+            threadId: threadId || null,
+            error: message.error?.message || String(message.error || "unknown error"),
+          });
+        }
+        return;
       }
       const browserResponseMessage = {
         id: message.id,
@@ -6506,11 +7659,11 @@ class BridgeSession {
     if (promise) promise.catch(() => {});
   }
 
-  async bestEffortLargeThreadSubmitResume(threadId, params = {}) {
+  async waitForLargeThreadSubmitResume(threadId, params = {}) {
     const promise = this.ensureLargeThreadLoadedInAppServer(threadId, params, {
-      timeoutMs: largeThreadSubmitResumeTimeoutMs,
+      timeoutMs: largeThreadAppResumeTimeoutMs,
     });
-    if (!promise) return true;
+    if (!promise) return { ready: true, promise: null };
     let timeout = null;
     try {
       await Promise.race([
@@ -6522,21 +7675,111 @@ class BridgeSession {
           timeout.unref?.();
         }),
       ]);
-      return true;
+      return { ready: true, promise };
     } catch (error) {
-      promise.catch(() => {});
-      log("large thread submit resume skipped; forwarding request anyway", {
+      log("large thread submit resume deferred; waiting for app-server resume", {
         threadId,
         error: error.message || String(error),
       });
       this.broadcastThreadActivity(threadId, {
-        reason: "large-thread-submit-resume-fallback",
+        reason: "large-thread-submit-resume-pending",
         status: "inProgress",
+        message: "Connecting long thread before sending",
       });
-      return false;
+      return { ready: false, promise, error };
     } finally {
       if (timeout) clearTimeout(timeout);
     }
+  }
+
+  sendMcpErrorResponse(requestId, message, code = -32603) {
+    if (requestId === undefined || requestId === null) return;
+    const errorMessage = {
+      id: requestId,
+      error: {
+        code,
+        message,
+      },
+    };
+    this.sendToBrowser({
+      type: "mcp-response",
+      hostId: "local",
+      message: errorMessage,
+    });
+    this.finishPendingTurnInputSubmission(requestId, errorMessage);
+  }
+
+  async sendMcpRequestToAppServer(request, params = {}) {
+    debugLog("to app-server", request.method, request.id);
+    this.forwardedRequests.set(request.id, { method: request.method, params: params || {} });
+    await this.appSend({
+      jsonrpc: "2.0",
+      id: request.id,
+      method: request.method,
+      params,
+    });
+    this.recordTurnInputSubmission(request.method, params || {});
+    this.observeActiveTurnFromRequest(request.method, params || {}, null);
+  }
+
+  sendDeferredTurnAck(request, params = {}) {
+    if (!request || request.id === undefined || request.id === null) return;
+    const responseMessage = {
+      id: request.id,
+      result: {},
+    };
+    this.ackedDeferredTurnRequestIds.add(String(request.id));
+    this.sendToBrowser({
+      type: "mcp-response",
+      hostId: "local",
+      message: responseMessage,
+    });
+    this.finishPendingTurnInputSubmission(request.id, responseMessage);
+    this.recordTurnInputSubmission(request.method, params || {});
+    this.observeActiveTurnFromRequest(request.method, params || {}, null);
+  }
+
+  deferLargeThreadTurnRequest(request, params = {}, resumeState = {}) {
+    const threadId = typeof params?.threadId === "string" ? params.threadId : null;
+    if (!threadId) return false;
+    this.sendDeferredTurnAck(request, params || {});
+    this.broadcastThreadActivity(threadId, {
+      reason: "large-thread-submit-queued",
+      status: "inProgress",
+      message: "Connecting long thread before sending",
+    });
+    void (async () => {
+      try {
+        await resumeState.promise;
+        if (this.closed) return;
+        const nextParams = request.method === "turn/steer"
+          ? await this.withLatestExpectedTurnId(request.method, params)
+          : params;
+        await this.sendMcpRequestToAppServer(request, nextParams || {});
+      } catch (error) {
+        log("large thread deferred turn request failed", {
+          method: request.method,
+          threadId,
+          requestId: request.id ?? null,
+          error: error.message || String(error),
+        });
+        const wasAcked = request.id !== undefined && request.id !== null
+          ? this.ackedDeferredTurnRequestIds.delete(String(request.id))
+          : false;
+        if (!wasAcked) {
+          this.sendMcpErrorResponse(
+            request.id,
+            "Long thread is still connecting. The message was not sent; please retry after the thread status updates.",
+          );
+        }
+        this.broadcastThreadActivity(threadId, {
+          reason: "large-thread-submit-queue-failed",
+          status: "errored",
+          error: error.message || String(error),
+        });
+      }
+    })();
+    return true;
   }
 
   async readCurrentAccountForProvider() {
@@ -7203,7 +8446,7 @@ class BridgeSession {
       const completeResult = await this.completeThreadTurnsResponse({
         threadId,
         cursor: null,
-        limit: completeThreadTurnsPageLimit,
+        limit: activeTurnWatchdogPageLimit,
       });
       if (this.isKnownEphemeralThread(threadId)) {
         this.activeTurnWatchdogs.delete(threadId);
@@ -7212,7 +8455,7 @@ class BridgeSession {
       const result = completeResult || await this.appRequest("thread/turns/list", {
         threadId,
         cursor: null,
-        limit: completeThreadTurnsPageLimit,
+        limit: activeTurnWatchdogPageLimit,
       }, {
         timeoutMs: 30000,
         internal: true,
@@ -7320,7 +8563,7 @@ class BridgeSession {
     const params = {
       threadId,
       cursor: null,
-      limit: Math.min(50, Math.max(1, completeThreadTurnsPageLimit || 20)),
+      limit: activeTurnWatchdogPageLimit,
     };
     const completeResult = await this.completeThreadTurnsResponse(params);
     if (this.isKnownEphemeralThread(threadId)) return null;
@@ -7446,6 +8689,17 @@ class BridgeSession {
         return;
       }
     }
+    if (request.method === "thread/status") {
+      const statusResult = largeThreadStatusFastPathResponse(params);
+      if (statusResult) {
+        this.sendToBrowser({
+          type: "mcp-response",
+          hostId: "local",
+          message: { id: request.id, result: statusResult },
+        });
+        return;
+      }
+    }
     if (request.method === "thread/settings/update") {
       const settingsResult = largeThreadSettingsUpdateFastPathResponse(params);
       if (settingsResult) {
@@ -7501,18 +8755,13 @@ class BridgeSession {
     if ((request.method === "turn/start" || request.method === "turn/steer")
       && typeof params?.threadId === "string"
       && largeThreadFastPathInfo(params.threadId)) {
-      await this.bestEffortLargeThreadSubmitResume(params.threadId, params || {});
+      const resumeState = await this.waitForLargeThreadSubmitResume(params.threadId, params || {});
+      if (!resumeState.ready) {
+        this.deferLargeThreadTurnRequest({ ...request, params }, params || {}, resumeState);
+        return;
+      }
     }
-    debugLog("to app-server", request.method, request.id);
-    this.forwardedRequests.set(request.id, { method: request.method, params: params || {} });
-    await this.appSend({
-      jsonrpc: "2.0",
-      id: request.id,
-      method: request.method,
-      params,
-    });
-    this.recordTurnInputSubmission(request.method, params || {});
-    this.observeActiveTurnFromRequest(request.method, params || {}, null);
+    await this.sendMcpRequestToAppServer(request, params || {});
   }
 
   async fastThreadListResponse(params = {}) {
@@ -7595,17 +8844,20 @@ class BridgeSession {
       const turnsResult = await this.completeThreadTurnsResponse({
         threadId,
         cursor: null,
-        limit: completeThreadTurnsPageLimit,
+        limit: threadReadInitialTurnsLimit(params),
         ...(params.itemsView !== undefined ? { itemsView: params.itemsView } : {}),
         ...(params.sortDirection !== undefined ? { sortDirection: params.sortDirection } : {}),
       });
       if (!turnsResult || !Array.isArray(turnsResult.data)) return canonicalResult;
+      const windowTurns = chronologicalTurnsFromTurnsPage(turnsResult);
       return {
         ...canonicalResult,
         thread: {
           ...thread,
-          turns: turnsResult.data,
+          turns: windowTurns,
+          turnsPagination: turnsPaginationFromTurnsPage(turnsResult, windowTurns),
         },
+        initialTurnsPage: initialTurnsPageFromTurnsResult(turnsResult),
       };
     } catch (error) {
       log("complete thread read failed; falling back to app-server", params.threadId, error.message || String(error));
@@ -7633,13 +8885,11 @@ class BridgeSession {
     }
 
     try {
+      const requestedLimit = boundedTurnPageLimit(params.limit, threadTurnsWindowDefaultLimit);
       const firstParams = {
         ...params,
         cursor: null,
-        limit: Math.max(
-          completeThreadTurnsPageLimit,
-          Math.min(Number.parseInt(String(params.limit || 0), 10) || 0, completeThreadTurnsPageLimit)
-        ),
+        limit: requestedLimit,
       };
       const firstResult = await this.appRequest("thread/turns/list", firstParams, {
         timeoutMs: 60000,
@@ -7647,36 +8897,12 @@ class BridgeSession {
       });
       if (!firstResult || !Array.isArray(firstResult.data)) return null;
 
-      const data = [...firstResult.data];
-      let nextCursor = firstResult.nextCursor ?? null;
-      const seenCursors = new Set();
-      let pages = 1;
-
-      while (nextCursor != null && data.length < completeThreadTurnsMaxTurns && pages < completeThreadTurnsMaxPages) {
-        const cursorKey = typeof nextCursor === "string" ? nextCursor : JSON.stringify(nextCursor);
-        if (seenCursors.has(cursorKey)) break;
-        seenCursors.add(cursorKey);
-        const pageResult = await this.appRequest("thread/turns/list", {
-          ...params,
-          cursor: nextCursor,
-          limit: completeThreadTurnsPageLimit,
-        }, {
-          timeoutMs: 60000,
-          internal: true,
-        });
-        if (!pageResult || !Array.isArray(pageResult.data) || pageResult.data.length === 0) break;
-        data.push(...pageResult.data);
-        nextCursor = pageResult.nextCursor ?? null;
-        pages += 1;
-      }
-
-      const loadedThreadIds = await this.loadedThreadIds();
       const completeResult = normalizeThreadTurnsResult({
         ...firstResult,
-        data,
-        nextCursor,
+        data: firstResult.data,
+        nextCursor: firstResult.nextCursor ?? null,
       }, {
-        preserveLatestInProgress: loadedThreadIds.has(params.threadId),
+        preserveLatestInProgress: true,
         threadId: params.threadId,
       });
       setCachedThreadTurns(params, completeResult);
@@ -8252,6 +9478,8 @@ class BridgeSession {
           result = await this.completeThreadTurnsResponse(params);
         } else if (method === "thread/resume") {
           result = largeThreadResumeFastPathResponse(params);
+        } else if (method === "thread/status") {
+          result = largeThreadStatusFastPathResponse(params);
         } else if (method === "thread/settings/update") {
           result = largeThreadSettingsUpdateFastPathResponse(params);
         }
@@ -8448,17 +9676,104 @@ const server = http.createServer((req, res) => {
       send(res, 200, { "Content-Type": "image/x-icon", "Cache-Control": "public, max-age=3600" });
       return;
     }
-    if (url.pathname === bridgeScriptPath) {
+    if (url.pathname === "/auth/device/start" && req.method === "POST") {
+      startDeviceAuthSession()
+        .then((result) => send(res, 200, {
+          "Content-Type": "application/json",
+          "Cache-Control": "no-store",
+        }, JSON.stringify(result)))
+        .catch((error) => send(res, 500, {
+          "Content-Type": "application/json",
+          "Cache-Control": "no-store",
+        }, JSON.stringify({ state: "failed", error: error.message || String(error) })));
+      return;
+    }
+    if (url.pathname === "/auth/device/status" && req.method === "GET") {
       send(res, 200, {
+        "Content-Type": "application/json",
+        "Cache-Control": "no-store",
+      }, JSON.stringify(publicDeviceAuthSession()));
+      return;
+    }
+    if (url.pathname === "/auth/logout" && req.method === "POST") {
+      try {
+        execFileSync("codex", ["logout"], {
+          encoding: "utf8",
+          timeout: 10000,
+          maxBuffer: 1024 * 1024,
+        });
+        if (deviceAuthSession?.process && deviceAuthSession.state === "pending") {
+          try { deviceAuthSession.process.kill("SIGTERM"); } catch {}
+        }
+        deviceAuthSession = null;
+        send(res, 200, {
+          "Content-Type": "application/json",
+          "Cache-Control": "no-store",
+        }, JSON.stringify({ ok: true, loginStatus: codexLoginStatus() }));
+      } catch (error) {
+        send(res, 500, {
+          "Content-Type": "application/json",
+          "Cache-Control": "no-store",
+        }, JSON.stringify({ ok: false, error: error.message || String(error) }));
+      }
+      return;
+    }
+    if (url.pathname === bridgeScriptPath) {
+      sendStaticBody(req, res, 200, {
         "Content-Type": "text/javascript; charset=utf-8",
         "Cache-Control": "no-store",
-      }, browserBridgeScript());
+      }, browserBridgeScript(), `bridge:${bridgeScriptVersion}:${assetPatchVersion}`);
+      return;
+    }
+    if (url.pathname === "/codexapp-thread-fast") {
+      const threadId = url.searchParams.get("threadId") || "";
+      const result = largeThreadReadFastPathResponse({ threadId });
+      if (!result) {
+        send(res, 404, { "Content-Type": "application/json" }, JSON.stringify({ error: "thread fast path unavailable" }));
+        return;
+      }
+      sendStaticBody(req, res, 200, {
+        "Content-Type": "application/json; charset=utf-8",
+        "Cache-Control": "no-store",
+      }, JSON.stringify(result));
+      return;
+    }
+    if (url.pathname === "/codexapp-thread-turns") {
+      const threadId = url.searchParams.get("threadId") || "";
+      const cursor = url.searchParams.get("cursor") || null;
+      const limit = Number.parseInt(url.searchParams.get("limit") || "", 10);
+      const result = largeThreadTurnsFastPathResponse({
+        threadId,
+        cursor,
+        limit: Number.isFinite(limit) && limit > 0 ? limit : historyWindowMaxTurns,
+      });
+      if (!result) {
+        send(res, 404, { "Content-Type": "application/json" }, JSON.stringify({ error: "thread turns fast path unavailable" }));
+        return;
+      }
+      sendStaticBody(req, res, 200, {
+        "Content-Type": "application/json; charset=utf-8",
+        "Cache-Control": "no-store",
+      }, JSON.stringify(result));
+      return;
+    }
+    if (url.pathname === "/codexapp-thread-status") {
+      const threadId = url.searchParams.get("threadId") || "";
+      const result = largeThreadStatusFastPathResponse({ threadId });
+      if (!result) {
+        send(res, 404, { "Content-Type": "application/json" }, JSON.stringify({ error: "thread status unavailable" }));
+        return;
+      }
+      sendStaticBody(req, res, 200, {
+        "Content-Type": "application/json; charset=utf-8",
+        "Cache-Control": "no-store",
+      }, JSON.stringify(result));
       return;
     }
     const filePath = safeJoin(webviewDir, url.pathname);
     if (!filePath || !fs.existsSync(filePath) || !fs.statSync(filePath).isFile()) {
       if (shouldServeSpaFallback(req, url.pathname)) {
-        sendIndexHtml(res, url.pathname);
+        sendIndexHtml(req, res, url.pathname);
         return;
       }
       send(res, 404, { "Content-Type": "text/plain; charset=utf-8" }, "Not found");
@@ -8470,17 +9785,16 @@ const server = http.createServer((req, res) => {
       "Cache-Control": assetCacheControl(filePath, ext, url),
     };
     if (path.basename(filePath) === "index.html") {
-      send(res, 200, headers, injectBridge(fs.readFileSync(filePath, "utf8")));
+      sendStaticBody(req, res, 200, headers, injectBridge(fs.readFileSync(filePath, "utf8")), `index:${assetPatchVersion}:root`);
       return;
     }
     if (ext === ".js" && shouldPatchJavaScript(filePath)) {
-      send(res, 200, {
+      sendStaticBody(req, res, 200, {
         ...headers,
-      }, patchJavaScript(filePath, fs.readFileSync(filePath, "utf8")));
+      }, cachedPatchedJavaScript(filePath), staticFileCompressionCacheKey(filePath, url));
       return;
     }
-    res.writeHead(200, headers);
-    fs.createReadStream(filePath).pipe(res);
+    sendStaticFile(req, res, filePath, headers, url);
   } catch (error) {
     send(res, 500, { "Content-Type": "text/plain; charset=utf-8" }, error.stack || error.message);
   }
@@ -8537,6 +9851,7 @@ server.on("upgrade", (req, socket, head) => {
 
 server.listen(port, host, () => {
   log(`${appDisplayName} web bridge listening on http://${host}:${port}`);
+  setTimeout(prewarmPatchedJavaScriptCache, 0).unref?.();
   void (async () => {
     try {
       ensureManagedPersistedPermissionState("web-startup");
