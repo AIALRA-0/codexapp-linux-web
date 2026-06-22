@@ -108,7 +108,10 @@ const largeThreadFastPathMaxItemsPerTurn = numberFromEnv("CODEXAPP_LARGE_THREAD_
 const largeThreadStaleInProgressMs = numberFromEnv("CODEXAPP_LARGE_THREAD_STALE_IN_PROGRESS_MS", 2 * 60 * 60 * 1000, 5 * 60 * 1000, 7 * 24 * 60 * 60 * 1000);
 const largeThreadFastPathCursorPrefix = "codexapp-large-rollout:";
 const largeThreadAppResumeTimeoutMs = numberFromEnv("CODEXAPP_LARGE_THREAD_APP_RESUME_TIMEOUT_MS", 120000, 10000, 600000);
+const largeThreadSubmitResumeTimeoutMs = numberFromEnv("CODEXAPP_LARGE_THREAD_SUBMIT_RESUME_TIMEOUT_MS", 8000, 1000, 60000);
 const largeThreadPrewarmOnResumeEnabled = parseBoolean(process.env.CODEXAPP_LARGE_THREAD_PREWARM_ON_RESUME, false);
+const historyWindowMaxTurns = numberFromEnv("CODEXAPP_HISTORY_WINDOW_MAX_TURNS", 8, 4, 100);
+const historyWindowCacheMaxTurns = numberFromEnv("CODEXAPP_HISTORY_WINDOW_CACHE_MAX_TURNS", 32, historyWindowMaxTurns, 500);
 const promptHistorySteerRecoveryEnabled = parseBoolean(process.env.CODEXAPP_PROMPT_HISTORY_STEER_RECOVERY, true);
 const promptHistorySteerRecoveryImmediateDelayMs = numberFromEnv("CODEXAPP_PROMPT_HISTORY_STEER_RECOVERY_IMMEDIATE_DELAY_MS", 50, 0, 5000);
 const promptHistorySteerRecoveryDelayMs = numberFromEnv("CODEXAPP_PROMPT_HISTORY_STEER_RECOVERY_DELAY_MS", 2000, 250, 15000);
@@ -2887,6 +2890,34 @@ function replaceJavaScriptOnce(source, search, replacement, label) {
   return source.replace(search, replacement);
 }
 
+function appServerManagerHistoryPatchSource() {
+  return [
+    "function ip(e,t){let n=rp.get(e);return n??(n=new sp(e),rp.set(e,n)),n.loadRemainingConversationTurns(t)}",
+    "function codexappLargeCursorOffset(e){if(typeof e!==`string`)return null;let t=e.match(/codexapp-large-rollout:(\\d+)/);return t?Number.parseInt(t[1],10):null}",
+    `function codexappHistoryWindowMax(){return ${historyWindowMaxTurns}}`,
+    `function codexappHistoryCacheMax(){return ${historyWindowCacheMaxTurns}}`,
+    "function codexappTurnKey(e){return e?.turnId??e?.id??null}",
+    "function codexappFirstTurnId(e){let t=(e||[]).find(e=>codexappTurnKey(e)!=null);return codexappTurnKey(t)??null}",
+    "function codexappLastTurnId(e){for(let t=(e||[]).length-1;t>=0;t--){let n=codexappTurnKey(e[t]);if(n!=null)return n}return null}",
+    "function codexappUniqueTurns(e){let t=new Set,n=[];for(let r of e||[]){let e=codexappTurnKey(r);if(e!=null){if(t.has(e))continue;t.add(e)}n.push(r)}return n}",
+    "function codexappMergeWindowTurns(e,t){return codexappUniqueTurns([...(e||[]),...(t||[])])}",
+    "function codexappPlainTurn(e){try{return JSON.parse(JSON.stringify(e))}catch{return e}}",
+    "function codexappPlainTurns(e){return(e||[]).map(codexappPlainTurn)}",
+    "function codexappWindowCache(e){let t=globalThis.__codexappHistoryWindowCache;if(!(t instanceof Map)){t=new Map;globalThis.__codexappHistoryWindowCache=t}let n=t.get(e);return n??(n={before:[],after:[]},t.set(e,n)),n}",
+    "function codexappHasWindowCache(e){let t=globalThis.__codexappHistoryWindowCache;return t instanceof Map&&t.has(e)}",
+    "function codexappStoreBefore(e,t){if(!Array.isArray(t)||t.length===0)return;let n=codexappHistoryCacheMax();e.before=codexappUniqueTurns([...(e.before||[]),...codexappPlainTurns(t)]).slice(-n)}",
+    "function codexappStoreAfter(e,t){if(!Array.isArray(t)||t.length===0)return;let n=codexappHistoryCacheMax();e.after=codexappUniqueTurns([...codexappPlainTurns(t),...(e.after||[])]).slice(0,n)}",
+    "function codexappWindowMeta(e,t){return{before:e.before?.length??0,after:e.after?.length??0,max:codexappHistoryWindowMax(),reason:t??null}}",
+    "function codexappWithWindowMeta(e,t,n){let r=codexappWindowCache(e.id);return{...e,codexappWindow:codexappWindowMeta(r,n),turns:t}}",
+    "function codexappClampHydratedConversation(e,t){if(t==null||!Array.isArray(t.turns))return t;let n=t.turns,r=t.turnsPagination??null,i=codexappLargeCursorOffset(r?.olderCursor),a=codexappLargeCursorOffset(e?.turnsPagination?.olderCursor),o=i!=null||a!=null||codexappHasWindowCache(t.id);if(!o)return t;let s=codexappWindowCache(t.id),c=codexappHistoryWindowMax();if(n.length<=c)return{...t,codexappWindow:codexappWindowMeta(s,`within-window`)};let l=Array.isArray(e?.turns)?e.turns:[],u=n.some(e=>e?.status===`inProgress`),d=a!=null&&i!=null&&i<a&&n.length>l.length&&codexappLastTurnId(l)===codexappLastTurnId(n)&&!u,f,p,m;return d?(f=n.slice(0,c),p=n.slice(c),codexappStoreAfter(s,p),m=`older-window`):(p=n.slice(0,n.length-c),f=n.slice(-c),codexappStoreBefore(s,p),m=`newer-window`),{...t,turns:f,turnsPagination:r?{...r,oldestLoadedTurnId:codexappFirstTurnId(f)??r.oldestLoadedTurnId,isLoadingOlder:!1}:r,codexappWindow:codexappWindowMeta(s,m)}}",
+    "function codexappShiftHistoryWindow(e,t,n){let r=e?.getConversation?.(t);if(r==null||!Array.isArray(r.turns))return!1;let i=codexappWindowCache(t),a=codexappHistoryWindowMax(),o=Math.max(1,Math.ceil(a/2)),s=n===`newer`?i.after.splice(0,o):i.before.splice(Math.max(0,i.before.length-o));if(s.length===0)return!1;e.updateConversationState(t,e=>{let r=Array.isArray(e.turns)?e.turns:[],c=n===`newer`?codexappMergeWindowTurns(r,s):codexappMergeWindowTurns(s,r);if(c.length>a)if(n===`newer`){codexappStoreBefore(i,c.slice(0,c.length-a));c=c.slice(-a)}else{codexappStoreAfter(i,c.slice(a));c=c.slice(0,a)}e.turns=c,e.turnsPagination={...(e.turnsPagination??{}),oldestLoadedTurnId:codexappFirstTurnId(c)??e.turnsPagination?.oldestLoadedTurnId,isLoadingOlder:!1},e.codexappWindow=codexappWindowMeta(i,`shift-`+n)});return!0}",
+    "function codexappPreferPagination(e,t){if(e==null)return t??null;if(t==null)return e;let n=codexappLargeCursorOffset(e.olderCursor),r=codexappLargeCursorOffset(t.olderCursor),i=e.hasLoadedOldest===!0&&t.hasLoadedOldest!==!0,a=n!=null&&(r==null||n<r);return i||a?{...e,isLoadingOlder:!1}:t}",
+    "function codexappMergeHydratedConversation(e,t){if(e==null||t==null||!Array.isArray(e.turns)||!Array.isArray(t.turns))return codexappClampHydratedConversation(e,t);let n=e.turnsPagination??null,r=t.turnsPagination??null;if(codexappLargeCursorOffset(n?.olderCursor)==null&&codexappLargeCursorOffset(r?.olderCursor)==null&&!codexappHasWindowCache(t.id))return t;let i=codexappPreferPagination(n,r),a=i===n,o=e.turns.length>t.turns.length;if(!a&&!o)return codexappClampHydratedConversation(e,t);let s=new Map,c=[],l=t.turns.filter(e=>e?.turnId==null),u=0;for(let e of t.turns)e?.turnId!=null&&s.set(e.turnId,e);for(let t of e.turns)if(t?.turnId!=null){let e=s.get(t.turnId);e?(c.push(e),s.delete(t.turnId)):c.push(t)}else c.push(u<l.length?l[u++]:t);for(let e of t.turns)e?.turnId!=null&&s.has(e.turnId)&&(c.push(e),s.delete(e.turnId));for(;u<l.length;)c.push(l[u++]);return codexappClampHydratedConversation(e,{...t,turns:c,turnsPagination:i})}",
+    "function codexappRegisterHistoryManager(e){let t=globalThis.__codexappHistoryManagers??new Set;globalThis.__codexappHistoryManagers=t,t.add(e);let n=r=>{for(let e of Array.from(t))if(e?.conversations?.get(r)!=null)return e;return e};globalThis.__codexappLoadOlderThreadHistory=async r=>{let e=n(r);return e?ip(e,r):null},globalThis.__codexappShiftThreadHistoryWindow=(r,i)=>{let e=n(r);return e?codexappShiftHistoryWindow(e,r,i):!1},globalThis.__codexappGetThreadHistoryWindow=r=>{let e=codexappWindowCache(r);return codexappWindowMeta(e,`inspect`)},globalThis.__codexappGetThreadHistoryPagination=r=>n(r)?.conversations?.get(r)?.turnsPagination??null}",
+    "function ap(){",
+  ].join("");
+}
+
 function allowCloudflareInsightsInCsp(html) {
   const cloudflareInsightsOrigin = "https://static.cloudflareinsights.com";
   if (!html.includes("Content-Security-Policy") || html.includes(cloudflareInsightsOrigin)) {
@@ -2978,6 +3009,18 @@ function patchJavaScript(filePath, source) {
     );
     patched = replaceJavaScriptOnce(
       patched,
+      "getHasInProgressLocalConversation({exceptConversationId:e}={}){return this.recentConversations.some(t=>t.id!==e&&to(t))}",
+      "getHasInProgressLocalConversation({exceptConversationId:e}={}){return !1}",
+      "app-server-manager-signals: do not block new chats while another local thread is active",
+    );
+    patched = replaceJavaScriptOnce(
+      patched,
+      "getHasInProgressLocalConversation({exceptConversationId:e}={}){for(let t of this.threadStore.getRecentConversationIds()){if(t===e)continue;let n=this.conversations.get(t);if(n!=null&&to(n))return!0}return!1}",
+      "getHasInProgressLocalConversation({exceptConversationId:e}={}){return !1}",
+      "app-server-manager-signals: keep project actions usable with active threads",
+    );
+    patched = replaceJavaScriptOnce(
+      patched,
       "loadRemainingConversationTurns(e){throw Error(`loadRemainingConversationTurns is worker-only`)}",
       "loadRemainingConversationTurns(e){codexappRegisterHistoryManager(this);return ip(this,e)}",
       "app-server-manager-signals: enable page-side history loader",
@@ -2991,7 +3034,7 @@ function patchJavaScript(filePath, source) {
     patched = replaceJavaScriptOnce(
       patched,
       "function ip(e,t){let n=rp.get(e);return n??(n=new sp(e),rp.set(e,n)),n.loadRemainingConversationTurns(t)}function ap(){",
-      "function ip(e,t){let n=rp.get(e);return n??(n=new sp(e),rp.set(e,n)),n.loadRemainingConversationTurns(t)}function codexappLargeCursorOffset(e){if(typeof e!=`string`)return null;let t=e.match(/codexapp-large-rollout:(\\d+)/);return t?Number.parseInt(t[1],10):null}function codexappPreferPagination(e,t){if(e==null)return t??null;if(t==null)return e;let n=codexappLargeCursorOffset(e.olderCursor),r=codexappLargeCursorOffset(t.olderCursor),i=e.hasLoadedOldest===!0&&t.hasLoadedOldest!==!0,a=n!=null&&(r==null||n<r);return i||a?{...e,isLoadingOlder:!1}:t}function codexappMergeHydratedConversation(e,t){if(e==null||t==null||!Array.isArray(e.turns)||!Array.isArray(t.turns))return t;let n=e.turnsPagination??null,r=t.turnsPagination??null;if(codexappLargeCursorOffset(n?.olderCursor)==null&&codexappLargeCursorOffset(r?.olderCursor)==null)return t;let i=codexappPreferPagination(n,r),a=i===n,o=e.turns.length>t.turns.length;if(!a&&!o)return t;let s=new Map,c=[],l=t.turns.filter(e=>e?.turnId==null),u=0;for(let e of t.turns)e?.turnId!=null&&s.set(e.turnId,e);for(let t of e.turns)if(t?.turnId!=null){let e=s.get(t.turnId);e?(c.push(e),s.delete(t.turnId)):c.push(t)}else c.push(u<l.length?l[u++]:t);for(let e of t.turns)e?.turnId!=null&&s.has(e.turnId)&&(c.push(e),s.delete(e.turnId));for(;u<l.length;)c.push(l[u++]);return{...t,turns:c,turnsPagination:i}}function codexappRegisterHistoryManager(e){let t=globalThis.__codexappHistoryManagers??new Set;globalThis.__codexappHistoryManagers=t,t.add(e);let n=r=>{for(let e of Array.from(t))if(e?.conversations?.get(r)!=null)return e;return e};globalThis.__codexappLoadOlderThreadHistory=async r=>{let e=n(r);return e?ip(e,r):null},globalThis.__codexappGetThreadHistoryPagination=r=>n(r)?.conversations?.get(r)?.turnsPagination??null}function ap(){",
+      appServerManagerHistoryPatchSource(),
       "app-server-manager-signals: register all history managers",
     );
     patched = replaceJavaScriptOnce(
@@ -3778,6 +3821,10 @@ function browserBridgeScript() {
     return maxDistance - distance <= Math.max(640, Math.round(container.clientHeight * 0.75));
   }
 
+  function isNearThreadHistoryTail(container) {
+    return threadHistoryDistanceFromBottom(container) <= Math.max(640, Math.round(container.clientHeight * 0.75));
+  }
+
   function canLoadOlderThreadHistory(threadId) {
     const getter = window.__codexappGetThreadHistoryPagination;
     const pagination = typeof getter === "function" ? getter(threadId) : null;
@@ -3791,7 +3838,10 @@ function browserBridgeScript() {
     if (!(container instanceof HTMLElement)) return;
     if (!isNearThreadHistoryHead(container)) return;
     const threadId = conversationIdFromThreadContainer(container);
-    if (!threadId || !canLoadOlderThreadHistory(threadId)) return;
+    if (!threadId) return;
+    const shifter = window.__codexappShiftThreadHistoryWindow;
+    if (typeof shifter === "function" && shifter(threadId, "older")) return;
+    if (!canLoadOlderThreadHistory(threadId)) return;
     const loader = window.__codexappLoadOlderThreadHistory;
     if (typeof loader !== "function") return;
     const now = Date.now();
@@ -3826,13 +3876,38 @@ function browserBridgeScript() {
       });
   }
 
+  function maybeLoadNewerThreadHistory(container, reason) {
+    if (!(container instanceof HTMLElement)) return;
+    if (!isNearThreadHistoryTail(container)) return;
+    const threadId = conversationIdFromThreadContainer(container);
+    if (!threadId) return;
+    const shifter = window.__codexappShiftThreadHistoryWindow;
+    if (typeof shifter !== "function") return;
+    const previousScrollHeight = container.scrollHeight;
+    const previousScrollTop = container.scrollTop;
+    const isReverse = /reverse/.test(getComputedStyle(container).flexDirection || "");
+    if (!shifter(threadId, "newer")) return;
+    requestAnimationFrame(() => {
+      if (isReverse) {
+        container.scrollTop = Math.min(0, previousScrollTop);
+        return;
+      }
+      const delta = container.scrollHeight - previousScrollHeight;
+      if (delta > 0) container.scrollTop = previousScrollTop + delta;
+    });
+  }
+
   function installThreadHistoryLoader(container) {
     if (!(container instanceof HTMLElement)) return;
     if (container.dataset.codexappHistoryLoaderInstalled === "1") return;
     container.dataset.codexappHistoryLoaderInstalled = "1";
-    const onScroll = () => maybeLoadOlderThreadHistory(container, "scroll");
+    const onScroll = () => {
+      maybeLoadOlderThreadHistory(container, "scroll");
+      maybeLoadNewerThreadHistory(container, "scroll");
+    };
     const onWheel = (event) => {
       if (event.deltaY < 0) setTimeout(() => maybeLoadOlderThreadHistory(container, "wheel-up"), 0);
+      if (event.deltaY > 0) setTimeout(() => maybeLoadNewerThreadHistory(container, "wheel-down"), 0);
     };
     container.addEventListener("scroll", onScroll, { passive: true });
     container.addEventListener("wheel", onWheel, { passive: true });
@@ -3843,6 +3918,7 @@ function browserBridgeScript() {
     for (const container of threadHistoryScrollerCandidates()) {
       installThreadHistoryLoader(container);
       maybeLoadOlderThreadHistory(container, "tick");
+      maybeLoadNewerThreadHistory(container, "tick");
     }
   }
 
@@ -6217,6 +6293,39 @@ class BridgeSession {
     if (promise) promise.catch(() => {});
   }
 
+  async bestEffortLargeThreadSubmitResume(threadId, params = {}) {
+    const promise = this.ensureLargeThreadLoadedInAppServer(threadId, params, {
+      timeoutMs: largeThreadSubmitResumeTimeoutMs,
+    });
+    if (!promise) return true;
+    let timeout = null;
+    try {
+      await Promise.race([
+        promise,
+        new Promise((_, reject) => {
+          timeout = setTimeout(() => {
+            reject(new Error(`large thread submit resume timed out after ${largeThreadSubmitResumeTimeoutMs}ms`));
+          }, largeThreadSubmitResumeTimeoutMs);
+          timeout.unref?.();
+        }),
+      ]);
+      return true;
+    } catch (error) {
+      promise.catch(() => {});
+      log("large thread submit resume skipped; forwarding request anyway", {
+        threadId,
+        error: error.message || String(error),
+      });
+      this.broadcastThreadActivity(threadId, {
+        reason: "large-thread-submit-resume-fallback",
+        status: "inProgress",
+      });
+      return false;
+    } finally {
+      if (timeout) clearTimeout(timeout);
+    }
+  }
+
   async readCurrentAccountForProvider() {
     try {
       return await this.appRequest("account/read", { refreshToken: false }, { timeoutMs: 30000, internal: true });
@@ -6364,7 +6473,29 @@ class BridgeSession {
       case "mcp-request":
       case "thread-prewarm-start":
         debugLog("browser request", message.request?.method, message.request?.id);
-        await this.forwardClientRequest(message);
+        try {
+          await this.forwardClientRequest(message);
+        } catch (error) {
+          const requestId = message.request?.id;
+          log("browser request forwarding failed", {
+            method: message.request?.method || null,
+            requestId: requestId ?? null,
+            error: error.stack || error.message || String(error),
+          });
+          if (requestId !== undefined) {
+            this.sendToBrowser({
+              type: "mcp-response",
+              hostId: "local",
+              message: {
+                id: requestId,
+                error: {
+                  code: -32603,
+                  message: error.message || "request forwarding failed",
+                },
+              },
+            });
+          }
+        }
         break;
       case "mcp-notification":
         debugLog("browser notification", message.request?.method);
@@ -7092,9 +7223,7 @@ class BridgeSession {
     if ((request.method === "turn/start" || request.method === "turn/steer")
       && typeof params?.threadId === "string"
       && largeThreadFastPathInfo(params.threadId)) {
-      await this.ensureLargeThreadLoadedInAppServer(params.threadId, params || {}, {
-        timeoutMs: largeThreadAppResumeTimeoutMs,
-      });
+      await this.bestEffortLargeThreadSubmitResume(params.threadId, params || {});
     }
     debugLog("to app-server", request.method, request.id);
     this.forwardedRequests.set(request.id, { method: request.method, params: params || {} });
