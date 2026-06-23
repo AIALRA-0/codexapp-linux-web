@@ -11412,6 +11412,8 @@ function singleSurfaceHtml(threadId) {
       tailAttached: true,
       loadGeneration: { older: 0, newer: 0, latest: 0 },
       autoFillCount: 0,
+      muteScrollUntil: 0,
+      lastLoadAt: { older: 0, newer: 0 },
     };
     window.__codexappSurfaceState = state;
     const els = {
@@ -11473,28 +11475,36 @@ function singleSurfaceHtml(threadId) {
       const node = nodes.find((item) => item.getBoundingClientRect().bottom > targetY) || nodes.at(-1);
       if (!node) return null;
       const rect = node.getBoundingClientRect();
-      return { id: node.dataset.turnId, offset: targetY - rect.top };
+      return { id: node.dataset.turnId, key: node.dataset.turnKey || null, offset: targetY - rect.top };
     }
     function restoreAnchor(anchor, attempts) {
       if (!anchor) return;
       state.restoring = true;
       let remaining = Number.isFinite(attempts) ? attempts : 2;
       const apply = () => {
-        const node = els.turns.querySelector('[data-turn-id="' + CSS.escape(anchor.id) + '"]');
+        const node = els.turns.querySelector('[data-turn-id="' + CSS.escape(anchor.id) + '"]')
+          || (anchor.key ? els.turns.querySelector('[data-turn-key="' + CSS.escape(anchor.key) + '"]') : null);
         if (node) {
           const wantedTop = anchorTargetY() - anchor.offset;
           const delta = node.getBoundingClientRect().top - wantedTop;
-          if (Math.abs(delta) > 0.5) els.transcript.scrollTop += delta;
-        }
-        remaining -= 1;
-        if (remaining > 0) {
-          requestAnimationFrame(apply);
-        } else {
-          state.restoring = false;
-          queueViewportCheck();
+          if (Math.abs(delta) > 0.5) {
+            state.muteScrollUntil = Date.now() + 180;
+            els.transcript.scrollTop += delta;
+          }
         }
       };
       apply();
+      const applyLater = () => {
+        apply();
+        remaining -= 1;
+        if (remaining > 0) {
+          requestAnimationFrame(applyLater);
+        } else {
+          state.restoring = false;
+          state.muteScrollUntil = Date.now() + 120;
+        }
+      };
+      requestAnimationFrame(applyLater);
     }
     function setLoadingUi() {
       els.loadOlder.disabled = state.loadingOlder || !state.hasOlder;
@@ -11674,6 +11684,7 @@ function singleSurfaceHtml(threadId) {
       const section = document.createElement('section');
       section.className = 'turn' + (turn.status === 'optimistic' ? ' optimistic' : '');
       section.dataset.turnId = turn.id;
+      section.dataset.turnKey = turnCanonicalKey(turn);
       section.dataset.fingerprint = turnFingerprint(turn);
       const items = Array.isArray(turn.items) ? turn.items : [];
       const userItems = items.filter((item) => item.type === 'user_text' || item.type === 'user_image');
@@ -11759,12 +11770,11 @@ function singleSurfaceHtml(threadId) {
     }
     function renderTurns(anchor) {
       measureHeights();
+      if (anchor) state.restoring = true;
       reconcileTurns(visibleTurns());
       setLoadingUi();
-      requestAnimationFrame(() => {
-        measureHeights();
-        restoreAnchor(anchor);
-      });
+      measureHeights();
+      if (anchor) restoreAnchor(anchor);
     }
     function cursorForTurn(turn) {
       return turn?.pageCursor || turn?.cursor || null;
@@ -11781,16 +11791,21 @@ function singleSurfaceHtml(threadId) {
       }
       if (state.hasNewer) scheduleTailWatch();
     }
-    function pruneWindow(protectId, mode) {
+    function protectMatches(turn, protect) {
+      const id = typeof protect === 'string' ? protect : protect?.id;
+      const key = typeof protect === 'object' ? protect?.key : null;
+      return (!!id && turn?.id === id) || (!!key && turnCanonicalKey(turn) === key);
+    }
+    function pruneWindow(protect, mode) {
       measureHeights();
       while (state.items.length > DOM_LIMIT) {
         let removed = null;
         if (mode === 'head') {
-          if (state.items[0]?.id === protectId && state.items.length > 1) removed = state.items.splice(1, 1)[0];
+          if (protectMatches(state.items[0], protect) && state.items.length > 1) removed = state.items.splice(1, 1)[0];
           else removed = state.items.shift();
           state.topSpacerHeight += estimateTurnHeight(removed);
         } else {
-          if (state.items.at(-1)?.id === protectId && state.items.length > 1) removed = state.items.splice(state.items.length - 2, 1)[0];
+          if (protectMatches(state.items.at(-1), protect) && state.items.length > 1) removed = state.items.splice(state.items.length - 2, 1)[0];
           else removed = state.items.pop();
           state.bottomSpacerHeight += estimateTurnHeight(removed);
         }
@@ -11821,12 +11836,14 @@ function singleSurfaceHtml(threadId) {
     }
     async function loadOlder() {
       if (state.restoring || state.loadingOlder || !state.hasOlder || !state.olderCursor) return;
-      const anchor = captureAnchor();
+      if (Date.now() - state.lastLoadAt.older < 320) return;
       const generation = ++state.loadGeneration.older;
+      state.lastLoadAt.older = Date.now();
       state.loadingOlder = true;
       setLoadingUi();
       const result = await api('/api/threads/' + encodeURIComponent(threadId) + '/window?direction=older&cursor=' + encodeURIComponent(state.olderCursor) + '&limit=${canonicalWindowDefaultLimit}');
       if (generation !== state.loadGeneration.older) return;
+      const anchor = captureAnchor();
       const incoming = result.items || [];
       const existing = new Set(state.items.map(turnCanonicalKey));
       reduceSpacer('top', incoming);
@@ -11834,17 +11851,19 @@ function singleSurfaceHtml(threadId) {
       normalizeWindowItems();
       updateWindowCursors(result.page);
       mergeSubmissionStates(result.status?.submissions);
-      pruneWindow(anchor?.id, 'tail');
+      pruneWindow(anchor, 'tail');
       state.loadingOlder = false;
       renderTurns(anchor);
     }
     async function loadNewer() {
       if (state.restoring || state.loadingNewer || !state.hasNewer || !state.newerCursor) return;
-      const anchor = captureAnchor();
+      if (Date.now() - state.lastLoadAt.newer < 320) return;
       const generation = ++state.loadGeneration.newer;
+      state.lastLoadAt.newer = Date.now();
       state.loadingNewer = true;
       const result = await api('/api/threads/' + encodeURIComponent(threadId) + '/window?direction=newer&cursor=' + encodeURIComponent(state.newerCursor) + '&limit=${canonicalWindowDefaultLimit}');
       if (generation !== state.loadGeneration.newer) return;
+      const anchor = captureAnchor();
       const incoming = result.items || [];
       const existing = new Set(state.items.map(turnCanonicalKey));
       const filtered = incoming.filter((item) => !existing.has(turnCanonicalKey(item)));
@@ -11858,7 +11877,7 @@ function singleSurfaceHtml(threadId) {
         state.newerCursor = null;
       }
       mergeSubmissionStates(result.status?.submissions);
-      pruneWindow(anchor?.id, 'head');
+      pruneWindow(anchor, 'head');
       state.loadingNewer = false;
       renderTurns(anchor);
     }
@@ -11906,7 +11925,7 @@ function singleSurfaceHtml(threadId) {
           const latestSubmissionChanged = mergeSubmissionStates(latest.status?.submissions);
           if (changed || submissionChanged || latestSubmissionChanged) {
             const anchor = state.tailAttached ? null : captureAnchor();
-            pruneWindow(anchor?.id, state.tailAttached ? 'head' : 'tail');
+            pruneWindow(anchor, state.tailAttached ? 'head' : 'tail');
             renderTurns(anchor);
             if (state.tailAttached) requestAnimationFrame(() => { els.transcript.scrollTop = els.transcript.scrollHeight; });
           }
@@ -11952,7 +11971,7 @@ function singleSurfaceHtml(threadId) {
       }
     }
     function maybeLoadAroundViewport() {
-      if (state.restoring) return;
+      if (state.restoring || state.loadingOlder || state.loadingNewer || state.loadingLatest || Date.now() < state.muteScrollUntil) return;
       const notEnoughContent = els.transcript.scrollHeight <= els.transcript.clientHeight + 160;
       const prefetchDistance = Math.max(520, Math.min(1600, els.transcript.clientHeight * 1.6));
       const topDistance = Math.max(0, els.transcript.scrollTop);
@@ -11976,9 +11995,20 @@ function singleSurfaceHtml(threadId) {
       });
     }
     els.loadOlder.addEventListener('click', loadOlder);
-    els.transcript.addEventListener('scroll', () => { markUserScrollIntent(); queueViewportCheck(); }, { passive: true });
-    els.transcript.addEventListener('wheel', () => setTimeout(queueViewportCheck, 0), { passive: true });
-    els.transcript.addEventListener('touchmove', () => setTimeout(queueViewportCheck, 0), { passive: true });
+    els.transcript.addEventListener('scroll', () => {
+      if (state.restoring || Date.now() < state.muteScrollUntil) {
+        state.tailAttached = atTail();
+        return;
+      }
+      markUserScrollIntent();
+      queueViewportCheck();
+    }, { passive: true });
+    els.transcript.addEventListener('wheel', () => setTimeout(() => {
+      if (!state.restoring && Date.now() >= state.muteScrollUntil) queueViewportCheck();
+    }, 0), { passive: true });
+    els.transcript.addEventListener('touchmove', () => setTimeout(() => {
+      if (!state.restoring && Date.now() >= state.muteScrollUntil) queueViewportCheck();
+    }, 0), { passive: true });
     els.refreshThreads.addEventListener('click', loadThreads);
     els.forkThread.addEventListener('click', async () => {
       if (els.forkThread.disabled) return;
@@ -12103,7 +12133,7 @@ function singleSurfaceHtml(threadId) {
       }
       if (changed) {
         const anchor = state.tailAttached ? null : captureAnchor();
-        pruneWindow(anchor?.id, state.tailAttached ? 'head' : 'tail');
+        pruneWindow(anchor, state.tailAttached ? 'head' : 'tail');
         renderTurns(anchor);
         if (state.tailAttached) requestAnimationFrame(() => { els.transcript.scrollTop = els.transcript.scrollHeight; });
       }
