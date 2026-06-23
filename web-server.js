@@ -11463,13 +11463,17 @@ function singleSurfaceHtml(threadId) {
         scheduleTailWatch();
       }, 250);
     }
+    function anchorTargetY() {
+      const rect = els.transcript.getBoundingClientRect();
+      return rect.top + Math.max(120, Math.min(rect.height - 120, rect.height * 0.48));
+    }
     function captureAnchor() {
-      const containerTop = els.transcript.getBoundingClientRect().top;
+      const targetY = anchorTargetY();
       const nodes = Array.from(els.turns.querySelectorAll('[data-turn-id]'));
-      const node = nodes.find((item) => item.getBoundingClientRect().bottom > containerTop + 24);
+      const node = nodes.find((item) => item.getBoundingClientRect().bottom > targetY) || nodes.at(-1);
       if (!node) return null;
       const rect = node.getBoundingClientRect();
-      return { id: node.dataset.turnId, offset: containerTop + 24 - rect.top };
+      return { id: node.dataset.turnId, offset: targetY - rect.top };
     }
     function restoreAnchor(anchor, attempts) {
       if (!anchor) return;
@@ -11478,8 +11482,7 @@ function singleSurfaceHtml(threadId) {
       const apply = () => {
         const node = els.turns.querySelector('[data-turn-id="' + CSS.escape(anchor.id) + '"]');
         if (node) {
-          const containerTop = els.transcript.getBoundingClientRect().top;
-          const wantedTop = containerTop + 24 - anchor.offset;
+          const wantedTop = anchorTargetY() - anchor.offset;
           const delta = node.getBoundingClientRect().top - wantedTop;
           if (Math.abs(delta) > 0.5) els.transcript.scrollTop += delta;
         }
@@ -11951,16 +11954,19 @@ function singleSurfaceHtml(threadId) {
     function maybeLoadAroundViewport() {
       if (state.restoring) return;
       const notEnoughContent = els.transcript.scrollHeight <= els.transcript.clientHeight + 160;
+      const prefetchDistance = Math.max(520, Math.min(1600, els.transcript.clientHeight * 1.6));
+      const topDistance = Math.max(0, els.transcript.scrollTop);
+      const bottomDistance = Math.max(0, els.transcript.scrollHeight - els.transcript.clientHeight - els.transcript.scrollTop);
       if (notEnoughContent && state.hasOlder && state.olderCursor && !state.loadingOlder && state.autoFillCount < 6) {
         state.autoFillCount += 1;
         void loadOlder();
         return;
       }
-      if (els.transcript.scrollTop < 80) {
+      if (topDistance < prefetchDistance) {
         void loadOlder();
         return;
       }
-      if (els.transcript.scrollHeight - els.transcript.clientHeight - els.transcript.scrollTop < 120) void loadNewer();
+      if (bottomDistance < prefetchDistance) void loadNewer();
     }
     function queueViewportCheck() {
       if (state.viewportCheckRaf) return;
