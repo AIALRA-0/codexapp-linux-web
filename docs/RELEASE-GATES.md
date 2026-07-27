@@ -1,0 +1,25 @@
+# Release gates
+
+| Gate           | Pass condition                                                                                                                                 |
+| -------------- | ---------------------------------------------------------------------------------------------------------------------------------------------- |
+| Provenance     | Official signature/notarization, version, ASAR integrity, and SHA-256 recorded                                                                 |
+| Zero UI drift  | Every official renderer source byte equals the signed qualification manifest; only the audited runtime bootstrap tag may differ in served HTML |
+| Contract       | Every observed preload and host method is implemented or explicitly classified unavailable                                                     |
+| App-server     | Client and server versions match; generated schema diff is reviewed and clean                                                                  |
+| Core           | New/open/list/search/archive/resume threads and streamed turns pass                                                                            |
+| Persistence    | Forced browser/process/server restarts lose no committed turn                                                                                  |
+| History        | 10k-thread synthetic list is paginated and bounded; no eager full-history load                                                                 |
+| Reconnect      | Sequence/ack/replay produces no duplicates or gaps                                                                                             |
+| Isolation      | Cross-user filesystem, process, token, socket, and thread access tests fail closed                                                             |
+| Auth           | Authentik identity and OpenAI account state remain separate and auditable                                                                      |
+| Tools          | approvals, shell, Git, MCP, skills, attachments, images, and diffs pass                                                                        |
+| Desktop parity | Every feature in the version-specific matrix has evidence                                                                                      |
+| Performance    | startup, list, open, send, stream, and resume budgets pass at p95                                                                              |
+| Security       | CSP, origin, CSRF, websocket ticket, rate, audit, and dependency checks pass                                                                   |
+| Recovery       | backup restore, app-server crash, disk pressure, interrupted upgrade pass                                                                      |
+| Rollback       | previous version restores within the runbook target without state conversion loss                                                              |
+| Visible UI     | real Chrome renders nonblank official pixels and receives bridge-ready through the same proxy boundary used by production                      |
+
+Production promotion requires all mandatory gates. Unsupported native-only features
+are release blockers unless OpenAI provides a supported browser/host route or the
+product owner explicitly changes the parity requirement.

@@ -1,0 +1,5 @@
+/srv/aialra/apps/codexapp
+/srv/aialra/apps/codexapp/state/browser-workspaces
+/srv/aialra/apps/codexapp/state/browser-workspaces/2026-06-10-opencodexapp
+/srv/aialra/apps/open-codex-app-web-gateway
+/srv/aialra/state/opencodexapp-codex-home
