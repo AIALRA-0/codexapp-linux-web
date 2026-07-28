@@ -715,7 +715,10 @@ export class UserRuntime extends EventEmitter {
       const parsed = jsonRpcResponseSchema.parse(response);
       const metadata = this.#rendererRequests.get(parsed.id);
       this.#rendererRequests.delete(parsed.id);
-      if (parsed.error !== undefined) {
+      if (
+        parsed.error !== undefined &&
+        !isExpectedAppServerResponseError(metadata?.method, parsed.error.code, parsed.error.message)
+      ) {
         this.emit('capability-error', {
           requestType: 'app-server-response',
           method: metadata?.method ?? 'unknown',
@@ -1670,9 +1673,33 @@ export function officialWebStaticDesktopResponse(
       return { connectors: [] };
     case 'email-domain-mail-provider':
       return { provider: 'other' };
+    case 'ambient-suggestions':
+      return {
+        file: {
+          currentSuggestionIds: [],
+          suggestions: [],
+        },
+      };
+    case 'fast-mode-rollout-metrics':
+      return {
+        estimatedSavedMs: 0,
+        rolloutCountWithCompletedTurns: 0,
+      };
     default:
       return undefined;
   }
+}
+
+export function isExpectedAppServerResponseError(
+  method: string | undefined,
+  code: number,
+  message: string,
+): boolean {
+  return (
+    method === 'fs/readFile' &&
+    code === -32_603 &&
+    message.includes('No such file or directory (os error 2)')
+  );
 }
 
 export function codexVersionFromOutput(stdout: string, stderr: string): string | null {

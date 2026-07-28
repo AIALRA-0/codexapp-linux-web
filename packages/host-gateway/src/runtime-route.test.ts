@@ -3,6 +3,7 @@ import { describe, expect, it } from 'vitest';
 import {
   codexVersionFromOutput,
   initialRouteForAuthMethod,
+  isExpectedAppServerResponseError,
   officialWebStaticDesktopResponse,
 } from './runtime.js';
 
@@ -16,6 +17,22 @@ describe('official renderer initial route selection', () => {
   it('opens the official primary shell for every app-server auth method', () => {
     expect(initialRouteForAuthMethod('chatgpt')).toBe('/');
     expect(initialRouteForAuthMethod('apikey')).toBe('/');
+  });
+});
+
+describe('expected official app-server responses', () => {
+  it('does not classify an ordinary missing optional file as a host capability failure', () => {
+    expect(
+      isExpectedAppServerResponseError(
+        'fs/readFile',
+        -32_603,
+        'No such file or directory (os error 2)',
+      ),
+    ).toBe(true);
+    expect(isExpectedAppServerResponseError('fs/readFile', -32_603, 'Permission denied')).toBe(
+      false,
+    );
+    expect(isExpectedAppServerResponseError('app/list', -32_603, '403 Forbidden')).toBe(false);
   });
 });
 
@@ -42,6 +59,13 @@ describe('official web-only desktop fallbacks', () => {
     });
     expect(officialWebStaticDesktopResponse('email-domain-mail-provider')).toEqual({
       provider: 'other',
+    });
+    expect(officialWebStaticDesktopResponse('ambient-suggestions')).toEqual({
+      file: { currentSuggestionIds: [], suggestions: [] },
+    });
+    expect(officialWebStaticDesktopResponse('fast-mode-rollout-metrics')).toEqual({
+      estimatedSavedMs: 0,
+      rolloutCountWithCompletedTurns: 0,
     });
     expect(officialWebStaticDesktopResponse('unknown-method')).toBeUndefined();
   });

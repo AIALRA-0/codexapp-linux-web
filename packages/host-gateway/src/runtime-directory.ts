@@ -63,7 +63,15 @@ async function resolveRuntimeDirectoryCandidate(
 
   const unresolvedRoot = resolve(runtime.root);
   const root = await realpath(unresolvedRoot);
-  const candidate = resolve(isAbsolute(input) ? input : join(runtime.workspaceRoot, input));
+  const expandedInput =
+    input === '~'
+      ? runtime.workspaceRoot
+      : input.startsWith(`~${sep}`)
+        ? join(runtime.workspaceRoot, input.slice(2))
+        : input;
+  const candidate = resolve(
+    isAbsolute(expandedInput) ? expandedInput : join(runtime.workspaceRoot, expandedInput),
+  );
   const candidateBase = isPathWithin(unresolvedRoot, candidate)
     ? unresolvedRoot
     : isPathWithin(root, candidate)
