@@ -14,7 +14,7 @@ if (acceptedMarker === undefined || declinedMarker === undefined) {
 const responses = [
   shellCommandResponse(
     'approval-accept-command',
-    `printf '%s\\n' accepted > ${shellQuote(acceptedMarker)}`,
+    `printf '%s\\n' accepted | tee ${shellQuote(acceptedMarker)}`,
   ),
   assistantResponse('approval-accepted-message', 'approved command completed'),
   shellCommandResponse(

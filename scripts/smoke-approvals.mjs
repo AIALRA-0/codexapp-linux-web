@@ -82,8 +82,12 @@ try {
   ) {
     throw new Error(`approval fixture sequence changed: ${JSON.stringify(fixtureState)}`);
   }
-  const requestBodies = JSON.stringify(fixtureState.requests);
-  if (!requestBodies.includes('accepted') || !requestBodies.includes('rejected by user')) {
+  const approvedOutputReturned = hasFunctionCallOutput(fixtureState.requests[1], 'accepted');
+  const declinedOutputReturned = hasFunctionCallOutput(
+    fixtureState.requests[3],
+    'rejected by user',
+  );
+  if (!approvedOutputReturned || !declinedOutputReturned) {
     throw new Error('approved output or declined result was not returned to the model');
   }
 
@@ -173,4 +177,18 @@ async function expectMissing(path) {
 function requiredString(value, label) {
   if (typeof value !== 'string' || value.length === 0) throw new Error(`${label} is missing`);
   return value;
+}
+
+function hasFunctionCallOutput(value, expectedText) {
+  if (Array.isArray(value)) {
+    return value.some((entry) => hasFunctionCallOutput(entry, expectedText));
+  }
+  if (value === null || typeof value !== 'object') return false;
+  if (
+    value.type === 'function_call_output' &&
+    JSON.stringify(value.output).includes(expectedText)
+  ) {
+    return true;
+  }
+  return Object.values(value).some((entry) => hasFunctionCallOutput(entry, expectedText));
 }
