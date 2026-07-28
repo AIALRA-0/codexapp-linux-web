@@ -591,6 +591,11 @@ export class UserRuntime extends EventEmitter {
         this.automationController.setHeartbeatRendererState(message);
         return undefined;
       default:
+        this.emit('capability-error', {
+          requestType: 'renderer-message',
+          type: message.type,
+          error: `${message.type} is not implemented`,
+        });
         throw new CapabilityUnavailableError(message.type);
     }
   }
@@ -656,6 +661,14 @@ export class UserRuntime extends EventEmitter {
       const parsed = jsonRpcResponseSchema.parse(response);
       const metadata = this.#rendererRequests.get(parsed.id);
       this.#rendererRequests.delete(parsed.id);
+      if (parsed.error !== undefined) {
+        this.emit('capability-error', {
+          requestType: 'app-server-response',
+          method: metadata?.method ?? 'unknown',
+          code: parsed.error.code,
+          error: parsed.error.message,
+        });
+      }
       this.emit('view-message', {
         type: 'mcp-response',
         hostId: 'local',
@@ -832,6 +845,11 @@ export class UserRuntime extends EventEmitter {
       case 'fast-mode-rollout-metrics':
         throw new CapabilityUnavailableError(message.method);
       default:
+        this.emit('capability-error', {
+          requestType: 'bridge-request',
+          method: message.method,
+          error: `${message.method} is not implemented`,
+        });
         throw new CapabilityUnavailableError(message.method);
     }
   }
@@ -981,6 +999,9 @@ export class UserRuntime extends EventEmitter {
       case 'set-global-state':
         if (typeof params.key !== 'string') throw new Error('global state key is required');
         await this.#state.set('globalState', params.key, params.value);
+        if (params.key === 'local-projects') {
+          await this.#pruneRemovedLocalProjectMetadata(params.value);
+        }
         return { success: true };
       case 'is-copilot-api-available':
         return { available: false };
@@ -1179,7 +1200,26 @@ export class UserRuntime extends EventEmitter {
         };
       }
       default:
+        this.emit('capability-error', {
+          requestType: 'desktop-fetch',
+          method,
+          error: `vscode://codex/${method} is not implemented`,
+        });
         throw new CapabilityUnavailableError(`vscode://codex/${method}`);
+    }
+  }
+
+  async #pruneRemovedLocalProjectMetadata(localProjectsValue: unknown): Promise<void> {
+    const pruned = pruneRemovedLocalProjectMetadata(
+      localProjectsValue,
+      this.#state.get('globalState', 'thread-project-assignments'),
+      this.#state.get('globalState', 'project-appearances'),
+    );
+    if (pruned.assignmentsChanged) {
+      await this.#state.set('globalState', 'thread-project-assignments', pruned.assignments);
+    }
+    if (pruned.appearancesChanged) {
+      await this.#state.set('globalState', 'project-appearances', pruned.appearances);
     }
   }
 
@@ -1375,6 +1415,51 @@ function localProjectRecords(value: unknown): Record<string, Record<string, unkn
         entry[1] !== null && typeof entry[1] === 'object' && !Array.isArray(entry[1]),
     ),
   );
+}
+
+export function pruneRemovedLocalProjectMetadata(
+  localProjectsValue: unknown,
+  assignmentsValue: unknown,
+  appearancesValue: unknown,
+): {
+  assignments: Record<string, unknown>;
+  appearances: Record<string, unknown>;
+  assignmentsChanged: boolean;
+  appearancesChanged: boolean;
+} {
+  const activeProjectIds = new Set(Object.keys(localProjectRecords(localProjectsValue)));
+  const assignments =
+    assignmentsValue !== null &&
+    typeof assignmentsValue === 'object' &&
+    !Array.isArray(assignmentsValue)
+      ? (assignmentsValue as Record<string, unknown>)
+      : {};
+  const appearances =
+    appearancesValue !== null &&
+    typeof appearancesValue === 'object' &&
+    !Array.isArray(appearancesValue)
+      ? (appearancesValue as Record<string, unknown>)
+      : {};
+  const nextAssignments = Object.fromEntries(
+    Object.entries(assignments).filter(([, value]) => {
+      if (value === null || typeof value !== 'object' || Array.isArray(value)) return true;
+      const assignment = value as Record<string, unknown>;
+      return (
+        assignment.projectKind !== 'local' ||
+        typeof assignment.projectId !== 'string' ||
+        activeProjectIds.has(assignment.projectId)
+      );
+    }),
+  );
+  const nextAppearances = Object.fromEntries(
+    Object.entries(appearances).filter(([projectId]) => activeProjectIds.has(projectId)),
+  );
+  return {
+    assignments: nextAssignments,
+    appearances: nextAppearances,
+    assignmentsChanged: Object.keys(nextAssignments).length !== Object.keys(assignments).length,
+    appearancesChanged: Object.keys(nextAppearances).length !== Object.keys(appearances).length,
+  };
 }
 
 function localProjectRootPaths(project: Record<string, unknown> | undefined): string[] {

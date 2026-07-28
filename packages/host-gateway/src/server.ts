@@ -418,12 +418,9 @@ export async function createGateway(config: GatewayConfig): Promise<FastifyInsta
                       }
                     }
                   : undefined;
-              const capabilityErrorListener =
-                process.env.NODE_ENV === 'development'
-                  ? (details: unknown) => {
-                      app.log.warn({ details }, 'renderer capability request failed');
-                    }
-                  : undefined;
+              const capabilityErrorListener = (details: unknown) => {
+                app.log.warn({ details }, 'renderer capability request failed');
+              };
               if (appHostDiagnosticListener !== undefined) {
                 runtime.on('app-host-send', appHostDiagnosticListener);
               }
