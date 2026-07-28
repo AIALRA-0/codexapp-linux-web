@@ -85,8 +85,19 @@ chmod 0700 "$runtime_root"
 
 browser_executable="$(read_environment_value BROWSER_EXECUTABLE)"
 renderer_version="$(read_environment_value EXPECTED_RENDERER_VERSION)"
-if [[ -z "$browser_executable" || -z "$renderer_version" ]]; then
-  echo "browser executable or renderer version is missing from the service environment" >&2
+proxy_secret_file="$(read_environment_value AUTH_PROXY_SECRET_FILE)"
+if [[ -z "$browser_executable" || -z "$renderer_version" || -z "$proxy_secret_file" ]]; then
+  echo "browser executable, renderer version, or proxy proof file is missing" >&2
+  exit 1
+fi
+if [[ ! -f "$proxy_secret_file" || -L "$proxy_secret_file" ]]; then
+  echo "proxy proof file is missing or symbolic" >&2
+  exit 1
+fi
+proxy_secret=""
+IFS= read -r proxy_secret <"$proxy_secret_file" || true
+if [[ -z "$proxy_secret" ]]; then
+  echo "proxy proof is empty" >&2
   exit 1
 fi
 
@@ -140,6 +151,14 @@ done
     SMOKE_RENDERER_VERSION="$renderer_version" \
     SMOKE_SCREENSHOT_PATH="$screenshot_path" \
     npm run smoke:official-ui
+  SMOKE_BASE_URL="http://127.0.0.1:$app_port" \
+    SMOKE_PUBLIC_ORIGIN="http://127.0.0.1:$proxy_port" \
+    SMOKE_PROXY_SECRET="$proxy_secret" \
+    npm run smoke:auth-isolation
+  SMOKE_BASE_URL="http://127.0.0.1:$app_port" \
+    SMOKE_PUBLIC_ORIGIN="http://127.0.0.1:$proxy_port" \
+    SMOKE_PROXY_SECRET="$proxy_secret" \
+    npm run smoke:task-start
 )
 
-printf '{"ok":true,"isolated":true,"proxyBoundary":true,"cleanup":"armed"}\n'
+printf '{"ok":true,"isolated":true,"proxyBoundary":true,"authIsolation":true,"taskStart":true,"cleanup":"armed"}\n'
