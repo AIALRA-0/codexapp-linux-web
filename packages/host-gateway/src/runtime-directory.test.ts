@@ -4,7 +4,7 @@ import { join } from 'node:path';
 
 import { afterEach, describe, expect, it } from 'vitest';
 
-import { ensureRuntimeDirectory } from './runtime-directory.js';
+import { ensureRuntimeDirectory, resolveRuntimeDirectory } from './runtime-directory.js';
 
 const temporaryRoots: string[] = [];
 
@@ -41,6 +41,16 @@ describe('official ensure-directory adapter', () => {
 
     await expect(realpath(target)).resolves.toBe(
       join(await realpath(runtime.root), 'codex-home/worktrees'),
+    );
+  });
+
+  it('resolves an existing directory for official host operations', async () => {
+    const runtime = await createRuntimeScope();
+    const target = join(runtime.workspaceRoot, 'project');
+    await mkdir(target);
+
+    await expect(resolveRuntimeDirectory(runtime, 'local', target)).resolves.toBe(
+      await realpath(target),
     );
   });
 

@@ -24,7 +24,7 @@ import { buildOfficialDeveloperInstructions } from './official-developer-instruc
 import { OfficialDesktopState } from './official-desktop-state.js';
 import { OfficialGithubService, OfficialGitWorker } from './official-git-worker.js';
 import { RequestUserInputAutoResolution } from './request-user-input-auto-resolution.js';
-import { ensureRuntimeDirectory } from './runtime-directory.js';
+import { ensureRuntimeDirectory, resolveRuntimeDirectory } from './runtime-directory.js';
 import { DurableStateStore } from './state.js';
 import { assertStorageAvailableForMethod } from './storage.js';
 import { TerminalManager } from './terminal.js';
@@ -1072,6 +1072,40 @@ export class UserRuntime extends EventEmitter {
       case 'ensure-directory':
         await ensureRuntimeDirectory(this, params.hostId, params.path);
         return {};
+      case 'git-origins': {
+        const requestedDirs =
+          params.dirs === undefined || (Array.isArray(params.dirs) && params.dirs.length === 0)
+            ? [this.workspaceRoot]
+            : params.dirs;
+        if (
+          !Array.isArray(requestedDirs) ||
+          requestedDirs.length > 1_000 ||
+          requestedDirs.some((path) => typeof path !== 'string')
+        ) {
+          throw new Error('Git origin directories are invalid');
+        }
+        const dirs = await Promise.all(
+          requestedDirs.map(async (path) =>
+            resolveRuntimeDirectory(this, params.hostId ?? 'local', path),
+          ),
+        );
+        const response = await this.#requireGitWorker().request('git-origins', {
+          dirs,
+          operationSource: 'apphost_git_origins',
+        });
+        if (
+          response === null ||
+          typeof response !== 'object' ||
+          Array.isArray(response) ||
+          !Array.isArray((response as { origins?: unknown }).origins)
+        ) {
+          throw new Error('Official Git origins response is invalid');
+        }
+        return {
+          origins: (response as { origins: unknown[] }).origins,
+          homeDir: this.workspaceRoot,
+        };
+      }
       case 'mcp-codex-config':
         // The official desktop builder returns null when no qualified
         // Browser/Computer Use node_repl runtime is available. A null

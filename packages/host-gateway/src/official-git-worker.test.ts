@@ -115,6 +115,11 @@ describeQualified('official Git worker runtime', () => {
     await writeFile(join(repository, 'qualification.txt'), 'official worktree qualification\n');
     await execFileAsync('git', ['add', 'qualification.txt'], { cwd: repository });
     await execFileAsync('git', ['commit', '-m', 'qualification'], { cwd: repository });
+    await execFileAsync(
+      'git',
+      ['remote', 'add', 'origin', 'https://example.invalid/qualification.git'],
+      { cwd: repository },
+    );
     const canonicalRepository = await realpath(repository);
 
     const worker = new OfficialGitWorker({
@@ -141,6 +146,20 @@ describeQualified('official Git worker runtime', () => {
         operationSource: 'qualification',
       }),
     ).resolves.toEqual({ branch: 'main' });
+    await expect(
+      worker.request('git-origins', {
+        dirs: [repository],
+        operationSource: 'qualification',
+      }),
+    ).resolves.toMatchObject({
+      origins: [
+        {
+          dir: repository,
+          root: canonicalRepository,
+          originUrl: 'https://example.invalid/qualification.git',
+        },
+      ],
+    });
 
     const created = (await worker.request(
       'create-worktree',
