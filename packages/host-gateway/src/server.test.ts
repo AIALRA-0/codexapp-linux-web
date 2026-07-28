@@ -5,11 +5,33 @@ import { join } from 'node:path';
 
 import {
   countIdentitySessions,
+  findMissingBrowserBridgeImports,
   officialInitialRouteLocation,
   resolveBrowserFileAsset,
   shouldServeRendererIndex,
   terminateWebsocketClients,
 } from './server.js';
+
+describe('browser bridge module boundary', () => {
+  it('fails closed when a local module import is not served', () => {
+    expect(
+      findMissingBrowserBridgeImports(
+        new Map([
+          ['index.js', "import { pick } from './browser-file-picker.js';"],
+          ['reconnect.js', 'export const reconnect = true;'],
+        ]),
+      ),
+    ).toEqual(['browser-file-picker.js']);
+    expect(
+      findMissingBrowserBridgeImports(
+        new Map([
+          ['index.js', "import { pick } from './browser-file-picker.js';"],
+          ['browser-file-picker.js', 'export const pick = true;'],
+        ]),
+      ),
+    ).toEqual([]);
+  });
+});
 
 describe('authenticated session capacity accounting', () => {
   it('counts immutable subjects instead of mutable or colliding display usernames', () => {

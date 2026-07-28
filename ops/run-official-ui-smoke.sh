@@ -103,6 +103,7 @@ systemd-run \
   "PORT=$app_port" \
   "PUBLIC_ORIGIN=http://127.0.0.1:$proxy_port" \
   "RUNTIME_ROOT=$runtime_root" \
+  "BROWSER_BRIDGE_SCRIPT=$application_root/packages/browser-bridge/dist/index.js" \
   /usr/bin/node "$application_root/apps/host/dist/main.js"
 
 for _attempt in $(seq 1 45); do

@@ -108,6 +108,7 @@ const CSP = [
 ].join('; ');
 
 const BROWSER_BRIDGE_MODULES = [
+  'browser-file-picker.js',
   'file-protocol.js',
   'index.js',
   'navigation.js',
@@ -144,6 +145,10 @@ export async function createGateway(config: GatewayConfig): Promise<FastifyInsta
       readFileSync(join(bridgeModuleRoot, filename)),
     ]),
   );
+  const missingBridgeImports = findMissingBrowserBridgeImports(bridgeModules);
+  if (missingBridgeImports.length > 0) {
+    throw new Error(`browser bridge imports are not served: ${missingBridgeImports.join(', ')}`);
+  }
   const bridgeHash = createHash('sha256');
   for (const [filename, source] of bridgeModules) {
     bridgeHash.update(filename).update('\0').update(source).update('\0');
@@ -634,6 +639,20 @@ export async function createGateway(config: GatewayConfig): Promise<FastifyInsta
     await runtimes.stopAll();
   });
   return app;
+}
+
+export function findMissingBrowserBridgeImports(
+  modules: ReadonlyMap<string, Buffer | string>,
+): string[] {
+  const missing = new Set<string>();
+  const localImport = /(?:from\s*|import\s*)['"]\.\/([A-Za-z0-9._-]+\.js)['"]/gu;
+  for (const source of modules.values()) {
+    for (const match of source.toString().matchAll(localImport)) {
+      const filename = match[1];
+      if (filename !== undefined && !modules.has(filename)) missing.add(filename);
+    }
+  }
+  return [...missing].sort();
 }
 
 export function countIdentitySessions(
