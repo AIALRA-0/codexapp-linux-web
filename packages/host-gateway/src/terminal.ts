@@ -21,6 +21,31 @@ export interface TerminalManagerOptions {
   username: string;
 }
 
+export function createTerminalEnvironment(
+  options: TerminalManagerOptions,
+  conversationTitle: string | undefined,
+): NodeJS.ProcessEnv {
+  const home = join(options.userRoot, 'home');
+  const temporary = join(options.userRoot, 'tmp');
+  const lcAll = process.env.LC_ALL;
+  return {
+    HOME: home,
+    CODEX_HOME: options.codexHome,
+    PATH: process.env.PATH ?? '/usr/local/bin:/usr/bin:/bin',
+    LANG: process.env.LANG ?? 'C.UTF-8',
+    ...(lcAll === undefined || lcAll.length === 0 ? {} : { LC_ALL: lcAll }),
+    SHELL: resolveShellPath(),
+    TERM: 'xterm-256color',
+    COLORTERM: 'truecolor',
+    TMPDIR: temporary,
+    TMP: temporary,
+    TEMP: temporary,
+    USER: process.env.USER ?? options.username,
+    LOGNAME: process.env.LOGNAME ?? options.username,
+    ...(conversationTitle === undefined ? {} : { CODEX_APP_TITLE: conversationTitle }),
+  };
+}
+
 export type TerminalEvent =
   | { type: 'data'; sessionId: string; data: string }
   | { type: 'exit'; sessionId: string; code: number | null; signal: string | null }
@@ -329,24 +354,7 @@ export class TerminalManager {
   }
 
   #terminalEnvironment(conversationTitle: string | undefined): NodeJS.ProcessEnv {
-    const home = join(this.options.userRoot, 'home');
-    const temporary = join(this.options.userRoot, 'tmp');
-    return {
-      HOME: home,
-      CODEX_HOME: this.options.codexHome,
-      PATH: process.env.PATH ?? '/usr/local/bin:/usr/bin:/bin',
-      LANG: process.env.LANG ?? 'C.UTF-8',
-      LC_ALL: process.env.LC_ALL,
-      SHELL: resolveShellPath(),
-      TERM: 'xterm-256color',
-      COLORTERM: 'truecolor',
-      TMPDIR: temporary,
-      TMP: temporary,
-      TEMP: temporary,
-      USER: process.env.USER ?? this.options.username,
-      LOGNAME: process.env.LOGNAME ?? this.options.username,
-      ...(conversationTitle === undefined ? {} : { CODEX_APP_TITLE: conversationTitle }),
-    };
+    return createTerminalEnvironment(this.options, conversationTitle);
   }
 
   #prepareDirectories(): void {

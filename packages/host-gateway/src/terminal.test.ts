@@ -4,7 +4,7 @@ import { join } from 'node:path';
 
 import { afterEach, describe, expect, it } from 'vitest';
 
-import { TerminalManager, type TerminalEvent } from './terminal.js';
+import { createTerminalEnvironment, TerminalManager, type TerminalEvent } from './terminal.js';
 
 const temporaryRoots: string[] = [];
 
@@ -184,6 +184,20 @@ describe('TerminalManager', () => {
     } finally {
       if (originalShell === undefined) delete process.env.SHELL;
       else process.env.SHELL = originalShell;
+    }
+  });
+
+  it('does not serialize an unset locale override as the string undefined', async () => {
+    const originalLcAll = process.env.LC_ALL;
+    delete process.env.LC_ALL;
+    try {
+      const fixture = await createFixture();
+      const environment = createTerminalEnvironment(fixture.manager.options, undefined);
+      expect(environment.LC_ALL).toBeUndefined();
+      expect(Object.hasOwn(environment, 'LC_ALL')).toBe(false);
+    } finally {
+      if (originalLcAll === undefined) delete process.env.LC_ALL;
+      else process.env.LC_ALL = originalLcAll;
     }
   });
 });
