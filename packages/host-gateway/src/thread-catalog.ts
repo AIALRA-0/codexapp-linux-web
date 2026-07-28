@@ -51,7 +51,6 @@ interface PersistedCatalog {
 interface SortedCatalog {
   revision: number;
   entries: ThreadCatalogEntry[];
-  indexByThreadId: Map<string, number>;
 }
 
 interface ThreadListResponse {
@@ -244,10 +243,6 @@ export class OfficialThreadCatalog {
     }
 
     const sorted = this.#sortedCatalog(request.sortKey);
-    const entries =
-      request.filter === null
-        ? sorted.entries
-        : sorted.entries.filter((entry) => entryMatchesFilter(entry, request.filter));
     let startIndex = 0;
     if (request.cursor !== null) {
       const cursor = parseCursor(request.cursor);
@@ -260,22 +255,24 @@ export class OfficialThreadCatalog {
       if (cursor.sortKey !== request.sortKey) {
         throw new Error('Thread catalog cursor uses a different sort order');
       }
-      const exactIndex =
-        request.filter === null
-          ? (sorted.indexByThreadId.get(cursor.threadId) ?? -1)
-          : entries.findIndex((entry) => entry.threadId === cursor.threadId);
-      startIndex =
-        exactIndex >= 0
-          ? exactIndex + 1
-          : entries.findIndex((entry) => compareEntryToCursor(entry, cursor) > 0);
-      if (startIndex < 0) startIndex = entries.length;
+      startIndex = findFirstEntryAfterCursor(sorted.entries, cursor);
     }
-    const page = entries.slice(startIndex, startIndex + request.limit);
+    const page: ThreadCatalogEntry[] = [];
+    let hasMore = false;
+    for (let index = startIndex; index < sorted.entries.length; index += 1) {
+      const entry = sorted.entries[index];
+      if (entry === undefined || !entryMatchesFilter(entry, request.filter)) continue;
+      if (page.length === request.limit) {
+        hasMore = true;
+        break;
+      }
+      page.push(entry);
+    }
     const last = page.at(-1);
     return {
       entries: page,
       nextCursor:
-        last === undefined || startIndex + page.length >= entries.length
+        last === undefined || !hasMore
           ? null
           : encodeCursor({
               version: CURSOR_VERSION,
@@ -321,7 +318,7 @@ export class OfficialThreadCatalog {
 
   subscribe(listener: (update: unknown) => void): () => void {
     this.#listeners.add(listener);
-    listener({ type: 'snapshot', snapshot: this.readSnapshot() });
+    listener({ type: 'snapshot', snapshot: this.readBootstrapSnapshot() });
     return () => this.#listeners.delete(listener);
   }
 
@@ -454,7 +451,7 @@ export class OfficialThreadCatalog {
     };
     await this.#persist(persisted);
     if (publish) {
-      const update = { type: 'snapshot', snapshot: this.readSnapshot() };
+      const update = { type: 'snapshot', snapshot: this.readBootstrapSnapshot() };
       for (const listener of this.#listeners) listener(update);
       this.#publishStatus();
     }
@@ -468,7 +465,6 @@ export class OfficialThreadCatalog {
     const sorted = {
       revision: this.#revision,
       entries,
-      indexByThreadId: new Map(entries.map((entry, index) => [entry.threadId, index])),
     };
     this.#sortedCatalogs.set(sortKey, sorted);
     return sorted;
@@ -711,6 +707,21 @@ function compareEntryToCursor(entry: ThreadCatalogEntry, cursor: CatalogCursor):
   if (primary !== cursorPrimary) return cursorPrimary - primary;
   if (secondary !== cursorSecondary) return cursorSecondary - secondary;
   return entry.threadId.localeCompare(cursor.threadId);
+}
+
+function findFirstEntryAfterCursor(entries: ThreadCatalogEntry[], cursor: CatalogCursor): number {
+  let lower = 0;
+  let upper = entries.length;
+  while (lower < upper) {
+    const middle = lower + Math.floor((upper - lower) / 2);
+    const entry = entries[middle];
+    if (entry !== undefined && compareEntryToCursor(entry, cursor) <= 0) {
+      lower = middle + 1;
+    } else {
+      upper = middle;
+    }
+  }
+  return lower;
 }
 
 function fingerprintFilter(filter: CatalogFilter | null): string {

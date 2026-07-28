@@ -172,9 +172,13 @@ describe('OfficialThreadCatalog', () => {
     ).toMatchObject({ entries: [{ threadId: 'beta' }, { threadId: 'alpha' }] });
   });
 
-  it('keeps a 10k-thread bootstrap bounded and serves every cached page quickly', () => {
+  it('keeps 10k-thread bootstrap, subscriptions, and filtered pagination bounded', () => {
     const entries = Array.from({ length: 10_000 }, (_, index) =>
-      entry(`thread-${String(index).padStart(5, '0')}`, index),
+      entry(
+        `thread-${String(index).padStart(5, '0')}`,
+        index,
+        index % 2 === 0 ? '/workspace/even' : '/workspace/odd',
+      ),
     );
     const catalog = createCatalog({
       persisted: {
@@ -193,6 +197,10 @@ describe('OfficialThreadCatalog', () => {
     });
     expect(bootstrap.entries).toHaveLength(100);
     expect(Buffer.byteLength(JSON.stringify(bootstrap))).toBeLessThan(32 * 1024);
+    const updates: unknown[] = [];
+    catalog.subscribe((update) => updates.push(update));
+    expect(updates).toHaveLength(1);
+    expect(Buffer.byteLength(JSON.stringify(updates[0]))).toBeLessThan(32 * 1024);
 
     const startedAt = performance.now();
     let cursor: string | null = null;
@@ -204,6 +212,28 @@ describe('OfficialThreadCatalog', () => {
     } while (cursor !== null);
     expect(count).toBe(10_000);
     expect(performance.now() - startedAt).toBeLessThan(500);
+
+    const filteredStartedAt = performance.now();
+    cursor = null;
+    count = 0;
+    do {
+      const page = catalog.readPage(
+        pageRequest({
+          cursor,
+          filter: {
+            includeAll: false,
+            cwdValues: ['/workspace/even'],
+            cwdPrefixes: [],
+            includeThreadIds: [],
+            excludeThreadIds: [],
+          },
+        }),
+      );
+      count += (page.entries as unknown[]).length;
+      cursor = page.nextCursor as string | null;
+    } while (cursor !== null);
+    expect(count).toBe(5_000);
+    expect(performance.now() - filteredStartedAt).toBeLessThan(500);
   });
 
   it('removes archived and confirmed-missing entries without hiding transient failures', async () => {
