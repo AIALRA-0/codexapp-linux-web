@@ -7,6 +7,7 @@
 | Contract       | Every observed preload and host method is implemented or explicitly classified unavailable                                                     |
 | App-server     | Client and server versions match; generated schema diff is reviewed and clean                                                                  |
 | Core           | New/open/list/search/archive/resume threads and streamed turns pass                                                                            |
+| Task start     | Browser bridge performs workspace, directory, Git, MCP, developer-instruction, thread-start, turn-start, and thread-read chain                 |
 | Persistence    | Forced browser/process/server restarts lose no committed turn                                                                                  |
 | History        | 10k-thread synthetic list is paginated and bounded; no eager full-history load                                                                 |
 | Reconnect      | Sequence/ack/replay produces no duplicates or gaps                                                                                             |
