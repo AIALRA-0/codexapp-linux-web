@@ -19,7 +19,7 @@
 | Desktop parity | Every feature in the version-specific matrix has evidence                                                                                      |
 | Performance    | startup, list, open, send, stream, and resume budgets pass at p95                                                                              |
 | Security       | CSP, origin, CSRF, websocket ticket, rate, audit, and dependency checks pass                                                                   |
-| Recovery       | backup restore, app-server crash, disk pressure, interrupted upgrade pass                                                                      |
+| Recovery       | Isolated clean-shutdown archive/erase/restore recovers an exact committed turn; app-server crash, disk pressure, interrupted upgrade pass      |
 | Rollback       | previous version restores within the runbook target without state conversion loss                                                              |
 | Visible UI     | real Chrome renders nonblank official pixels and receives bridge-ready through the same proxy boundary used by production                      |
 

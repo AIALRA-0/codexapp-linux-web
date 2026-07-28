@@ -1,3 +1,4 @@
+import { randomUUID } from 'node:crypto';
 import { mkdir, mkdtemp, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -51,7 +52,7 @@ function listedThreadIds(value) {
   return rows.map((row) => row?.id ?? row?.threadId).filter((id) => typeof id === 'string');
 }
 
-async function waitForListedThread(client, threadId, archived) {
+async function waitForListedThread(client, threadId, { archived, expected = true, searchTerm }) {
   let lastIds = [];
   for (let attempt = 0; attempt < 50; attempt += 1) {
     const page = await client.request('thread/list', {
@@ -59,13 +60,14 @@ async function waitForListedThread(client, threadId, archived) {
       limit: 20,
       sortKey: 'updated_at',
       sortDirection: 'desc',
+      ...(searchTerm === undefined ? {} : { searchTerm }),
     });
     lastIds = listedThreadIds(page);
-    if (lastIds.includes(threadId)) return page;
+    if (lastIds.includes(threadId) === expected) return page;
     await new Promise((resolve) => setTimeout(resolve, 100));
   }
   throw new Error(
-    `${archived ? 'archived' : 'active'} thread list did not contain the lifecycle thread; observed ${String(lastIds.length)} thread ids`,
+    `${archived ? 'archived' : 'active'} thread list presence did not become ${String(expected)}; observed ${String(lastIds.length)} thread ids`,
   );
 }
 
@@ -124,14 +126,14 @@ try {
   }
 
   const listAt = performance.now();
-  const activeList = await waitForListedThread(firstClient, threadId, false);
+  const activeList = await waitForListedThread(firstClient, threadId, { archived: false });
   const listMs = performance.now() - listAt;
   if (!listedThreadIds(activeList).includes(threadId)) {
     throw new Error('new thread is absent from the active thread list');
   }
 
   await firstClient.request('thread/archive', { threadId });
-  const archivedList = await waitForListedThread(firstClient, threadId, true);
+  const archivedList = await waitForListedThread(firstClient, threadId, { archived: true });
   if (!listedThreadIds(archivedList).includes(threadId)) {
     throw new Error('archived thread is absent from the archive');
   }
@@ -147,10 +149,26 @@ try {
     throw new Error('thread did not survive an app-server restart');
   }
   await secondClient.request('thread/unarchive', { threadId });
-  const restoredList = await waitForListedThread(secondClient, threadId, false);
+  const restoredList = await waitForListedThread(secondClient, threadId, { archived: false });
   if (!listedThreadIds(restoredList).includes(threadId)) {
     throw new Error('unarchived thread did not return to the active list');
   }
+  const searchMarker = `CodexApp lifecycle ${randomUUID()}`;
+  await secondClient.request('thread/name/set', { threadId, name: searchMarker });
+  const searchAt = performance.now();
+  const searchList = await waitForListedThread(secondClient, threadId, {
+    archived: false,
+    searchTerm: searchMarker,
+  });
+  const searchMs = performance.now() - searchAt;
+  if (!listedThreadIds(searchList).includes(threadId)) {
+    throw new Error('named thread was absent from exact history search');
+  }
+  await secondClient.request('thread/delete', { threadId });
+  await waitForListedThread(secondClient, threadId, {
+    archived: false,
+    expected: false,
+  });
 
   const budgets = {
     firstStartupMs: 15_000,
@@ -158,8 +176,9 @@ try {
     startMs: 5_000,
     readMs: 2_000,
     listMs: 2_000,
+    searchMs: 2_000,
   };
-  const observed = { firstStartupMs, restartMs, startMs, readMs, listMs };
+  const observed = { firstStartupMs, restartMs, startMs, readMs, listMs, searchMs };
   for (const [metric, budget] of Object.entries(budgets)) {
     if (observed[metric] > budget) {
       throw new Error(`${metric} exceeded ${String(budget)}ms: ${String(observed[metric])}ms`);
@@ -170,7 +189,18 @@ try {
   process.stdout.write(
     `${JSON.stringify({
       ok: true,
-      lifecycle: ['start', 'read', 'list', 'archive', 'restart', 'read', 'unarchive'],
+      lifecycle: [
+        'start',
+        'read',
+        'list',
+        'archive',
+        'restart',
+        'read',
+        'unarchive',
+        'name',
+        'search',
+        'delete',
+      ],
       turnStartOutcome,
       milliseconds: Object.fromEntries(
         Object.entries(observed).map(([key, value]) => [key, Math.round(value)]),
