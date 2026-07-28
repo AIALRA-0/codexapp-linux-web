@@ -665,7 +665,15 @@ export class PluginScheduledTasksService extends RpcTarget {
   }
 }
 
-class LocalProjectsService extends RpcTarget {
+interface LocalProject {
+  id: string;
+  name: string;
+  rootPaths: string[];
+  createdAt: number;
+  updatedAt: number;
+}
+
+export class LocalProjectsService extends RpcTarget {
   #runtime: UserRuntime;
 
   constructor(runtime: UserRuntime) {
@@ -695,6 +703,66 @@ class LocalProjectsService extends RpcTarget {
 
   getWorkspaceRootOptions(): Array<Record<string, unknown>> {
     return this.list();
+  }
+
+  async create(request: unknown): Promise<{ projectId: string; rootPaths: string[] }> {
+    const params = recordRequest(request, 'local project create');
+    const name = requestString(params.name, 'local project name').trim();
+    const sources = requestStringArray(params.sources, 'local project sources');
+    if (
+      params.appearance !== undefined &&
+      params.appearance !== null &&
+      !isPlainRecord(params.appearance)
+    ) {
+      throw new TypeError('local project appearance is invalid');
+    }
+
+    const rootPaths =
+      sources.length === 0
+        ? [await createDefaultProjectRoot(this.#runtime, name)]
+        : await Promise.all(
+            [...new Set(sources)].map((source) => resolveProjectRoot(this.#runtime, source)),
+          );
+    const existingProjects = readLocalProjects(this.#runtime.getGlobalState('local-projects'));
+    const now = Date.now();
+    const projectId = randomUUID();
+    const project: LocalProject = {
+      id: projectId,
+      name: name || basename(rootPaths[0] ?? '') || 'Project',
+      rootPaths,
+      createdAt: now,
+      updatedAt: now,
+    };
+    const existingOrder = requestStoredStringArray(this.#runtime.getGlobalState('project-order'));
+
+    await this.#runtime.setGlobalState('local-projects', {
+      ...existingProjects,
+      [projectId]: project,
+    });
+    await this.#runtime.setGlobalState('project-order', [
+      projectId,
+      ...existingOrder.filter((id) => id !== projectId),
+    ]);
+    if (params.appearance !== undefined && params.appearance !== null) {
+      const storedAppearances = this.#runtime.getGlobalState('project-appearances');
+      const appearances = isPlainRecord(storedAppearances) ? storedAppearances : {};
+      await this.#runtime.setGlobalState('project-appearances', {
+        ...appearances,
+        [projectId]: params.appearance,
+      });
+    }
+    await this.#runtime.setGlobalState('selected-project', {
+      type: 'local',
+      projectId,
+    });
+
+    this.#runtime.sendViewMessage({
+      type: 'global-state-updated',
+      keys: ['local-projects', 'project-order', 'project-appearances', 'selected-project'],
+    });
+    this.#runtime.sendViewMessage({ type: 'workspace-root-options-updated' });
+    this.#runtime.sendViewMessage({ type: 'active-workspace-roots-updated' });
+    return { projectId, rootPaths };
   }
 }
 
@@ -1508,6 +1576,63 @@ function isPathWithin(root: string, candidate: string): boolean {
     difference === '' ||
     (difference !== '..' && !difference.startsWith(`..${sep}`) && !isAbsolute(difference))
   );
+}
+
+function readLocalProjects(value: unknown): Record<string, LocalProject> {
+  if (!isPlainRecord(value)) return {};
+  const projects: Record<string, LocalProject> = {};
+  for (const [id, candidate] of Object.entries(value)) {
+    if (
+      !isPlainRecord(candidate) ||
+      candidate.id !== id ||
+      typeof candidate.name !== 'string' ||
+      !Array.isArray(candidate.rootPaths) ||
+      candidate.rootPaths.some((root) => typeof root !== 'string') ||
+      typeof candidate.createdAt !== 'number' ||
+      typeof candidate.updatedAt !== 'number'
+    ) {
+      continue;
+    }
+    projects[id] = candidate as unknown as LocalProject;
+  }
+  return projects;
+}
+
+function requestStoredStringArray(value: unknown): string[] {
+  return Array.isArray(value)
+    ? value.filter((entry): entry is string => typeof entry === 'string')
+    : [];
+}
+
+async function resolveProjectRoot(runtime: UserRuntime, input: string): Promise<string> {
+  const workspaceRoot = await realpath(runtime.workspaceRoot);
+  const path = await resolveRuntimePath(runtime, input, false);
+  if (!isPathWithin(workspaceRoot, path)) {
+    throw new Error('Project source is outside the server workspace');
+  }
+  if (!(await stat(path)).isDirectory()) {
+    throw new Error('Project source must be a directory');
+  }
+  return path;
+}
+
+async function createDefaultProjectRoot(runtime: UserRuntime, name: string): Promise<string> {
+  const workspaceRoot = await realpath(runtime.workspaceRoot);
+  const safeName =
+    name
+      .normalize('NFKC')
+      .replaceAll(/[^\p{Letter}\p{Number}._ -]+/gu, '-')
+      .replaceAll(/^[ .]+|[ .]+$/gu, '')
+      .slice(0, 120) || 'Project';
+  for (let index = 0; ; index += 1) {
+    const path = join(workspaceRoot, index === 0 ? safeName : `${safeName} (${String(index)})`);
+    try {
+      await mkdir(path);
+      return path;
+    } catch (error) {
+      if (errorCode(error) !== 'EEXIST') throw error;
+    }
+  }
 }
 
 async function resolveRuntimePath(

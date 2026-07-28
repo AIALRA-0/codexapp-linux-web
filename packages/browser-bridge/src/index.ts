@@ -1,5 +1,11 @@
 import type { ClientFrame, HostFrame, RuntimeBootstrap } from '@codexapp/contracts';
 
+import {
+  browserPickedFiles,
+  browserPickFilesSuccessMessage,
+  parseBrowserPickFilesRequest,
+  pickBrowserFiles,
+} from './browser-file-picker.js';
 import { browserFileResourceUrl, rewriteOfficialResourceAttribute } from './file-protocol.js';
 import { officialExternalNavigationUrl } from './navigation.js';
 import { OrderedBuffer } from './ordered-buffer.js';
@@ -447,6 +453,24 @@ function installBridge(): void {
   let lastSurfaceFocused: boolean | undefined;
   const pendingUploads = new Map<string, Promise<void>>();
 
+  const stageBrowserUpload = (file: File): string | null => {
+    if (!(file instanceof File)) return null;
+    const id = crypto.randomUUID();
+    const safeName = file.name.replaceAll(/[^A-Za-z0-9._-]/gu, '_').slice(0, 180) || 'upload';
+    const remotePath = `${bootstrap.uploadPathPrefix}/${id}/${safeName}`;
+    const upload = fetch(`/api/uploads/${id}/${encodeURIComponent(safeName)}`, {
+      method: 'PUT',
+      body: file,
+      credentials: 'same-origin',
+      headers: { 'content-type': file.type || 'application/octet-stream' },
+    }).then((response) => {
+      if (!response.ok) throw new Error(`upload failed (${String(response.status)})`);
+    });
+    pendingUploads.set(remotePath, upload);
+    void upload.finally(() => pendingUploads.delete(remotePath));
+    return remotePath;
+  };
+
   const openExternalUrl = (url: string): void => {
     const opened = window.open(url, '_blank');
     if (opened !== null) {
@@ -499,6 +523,17 @@ function installBridge(): void {
     windowType: 'electron',
     getPreloadStartedAtMs: () => preloadStartedAt,
     sendMessageFromView: async (message) => {
+      const pickFilesRequest = parseBrowserPickFilesRequest(message);
+      if (pickFilesRequest !== null) {
+        const selected = await pickBrowserFiles(pickFilesRequest.imagesOnly);
+        const files = browserPickedFiles(selected, stageBrowserUpload);
+        window.dispatchEvent(
+          new MessageEvent('message', {
+            data: browserPickFilesSuccessMessage(pickFilesRequest.requestId, files),
+          }),
+        );
+        return;
+      }
       const externalUrl = officialExternalNavigationUrl(message);
       if (externalUrl !== null) {
         openExternalUrl(externalUrl);
@@ -507,23 +542,7 @@ function installBridge(): void {
       await waitForUploads(message);
       await transport.sendViewMessage(message);
     },
-    getPathForFile: (file) => {
-      if (!(file instanceof File)) return null;
-      const id = crypto.randomUUID();
-      const safeName = file.name.replaceAll(/[^A-Za-z0-9._-]/gu, '_').slice(0, 180) || 'upload';
-      const remotePath = `${bootstrap.uploadPathPrefix}/${id}/${safeName}`;
-      const upload = fetch(`/api/uploads/${id}/${encodeURIComponent(safeName)}`, {
-        method: 'PUT',
-        body: file,
-        credentials: 'same-origin',
-        headers: { 'content-type': file.type || 'application/octet-stream' },
-      }).then((response) => {
-        if (!response.ok) throw new Error(`upload failed (${String(response.status)})`);
-      });
-      pendingUploads.set(remotePath, upload);
-      void upload.finally(() => pendingUploads.delete(remotePath));
-      return remotePath;
-    },
+    getPathForFile: stageBrowserUpload,
     startFileDrag: () => false,
     sendWorkerMessageFromView: (worker, message) => transport.sendWorkerMessage(worker, message),
     subscribeToWorkerMessages: (worker, listener) => transport.subscribeWorker(worker, listener),

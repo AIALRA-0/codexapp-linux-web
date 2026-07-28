@@ -1,4 +1,4 @@
-import { mkdir, mkdtemp, readFile, rm, stat, symlink, writeFile } from 'node:fs/promises';
+import { mkdir, mkdtemp, readFile, realpath, rm, stat, symlink, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
@@ -13,6 +13,7 @@ import {
   DynamicToolCallsService,
   FileAttachmentsService,
   FileDragsService,
+  LocalProjectsService,
   OpenInService,
   PullRequestMessageGenerationOperation,
   PluginScheduledTasksService,
@@ -120,6 +121,65 @@ async function createRuntimeHarness(): Promise<RuntimeHarness> {
 }
 
 describe('official AppHost browser services', () => {
+  it('creates local projects with the official durable state and update messages', async () => {
+    const { runtime, globalState, messages } = await createRuntimeHarness();
+    const service = new LocalProjectsService(runtime);
+    const appearance = { color: 'blue', icon: 'folder' };
+
+    const created = await service.create({
+      appearance,
+      name: 'Server project',
+      sources: [runtime.workspaceRoot],
+    });
+    const canonicalWorkspaceRoot = await realpath(runtime.workspaceRoot);
+
+    expect(created.rootPaths).toEqual([canonicalWorkspaceRoot]);
+    expect(created.projectId).toMatch(/^[0-9a-f-]{36}$/u);
+    const projects = globalState['local-projects'] as Record<string, Record<string, unknown>>;
+    expect(typeof projects[created.projectId]?.createdAt).toBe('number');
+    expect(typeof projects[created.projectId]?.updatedAt).toBe('number');
+    expect(globalState['local-projects']).toEqual({
+      [created.projectId]: {
+        id: created.projectId,
+        name: 'Server project',
+        rootPaths: [canonicalWorkspaceRoot],
+        createdAt: projects[created.projectId]?.createdAt,
+        updatedAt: projects[created.projectId]?.updatedAt,
+      },
+    });
+    expect(globalState['project-order']).toEqual([created.projectId]);
+    expect(globalState['project-appearances']).toEqual({
+      [created.projectId]: appearance,
+    });
+    expect(globalState['selected-project']).toEqual({
+      type: 'local',
+      projectId: created.projectId,
+    });
+    expect(messages).toEqual([
+      {
+        type: 'global-state-updated',
+        keys: ['local-projects', 'project-order', 'project-appearances', 'selected-project'],
+      },
+      { type: 'workspace-root-options-updated' },
+      { type: 'active-workspace-roots-updated' },
+    ]);
+  });
+
+  it('creates a safe default folder for a project without sources', async () => {
+    const { runtime } = await createRuntimeHarness();
+    const service = new LocalProjectsService(runtime);
+
+    const created = await service.create({
+      appearance: null,
+      name: '../Default / Project',
+      sources: [],
+    });
+
+    expect(created.rootPaths).toHaveLength(1);
+    expect(created.rootPaths[0]).toMatch(/Default - Project$/u);
+    expect((await stat(created.rootPaths[0]!)).isDirectory()).toBe(true);
+  });
+
   it('reports exact unsupported Linux Computer Use settings state', () => {
     const service = new ComputerUseSettingsService();
     expect(service.getAppApprovals()).toBeNull();

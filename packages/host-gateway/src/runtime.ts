@@ -270,9 +270,38 @@ export class UserRuntime extends EventEmitter {
         key,
         value: this.#state.get('globalState', key),
       })),
-      workspaceRootOptions: { roots: [this.workspaceRoot] },
+      workspaceRootOptions: this.workspaceRootOptions,
       projectlessWorkspaceRoot: { workspaceRoot: this.workspaceRoot },
     };
+  }
+
+  get workspaceRootOptions(): {
+    roots: string[];
+    labels: Record<string, string>;
+  } {
+    return workspaceRootOptionsFromGlobalState(
+      this.getGlobalState('local-projects'),
+      this.getGlobalState('project-order'),
+      this.workspaceRoot,
+    );
+  }
+
+  get activeWorkspaceRoots(): string[] {
+    const projects = localProjectRecords(this.getGlobalState('local-projects'));
+    const selected = this.getGlobalState('selected-project');
+    if (
+      selected !== null &&
+      typeof selected === 'object' &&
+      !Array.isArray(selected) &&
+      (selected as Record<string, unknown>).type === 'local'
+    ) {
+      const projectId = (selected as Record<string, unknown>).projectId;
+      if (typeof projectId === 'string') {
+        const roots = localProjectRootPaths(projects[projectId]);
+        if (roots.length > 0) return roots;
+      }
+    }
+    return [this.workspaceRoot];
   }
 
   getGlobalState(key: string): unknown {
@@ -490,6 +519,12 @@ export class UserRuntime extends EventEmitter {
         return undefined;
       case 'electron-desktop-features-changed':
         await this.#state.set('sharedObjects', 'desktop_features', message);
+        return undefined;
+      case 'electron-pick-workspace-root-option':
+        this.emit('view-message', {
+          type: 'workspace-root-option-picked',
+          root: this.workspaceRoot,
+        });
         return undefined;
       case 'remote-hosted-pip-hidden-thread-ids-changed':
         await this.#state.set(
@@ -1043,9 +1078,9 @@ export class UserRuntime extends EventEmitter {
         return { remoteWslConnections };
       }
       case 'active-workspace-roots':
-        return { roots: [this.workspaceRoot] };
+        return { roots: this.activeWorkspaceRoots };
       case 'workspace-root-options':
-        return { roots: [this.workspaceRoot] };
+        return this.workspaceRootOptions;
       case 'home-directory':
         return { homeDirectory: this.workspaceRoot };
       case 'projectless-workspace-root':
@@ -1330,6 +1365,56 @@ function decodeJwtClaims(token: string): Record<string, unknown> | null {
   } catch {
     return null;
   }
+}
+
+function localProjectRecords(value: unknown): Record<string, Record<string, unknown>> {
+  if (value === null || typeof value !== 'object' || Array.isArray(value)) return {};
+  return Object.fromEntries(
+    Object.entries(value).filter(
+      (entry): entry is [string, Record<string, unknown>] =>
+        entry[1] !== null && typeof entry[1] === 'object' && !Array.isArray(entry[1]),
+    ),
+  );
+}
+
+function localProjectRootPaths(project: Record<string, unknown> | undefined): string[] {
+  if (!Array.isArray(project?.rootPaths)) return [];
+  return project.rootPaths.filter(
+    (root): root is string => typeof root === 'string' && root.length > 0,
+  );
+}
+
+function workspaceRootOptionsFromGlobalState(
+  localProjectsValue: unknown,
+  projectOrderValue: unknown,
+  fallbackRoot: string,
+): { roots: string[]; labels: Record<string, string> } {
+  const projects = localProjectRecords(localProjectsValue);
+  const storedOrder = Array.isArray(projectOrderValue)
+    ? projectOrderValue.filter((id): id is string => typeof id === 'string')
+    : [];
+  const orderedIds = [
+    ...storedOrder,
+    ...Object.keys(projects).filter((id) => !storedOrder.includes(id)),
+  ];
+  const roots: string[] = [];
+  const labels: Record<string, string> = {};
+  for (const id of orderedIds) {
+    const project = projects[id];
+    const projectRoots = localProjectRootPaths(project);
+    for (const root of projectRoots) {
+      if (!roots.includes(root)) roots.push(root);
+    }
+    if (
+      projectRoots.length === 1 &&
+      typeof project?.name === 'string' &&
+      project.name.trim().length > 0
+    ) {
+      labels[projectRoots[0]!] = project.name;
+    }
+  }
+  if (roots.length === 0) roots.push(fallbackRoot);
+  return { roots, labels };
 }
 
 export function initialRouteForAuthMethod(authMethod: unknown): '/' | '/login' {
