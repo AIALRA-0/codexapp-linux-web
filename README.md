@@ -71,6 +71,7 @@ npm run smoke:official-ui
 npm run smoke:browser
 npm run smoke:auth-isolation
 npm run smoke:core-lifecycle
+npm run smoke:desktop-tools
 ```
 
 They require the qualified private package and are executed in staging before

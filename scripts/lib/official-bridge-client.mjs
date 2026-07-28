@@ -1,5 +1,6 @@
 import { randomUUID } from 'node:crypto';
 
+import { RpcSession } from 'capnweb';
 import WebSocket from 'ws';
 
 export async function connectOfficialBridge({ baseUrl, identityHeaders, publicOrigin }) {
@@ -26,6 +27,9 @@ export async function connectOfficialBridge({ baseUrl, identityHeaders, publicOr
   const commandResults = new Map();
   const fetchResults = new Map();
   const mcpResults = new Map();
+  const portTransports = new Map();
+  const workerResults = new Map();
+  const viewMessageWaiters = new Set();
   const ready = deferred();
 
   const send = (frame) => {
@@ -58,8 +62,28 @@ export async function connectOfficialBridge({ baseUrl, identityHeaders, publicOr
       commandResults.delete(frame.commandId);
       return;
     }
+    if (frame.type === 'host-port-message') {
+      portTransports.get(frame.portId)?.deliver(frame.message);
+      return;
+    }
+    if (frame.type === 'worker-message') {
+      const message = frame.message;
+      const response =
+        message?.type === 'worker-response' && message.response !== undefined
+          ? message.response
+          : message;
+      workerResults.get(response?.id)?.resolve(response);
+      workerResults.delete(response?.id);
+      return;
+    }
     if (frame.type !== 'view-message') return;
     const message = frame.message;
+    for (const waiter of [...viewMessageWaiters]) {
+      if (!waiter.predicate(message)) continue;
+      viewMessageWaiters.delete(waiter);
+      clearTimeout(waiter.timer);
+      waiter.resolve(message);
+    }
     if (message?.type === 'fetch-response') {
       fetchResults.get(message.requestId)?.resolve(message);
       fetchResults.delete(message.requestId);
@@ -75,6 +99,13 @@ export async function connectOfficialBridge({ baseUrl, identityHeaders, publicOr
     rejectPending(commandResults, error);
     rejectPending(fetchResults, error);
     rejectPending(mcpResults, error);
+    rejectPending(workerResults, error);
+    for (const transport of portTransports.values()) transport.abort(error);
+    for (const waiter of viewMessageWaiters) {
+      clearTimeout(waiter.timer);
+      waiter.reject(error);
+    }
+    viewMessageWaiters.clear();
   });
 
   const command = async (message) => {
@@ -126,6 +157,105 @@ export async function connectOfficialBridge({ baseUrl, identityHeaders, publicOr
     return response.result;
   };
 
+  const workerRequest = async (worker, method, params) => {
+    const id = randomUUID();
+    const commandId = randomUUID();
+    const commandPending = deferred();
+    const workerPending = deferred();
+    commandResults.set(commandId, commandPending);
+    workerResults.set(id, workerPending);
+    send({
+      contractVersion: 1,
+      type: 'worker-command',
+      sequence: clientSequence++,
+      commandId,
+      worker,
+      message: {
+        type: 'worker-request',
+        workerId: worker,
+        request: {
+          id,
+          method,
+          params,
+          enqueuedAtMs: Date.now(),
+        },
+      },
+    });
+    const accepted = await withTimeout(
+      commandPending.promise,
+      120_000,
+      `worker command ${worker}/${method}`,
+    );
+    if (accepted.ok !== true) {
+      workerResults.delete(id);
+      throw new Error(accepted.error ?? `worker command failed: ${worker}/${method}`);
+    }
+    const response = await withTimeout(
+      workerPending.promise,
+      120_000,
+      `worker response ${worker}/${method}`,
+    );
+    if (response.method !== method) {
+      throw new Error(`worker response method changed: ${worker}/${method}`);
+    }
+    if (response.result?.type !== 'ok') {
+      throw new Error(
+        response.result?.error?.message ?? `worker request failed: ${worker}/${method}`,
+      );
+    }
+    return response.result.value;
+  };
+
+  const connectAppHost = async () => {
+    const portId = randomUUID();
+    const transport = new BridgePortTransport({
+      onAbort: () => portTransports.delete(portId),
+      sendMessage: (message) => {
+        send({
+          contractVersion: 1,
+          type: 'host-port-message',
+          sequence: clientSequence++,
+          portId,
+          message,
+        });
+      },
+    });
+    portTransports.set(portId, transport);
+    const session = new RpcSession(transport);
+    try {
+      await command({
+        type: '__browser-bridge-request',
+        method: 'connect-app-host',
+        params: { portId },
+      });
+    } catch (error) {
+      transport.abort(error);
+      throw error;
+    }
+    return {
+      appHost: session.getRemoteMain(),
+      close() {
+        transport.abort(new Error('AppHost smoke connection closed'));
+      },
+    };
+  };
+
+  const waitForViewMessage = (predicate, timeoutMs = 30_000) => {
+    const pending = deferred();
+    const waiter = {
+      predicate,
+      reject: pending.reject,
+      resolve: pending.resolve,
+      timer: setTimeout(() => {
+        viewMessageWaiters.delete(waiter);
+        pending.reject(new Error('view message timed out'));
+      }, timeoutMs),
+    };
+    waiter.timer.unref();
+    viewMessageWaiters.add(waiter);
+    return pending.promise;
+  };
+
   try {
     await withTimeout(ready.promise, 30_000, 'bridge ready');
     await command({ type: 'ready' });
@@ -137,9 +267,15 @@ export async function connectOfficialBridge({ baseUrl, identityHeaders, publicOr
   return {
     bootstrap,
     command,
+    connectAppHost,
     desktopFetch,
     mcpRequest,
+    waitForViewMessage,
+    workerRequest,
     close() {
+      for (const transport of portTransports.values()) {
+        transport.abort(new Error('bridge smoke connection closed'));
+      }
       socket.close(1000, 'smoke complete');
     },
   };
@@ -169,6 +305,57 @@ function deferred() {
 function rejectPending(pending, error) {
   for (const value of pending.values()) value.reject(error);
   pending.clear();
+}
+
+class BridgePortTransport {
+  #aborted;
+  #messages = [];
+  #onAbort;
+  #sendMessage;
+  #waiting;
+
+  constructor({ onAbort, sendMessage }) {
+    this.#onAbort = onAbort;
+    this.#sendMessage = sendMessage;
+  }
+
+  send(message) {
+    if (this.#aborted !== undefined) throw this.#aborted;
+    this.#sendMessage(message);
+  }
+
+  receive() {
+    const queued = this.#messages.shift();
+    if (queued !== undefined) return Promise.resolve(queued);
+    if (this.#aborted !== undefined) return Promise.reject(this.#aborted);
+    if (this.#waiting !== undefined) {
+      return Promise.reject(new Error('concurrent AppHost smoke receive is not supported'));
+    }
+    const pending = deferred();
+    this.#waiting = pending;
+    return pending.promise;
+  }
+
+  deliver(message) {
+    if (typeof message !== 'string') {
+      this.abort(new TypeError('AppHost smoke accepts string frames only'));
+      return;
+    }
+    const waiting = this.#waiting;
+    if (waiting === undefined) this.#messages.push(message);
+    else {
+      this.#waiting = undefined;
+      waiting.resolve(message);
+    }
+  }
+
+  abort(reason) {
+    if (this.#aborted !== undefined) return;
+    this.#aborted = reason instanceof Error ? reason : new Error(String(reason));
+    this.#waiting?.reject(this.#aborted);
+    this.#waiting = undefined;
+    this.#onAbort();
+  }
 }
 
 function withTimeout(promise, timeoutMs, label) {

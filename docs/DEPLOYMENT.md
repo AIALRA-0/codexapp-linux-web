@@ -60,15 +60,20 @@ Before public cutover, all of the following are mandatory:
 5. `ops/run-backup-restore-smoke.sh` creates an isolated committed turn, cleanly
    stops that host, archives and checksums its complete state, erases only the
    isolated state root, restores it, and proves the exact turn is readable.
-6. The hardened in-app browser smoke passes under the production system-call,
+6. `ops/run-desktop-tools-smoke.sh` uses the production browser bridge and
+   official AppHost path to prove file upload/download, attachment images,
+   optimistic writes, cross-identity download rejection, PTY terminal I/O,
+   official Git status and managed worktrees, GitHub CLI status, dynamic tool
+   ownership, and browser permission persistence inside an isolated runtime.
+7. The hardened in-app browser smoke passes under the production system-call,
    filesystem, device, and privilege restrictions.
-7. Anonymous, forged, missing-proof, and cross-subject authentication attempts
+8. Anonymous, forged, missing-proof, and cross-subject authentication attempts
    fail closed.
-8. The official device-code card displays the server-issued code and successful
+9. The official device-code card displays the server-issued code and successful
    OpenAI authorization reaches the main window without a reload.
-9. A deliberately broken release is rejected and automatically returns to the
-   previous healthy release.
-10. A failed installation leaves neither a selectable target nor an incomplete
+10. A deliberately broken release is rejected and automatically returns to the
+    previous healthy release.
+11. A failed installation leaves neither a selectable target nor an incomplete
     directory.
-11. The final old-CodexApp conversation backup is made only after its writers are
+12. The final old-CodexApp conversation backup is made only after its writers are
     stopped. OpenCodexApp paths remain excluded.

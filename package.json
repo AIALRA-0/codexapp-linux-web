@@ -29,6 +29,7 @@
     "contracts:check": "npm run build --silent && tsx packages/browser-bridge/src/check-contract.ts",
     "security:check": "bash ops/check-source-boundaries.sh",
     "smoke:browser": "node scripts/smoke-browser-runtime.mjs",
+    "smoke:desktop-tools": "node scripts/smoke-desktop-tools.mjs",
     "smoke:auth-isolation": "node scripts/smoke-auth-isolation.mjs",
     "smoke:core-lifecycle": "node scripts/smoke-core-lifecycle.mjs",
     "smoke:host-persistence": "node scripts/smoke-host-persistence.mjs",
