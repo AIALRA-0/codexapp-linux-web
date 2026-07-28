@@ -2,6 +2,7 @@ import { execFile } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
 import { EventEmitter } from 'node:events';
 import { mkdirSync } from 'node:fs';
+import { mkdir, readFile, writeFile } from 'node:fs/promises';
 import { release as osRelease, version as osVersion } from 'node:os';
 import { join } from 'node:path';
 import { promisify } from 'node:util';
@@ -20,6 +21,13 @@ import {
 import { CodexAppServerClient, type ServerRequestEvent } from '@codexapp/app-server-client';
 
 import { deleteAllArchivedThreads, deleteArchivedThread } from './archived-thread-operations.js';
+import {
+  readBrowserPermissionSnapshot,
+  writeBrowserApprovalMode,
+  writeBrowserFileTransferApprovalMode,
+  writeBrowserFullCdpAccessEnabled,
+  writeBrowserHistoryApprovalMode,
+} from './browser-use-permissions.js';
 import type { GatewayConfig } from './config.js';
 import { identitiesMatch, userKeyForIdentity } from './identity.js';
 import { prepareRendererRequest } from './login.js';
@@ -536,6 +544,15 @@ export class UserRuntime extends EventEmitter {
       case 'remote-hosted-pip-active-thread-changed':
         await this.#state.set('sharedObjects', 'remote_hosted_pip_active_thread', message.threadId);
         return undefined;
+      case 'remote-hosted-pip-host-layout-changed':
+        await this.#state.set('sharedObjects', 'remote_hosted_pip_host_layout', message.layout);
+        return undefined;
+      case 'tray-menu-threads-changed':
+        // Browser sessions have no operating-system tray. Retain the official
+        // renderer snapshot so reconnects do not turn this native-only update
+        // into a capability failure.
+        await this.#state.set('sharedObjects', 'tray_menu_threads', message.trayMenuThreads);
+        return undefined;
       case 'inbox-item-set-read-state':
         await this.officialDesktopState.request('inbox.set-read', {
           id: message.id,
@@ -634,6 +651,7 @@ export class UserRuntime extends EventEmitter {
     mkdirSync(this.workspaceRoot, { recursive: true, mode: 0o700 });
     mkdirSync(this.uploadRoot, { recursive: true, mode: 0o700 });
     await this.#state.load();
+    await this.#pruneRemovedLocalProjectMetadata(this.#state.get('globalState', 'local-projects'));
     await this.browserRuntime.start();
     this.threadCatalog.load();
     await this.officialDesktopState.start();
@@ -1128,6 +1146,76 @@ export class UserRuntime extends EventEmitter {
           isVsCodeRunningInsideWsl: false,
           windowsAccountType: null,
         };
+      case 'wsl-bash-availability':
+        return { available: false, distro: null };
+      case 'external-agent-import-detect':
+        return { items: [], unsupportedProjects: [] };
+      case 'external-agent-import-status':
+        return { importedSessionCount: 0, latestImportedAtMs: null };
+      case 'external-agent-import-import':
+        return { projectRoots: [] };
+      case 'codex-agents-md':
+        return this.#readCodexAgentsMd();
+      case 'codex-agents-md-save':
+        return this.#writeCodexAgentsMd(params.contents);
+      case 'global-dictation-hotkey-state':
+        return {
+          supported: false,
+          configuredHotkey: null,
+          configuredToggleHotkey: null,
+          keepVisible: false,
+        };
+      case 'global-dictation-history':
+        return { items: [] };
+      case 'global-dictation-set-hotkey':
+      case 'global-dictation-set-toggle-hotkey':
+        return {
+          success: false,
+          error: 'Not supported.',
+          state: {
+            supported: false,
+            configuredHotkey: null,
+            configuredToggleHotkey: null,
+            keepVisible: false,
+          },
+        };
+      case 'global-dictation-set-keep-visible':
+        return {
+          supported: false,
+          configuredHotkey: null,
+          configuredToggleHotkey: null,
+          keepVisible: false,
+        };
+      case 'global-dictation-copy-history-item':
+        return { success: false };
+      case 'chronicle-permissions':
+        return {
+          accessibility: 'unknown',
+          screenRecording: 'unknown',
+          chronicleSidecarPresent: false,
+          chronicleSidecarProcessState: 'disabled',
+        };
+      case 'browser-browsing-data-clear':
+        await this.browserRuntime.clearBrowsingData(params.dataTypes);
+        return null;
+      case 'browser-use-origin-state-read':
+        return readBrowserPermissionSnapshot(this.codexHome);
+      case 'browser-use-approval-mode-write':
+        return writeBrowserApprovalMode(this.codexHome, params.approvalMode);
+      case 'browser-use-history-approval-mode-write':
+        return writeBrowserHistoryApprovalMode(this.codexHome, params.approvalMode);
+      case 'browser-use-file-transfer-approval-mode-write':
+        return writeBrowserFileTransferApprovalMode(
+          this.codexHome,
+          params.kind,
+          params.approvalMode,
+        );
+      case 'browser-use-full-cdp-access-enabled-write':
+        return writeBrowserFullCdpAccessEnabled(this.codexHome, params.enabled);
+      case 'chrome-extension-installed-read':
+        return { installed: false };
+      case 'chrome-extension-settings-open':
+        return null;
       case 'has-custom-cli-executable':
         return { hasCustomCliExecutable: false };
       case 'ensure-directory':
@@ -1221,6 +1309,30 @@ export class UserRuntime extends EventEmitter {
     if (pruned.appearancesChanged) {
       await this.#state.set('globalState', 'project-appearances', pruned.appearances);
     }
+  }
+
+  async #readCodexAgentsMd(): Promise<{ path: string; contents: string }> {
+    const path = join(this.codexHome, 'AGENTS.md');
+    await mkdir(this.codexHome, { recursive: true, mode: 0o700 });
+    try {
+      return { path, contents: await readFile(path, 'utf8') };
+    } catch (error) {
+      if (!isNodeError(error) || error.code !== 'ENOENT') throw error;
+      await writeFile(path, '', { encoding: 'utf8', flag: 'wx', mode: 0o600 }).catch(
+        (writeError: unknown) => {
+          if (!isNodeError(writeError) || writeError.code !== 'EEXIST') throw writeError;
+        },
+      );
+      return { path, contents: await readFile(path, 'utf8') };
+    }
+  }
+
+  async #writeCodexAgentsMd(contents: unknown): Promise<{ path: string }> {
+    if (typeof contents !== 'string') throw new Error('agents.md contents must be a string');
+    const path = join(this.codexHome, 'AGENTS.md');
+    await mkdir(this.codexHome, { recursive: true, mode: 0o700 });
+    await writeFile(path, contents, { encoding: 'utf8', mode: 0o600 });
+    return { path };
   }
 
   #getPinnedThreadIds(): string[] {
@@ -1392,6 +1504,10 @@ function parseDesktopThreadIds(value: unknown): string[] {
 
 function sameStringArray(left: string[], right: string[]): boolean {
   return left.length === right.length && left.every((value, index) => value === right[index]);
+}
+
+function isNodeError(value: unknown): value is NodeJS.ErrnoException {
+  return value instanceof Error && 'code' in value;
 }
 
 function decodeJwtClaims(token: string): Record<string, unknown> | null {

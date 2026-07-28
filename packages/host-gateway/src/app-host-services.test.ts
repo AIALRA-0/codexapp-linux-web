@@ -15,6 +15,7 @@ import {
   FileDragsService,
   LocalProjectsService,
   OpenInService,
+  PrimaryRuntimeService,
   PullRequestMessageGenerationOperation,
   PluginScheduledTasksService,
   RemoteControlEnvironmentsService,
@@ -63,6 +64,9 @@ async function createRuntimeHarness(): Promise<RuntimeHarness> {
     codexHome,
     workspaceRoot,
     uploadRoot,
+    config: {
+      expectedRendererVersion: '26.721.31836',
+    },
     officialDesktopState: {
       request: (operation: string, params: Record<string, unknown>) => {
         desktopStateRequests.push({ operation, params });
@@ -192,6 +196,30 @@ describe('official AppHost browser services', () => {
       lockIconDataURL: null,
     });
     expect(service.setLockedUseEnabled(true)).toBeNull();
+  });
+
+  it('reports the server workspace runtime as ready through the official service contract', async () => {
+    const { runtime } = await createRuntimeHarness();
+    const service = new PrimaryRuntimeService(runtime);
+
+    expect(service.getInstalledBundleVersion()).toBe('server-26.721.31836');
+    expect(service.loadDependencies({ hostId: 'local' })).toEqual({
+      bundleVersion: 'server-26.721.31836',
+      installed: true,
+      instructions: null,
+    });
+    expect(service.diagnoseDependencies({ hostId: 'local' })).toMatchObject({
+      bundleVersion: 'server-26.721.31836',
+      installed: true,
+      problems: [],
+    });
+    expect(service.resetDependencies({ hostId: 'local', release: 'stable' })).toEqual({
+      bundleVersion: 'server-26.721.31836',
+      status: 'installed',
+    });
+    expect(() => service.loadDependencies({ hostId: 'remote' })).toThrow(
+      'only supports the local host',
+    );
   });
 
   it('reports physical Codex Micro and native file drags as unavailable', () => {

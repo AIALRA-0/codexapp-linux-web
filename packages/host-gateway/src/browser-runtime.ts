@@ -295,6 +295,61 @@ export class OfficialBrowserRuntime {
     await this.#loadState();
   }
 
+  async clearBrowsingData(dataTypesValue: unknown): Promise<void> {
+    const dataTypes = parseBrowsingDataTypes(dataTypesValue);
+    const context =
+      this.#context ??
+      (this.#contextStarting === null ? null : await this.#contextStarting.catch(() => null));
+    if (dataTypes.has('cookies')) await context?.clearCookies();
+    if (context !== null && (dataTypes.has('cache') || dataTypes.has('siteData'))) {
+      const pages = context.pages();
+      const temporaryPage = pages.length === 0 ? await context.newPage() : null;
+      const page = pages[0] ?? temporaryPage;
+      if (page !== null) {
+        const session = await context.newCDPSession(page).catch(() => null);
+        if (session !== null) {
+          try {
+            if (dataTypes.has('cache')) {
+              await session.send('Network.clearBrowserCache').catch(() => undefined);
+            }
+            if (dataTypes.has('siteData')) {
+              const origins = new Set(
+                (
+                  await context.storageState({ indexedDB: true }).catch(() => ({ origins: [] }))
+                ).origins.map(({ origin }) => origin),
+              );
+              for (const current of context.pages()) {
+                const origin = browserPageOrigin(current.url());
+                if (origin !== null) origins.add(origin);
+              }
+              for (const origin of origins) {
+                await session
+                  .send('Storage.clearDataForOrigin', {
+                    origin,
+                    storageTypes: 'all',
+                  })
+                  .catch(() => undefined);
+              }
+            }
+          } finally {
+            await session.detach().catch(() => undefined);
+          }
+        }
+      }
+      await temporaryPage?.close().catch(() => undefined);
+    }
+    if (context === null) {
+      await clearClosedBrowserProfileData(this.#profileRoot, dataTypes);
+    } else if (dataTypes.has('history')) {
+      await context.close();
+      await clearClosedBrowserProfileData(this.#profileRoot, new Set(['history']));
+    }
+    if (dataTypes.has('downloads')) {
+      await rm(this.#downloadRoot, { force: true, recursive: true });
+      await mkdir(this.#downloadRoot, { recursive: true, mode: 0o700 });
+    }
+  }
+
   async stop(): Promise<void> {
     await this.#persistQueue.catch(() => undefined);
     const context = this.#context;
@@ -2209,6 +2264,77 @@ function parseSurfaceMessage(value: unknown): BrowserSurfaceClientMessage {
     default:
       throw new TypeError(`unknown browser surface message: ${type}`);
   }
+}
+
+const BROWSING_DATA_TYPES = new Set(['cookies', 'siteData', 'cache', 'downloads', 'history']);
+
+function parseBrowsingDataTypes(value: unknown): Set<string> {
+  if (
+    !Array.isArray(value) ||
+    value.length > BROWSING_DATA_TYPES.size ||
+    value.some((entry) => typeof entry !== 'string' || !BROWSING_DATA_TYPES.has(entry))
+  ) {
+    throw new TypeError('Browser browsing data types are invalid');
+  }
+  return new Set(value.filter((entry): entry is string => typeof entry === 'string'));
+}
+
+function browserPageOrigin(value: string): string | null {
+  try {
+    const url = new URL(value);
+    return url.protocol === 'http:' || url.protocol === 'https:' ? url.origin : null;
+  } catch {
+    return null;
+  }
+}
+
+async function clearClosedBrowserProfileData(
+  profileRoot: string,
+  dataTypes: ReadonlySet<string>,
+): Promise<void> {
+  const paths = new Set<string>();
+  const addDefault = (...segments: string[]) =>
+    paths.add(join(profileRoot, 'Default', ...segments));
+  if (dataTypes.has('cookies')) {
+    addDefault('Cookies');
+    addDefault('Cookies-journal');
+    addDefault('Network', 'Cookies');
+    addDefault('Network', 'Cookies-journal');
+  }
+  if (dataTypes.has('siteData')) {
+    for (const path of [
+      'File System',
+      'IndexedDB',
+      'Local Storage',
+      'QuotaManager',
+      'QuotaManager-journal',
+      'Service Worker',
+      'Session Storage',
+      'Shared Dictionary',
+      'Storage',
+      'WebStorage',
+    ]) {
+      addDefault(path);
+    }
+  }
+  if (dataTypes.has('cache')) {
+    for (const path of ['Cache', 'Code Cache', 'GPUCache']) addDefault(path);
+    for (const path of ['DawnGraphiteCache', 'DawnWebGPUCache', 'GrShaderCache', 'ShaderCache']) {
+      paths.add(join(profileRoot, path));
+    }
+  }
+  if (dataTypes.has('history')) {
+    for (const path of [
+      'History',
+      'History-journal',
+      'Top Sites',
+      'Top Sites-journal',
+      'Visited Links',
+    ]) {
+      addDefault(path);
+    }
+  }
+  await Promise.all([...paths].map(async (path) => rm(path, { force: true, recursive: true })));
 }
 
 function playwrightKey(message: Extract<BrowserSurfaceClientMessage, { type: 'key' }>): string {
