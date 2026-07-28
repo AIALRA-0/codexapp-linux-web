@@ -157,6 +157,12 @@ export async function connectOfficialBridge({ baseUrl, identityHeaders, publicOr
     return response.result;
   };
 
+  const respondMcpRequest = async (id, result) =>
+    command({
+      type: 'mcp-response',
+      response: { id, result },
+    });
+
   const workerRequest = async (worker, method, params) => {
     const id = randomUUID();
     const commandId = randomUUID();
@@ -270,6 +276,7 @@ export async function connectOfficialBridge({ baseUrl, identityHeaders, publicOr
     connectAppHost,
     desktopFetch,
     mcpRequest,
+    respondMcpRequest,
     waitForViewMessage,
     workerRequest,
     close() {

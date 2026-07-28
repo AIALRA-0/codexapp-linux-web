@@ -72,12 +72,18 @@ npm run smoke:browser
 npm run smoke:auth-isolation
 npm run smoke:core-lifecycle
 npm run smoke:desktop-tools
+npm run smoke:approvals
 ```
 
 They require the qualified private package and are executed in staging before
 promotion. The main-window smoke requires a loopback reverse proxy because the
 browser must never possess the private Nginx-to-host proof header; the same rule
 applies to production WebSocket upgrades.
+
+The approval smoke uses the real, version-locked app-server and complete browser
+bridge in an isolated runtime. It proves that approval executes the proposed
+command, rejection does not execute it, both responses return to the model, and
+both turns complete without touching the production runtime.
 
 ## Operations
 

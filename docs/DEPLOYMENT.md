@@ -65,15 +65,19 @@ Before public cutover, all of the following are mandatory:
    optimistic writes, cross-identity download rejection, PTY terminal I/O,
    official Git status and managed worktrees, GitHub CLI status, dynamic tool
    ownership, and browser permission persistence inside an isolated runtime.
-7. The hardened in-app browser smoke passes under the production system-call,
+7. `ops/run-approval-smoke.sh` uses the real version-locked app-server, a
+   deterministic isolated Responses endpoint, and the production browser bridge
+   to prove accept executes the exact command, decline does not execute it,
+   both decisions return to the model, and both turns complete.
+8. The hardened in-app browser smoke passes under the production system-call,
    filesystem, device, and privilege restrictions.
-8. Anonymous, forged, missing-proof, and cross-subject authentication attempts
+9. Anonymous, forged, missing-proof, and cross-subject authentication attempts
    fail closed.
-9. The official device-code card displays the server-issued code and successful
-   OpenAI authorization reaches the main window without a reload.
-10. A deliberately broken release is rejected and automatically returns to the
+10. The official device-code card displays the server-issued code and successful
+    OpenAI authorization reaches the main window without a reload.
+11. A deliberately broken release is rejected and automatically returns to the
     previous healthy release.
-11. A failed installation leaves neither a selectable target nor an incomplete
+12. A failed installation leaves neither a selectable target nor an incomplete
     directory.
-12. The final old-CodexApp conversation backup is made only after its writers are
+13. The final old-CodexApp conversation backup is made only after its writers are
     stopped. OpenCodexApp paths remain excluded.
