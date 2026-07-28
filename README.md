@@ -85,6 +85,10 @@ bridge in an isolated runtime. It proves that approval executes the proposed
 command, rejection does not execute it, both responses return to the model, and
 both turns complete without touching the production runtime.
 
+GitHub CI runs the package-independent repository checks on Node.js 24. Private
+official-package integrity, real renderer, browser, app-server, persistence, and
+recovery gates remain mandatory staging checks and are never replaced by CI.
+
 ## Operations
 
 See:
