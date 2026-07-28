@@ -5,7 +5,6 @@ on:
   push:
     branches:
       - main
-      - agent/official-web-host-rebuild
 
 permissions:
   contents: read
