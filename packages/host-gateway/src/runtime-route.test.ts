@@ -1,6 +1,10 @@
 import { describe, expect, it } from 'vitest';
 
-import { codexVersionFromOutput, initialRouteForAuthMethod } from './runtime.js';
+import {
+  codexVersionFromOutput,
+  initialRouteForAuthMethod,
+  officialWebStaticDesktopResponse,
+} from './runtime.js';
 
 describe('official renderer initial route selection', () => {
   it('opens the official login route only when the app server has no auth method', () => {
@@ -27,5 +31,18 @@ describe('Codex CLI version qualification', () => {
 
   it('does not accept a version embedded inside arbitrary output', () => {
     expect(codexVersionFromOutput('', 'warning for codex-cli 0.146.0-alpha.3.1')).toBeNull();
+  });
+});
+
+describe('official web-only desktop fallbacks', () => {
+  it('returns the exact empty contracts for unavailable native discovery sources', () => {
+    expect(officialWebStaticDesktopResponse('recommended-skills')).toEqual({ skills: [] });
+    expect(officialWebStaticDesktopResponse('external-agent-imported-connectors')).toEqual({
+      connectors: [],
+    });
+    expect(officialWebStaticDesktopResponse('email-domain-mail-provider')).toEqual({
+      provider: 'other',
+    });
+    expect(officialWebStaticDesktopResponse('unknown-method')).toBeUndefined();
   });
 });

@@ -557,6 +557,7 @@ export class UserRuntime extends EventEmitter {
       case 'checkout-webview-presentation-changed':
       case 'workspace-settings-webview-presentation-changed':
       case 'keyboard-layout-map-changed':
+      case 'app-shell-shortcut-state-changed':
       case 'view-focused':
         // These update native windows, docks, trays, power management, or
         // Electron-owned webview partitions. The browser already owns those
@@ -1018,6 +1019,8 @@ export class UserRuntime extends EventEmitter {
   }
 
   async #handleDesktopRequest(method: string, params: Record<string, unknown>): Promise<unknown> {
+    const staticWebResponse = officialWebStaticDesktopResponse(method);
+    if (staticWebResponse !== undefined) return staticWebResponse;
     switch (method) {
       case 'get-settings':
         return {
@@ -1655,6 +1658,21 @@ function workspaceRootOptionsFromGlobalState(
 
 export function initialRouteForAuthMethod(authMethod: unknown): '/' | '/login' {
   return typeof authMethod === 'string' && authMethod.length > 0 ? '/' : '/login';
+}
+
+export function officialWebStaticDesktopResponse(
+  method: string,
+): Record<string, unknown> | undefined {
+  switch (method) {
+    case 'recommended-skills':
+      return { skills: [] };
+    case 'external-agent-imported-connectors':
+      return { connectors: [] };
+    case 'email-domain-mail-provider':
+      return { provider: 'other' };
+    default:
+      return undefined;
+  }
 }
 
 export function codexVersionFromOutput(stdout: string, stderr: string): string | null {
