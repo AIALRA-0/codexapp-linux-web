@@ -8,7 +8,7 @@ if [[ "$(id -u)" -ne 0 ]]; then
   exit 77
 fi
 
-application_root="/srv/aialra/apps/codexapp-official-web-host/current"
+application_root="${APPLICATION_ROOT:-/srv/aialra/apps/codexapp-official-web-host/current}"
 environment_file="/srv/aialra/config/secrets/codexapp-official-web-host.env"
 runtime_parent="/srv/aialra/state"
 runtime_root="$(mktemp -d "$runtime_parent/codexapp-backup-restore-smoke.XXXXXXXX")"
