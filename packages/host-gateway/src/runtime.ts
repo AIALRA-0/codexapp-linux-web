@@ -20,6 +20,7 @@ import { prepareRendererRequest } from './login.js';
 import { RendererFetchProxy, type HostDownloadRequest } from './network.js';
 import { OfficialAutomationController } from './official-automation.js';
 import { OfficialBrowserRuntime } from './browser-runtime.js';
+import { buildOfficialDeveloperInstructions } from './official-developer-instructions.js';
 import { OfficialDesktopState } from './official-desktop-state.js';
 import { OfficialGithubService, OfficialGitWorker } from './official-git-worker.js';
 import { RequestUserInputAutoResolution } from './request-user-input-auto-resolution.js';
@@ -1073,6 +1074,8 @@ export class UserRuntime extends EventEmitter {
         // per-thread overlay preserves the user's normal Codex MCP
         // configuration while satisfying the renderer's required contract.
         return { config: null };
+      case 'developer-instructions':
+        return this.#buildDeveloperInstructions(params);
       case 'account-info': {
         const token = await this.#getAuthToken(false);
         if (token === null) {
@@ -1107,6 +1110,81 @@ export class UserRuntime extends EventEmitter {
     return Array.isArray(value)
       ? value.filter((threadId): threadId is string => typeof threadId === 'string')
       : [];
+  }
+
+  async #buildDeveloperInstructions(
+    params: Record<string, unknown>,
+  ): Promise<{ instructions: string }> {
+    const cwd =
+      typeof params.cwd === 'string' && params.cwd.trim().length > 0
+        ? params.cwd
+        : this.workspaceRoot;
+    const [workspaceDependenciesEnabled, isNonGitWorkspace] = await Promise.all([
+      this.#isWorkspaceDependenciesFeatureEnabled(),
+      this.#isNonGitWorkspace(cwd),
+    ]);
+    const branchPrefix = this.#state.get('settings', 'git-branch-prefix');
+    const commitInstructions = this.#state.get('settings', 'git-commit-instructions');
+    const pullRequestInstructions = this.#state.get('settings', 'git-pr-instructions');
+    const conversationDetailMode = this.#state.get('configuration', 'conversationDetailMode');
+    return {
+      instructions: buildOfficialDeveloperInstructions(this.config.officialSourceRoot, {
+        baseInstructions: params.baseInstructions,
+        gitSettings: {
+          branchPrefix: typeof branchPrefix === 'string' ? branchPrefix : 'codex/',
+          commitInstructions: typeof commitInstructions === 'string' ? commitInstructions : '',
+          pullRequestInstructions:
+            typeof pullRequestInstructions === 'string' ? pullRequestInstructions : '',
+        },
+        isNonGitWorkspace,
+        instructionOverrides: params.instructionOverrides,
+        threadToolsEnabled: params.threadToolsEnabled === true,
+        workspaceDependenciesEnabled,
+        includeProseDetailLevelInstructions: conversationDetailMode === 'STEPS_PROSE',
+        threadId: typeof params.threadId === 'string' ? params.threadId : null,
+      }),
+    };
+  }
+
+  async #isWorkspaceDependenciesFeatureEnabled(cursor: string | null = null): Promise<boolean> {
+    try {
+      const response = (await this.#requireAppServer().request('experimentalFeature/list', {
+        cursor,
+        limit: 100,
+      })) as { data?: unknown; nextCursor?: unknown } | null;
+      if (
+        Array.isArray(response?.data) &&
+        response.data.some(
+          (entry) =>
+            entry !== null &&
+            typeof entry === 'object' &&
+            !Array.isArray(entry) &&
+            (entry as Record<string, unknown>).name === 'workspace_dependencies' &&
+            (entry as Record<string, unknown>).enabled === true,
+        )
+      ) {
+        return true;
+      }
+      return typeof response?.nextCursor === 'string'
+        ? this.#isWorkspaceDependenciesFeatureEnabled(response.nextCursor)
+        : false;
+    } catch {
+      return false;
+    }
+  }
+
+  async #isNonGitWorkspace(cwd: string): Promise<boolean> {
+    try {
+      const { stdout } = await execFileAsync('git', [
+        '-C',
+        cwd,
+        'rev-parse',
+        '--is-inside-work-tree',
+      ]);
+      return stdout.trim() !== 'true';
+    } catch {
+      return true;
+    }
   }
 
   async #deleteAutomation(params: Record<string, unknown>): Promise<unknown> {
