@@ -1,11 +1,7 @@
 import type { ClientFrame, HostFrame, RuntimeBootstrap } from '@codexapp/contracts';
 
 import { browserFileResourceUrl, rewriteOfficialResourceAttribute } from './file-protocol.js';
-import {
-  isOfficialChatGptLoginCancellation,
-  isOfficialChatGptLoginRequest,
-  officialExternalNavigationUrl,
-} from './navigation.js';
+import { officialExternalNavigationUrl } from './navigation.js';
 import { OrderedBuffer } from './ordered-buffer.js';
 import { isTerminalBridgeCloseCode } from './reconnect.js';
 import { installRemoteWebviewAdapter } from './remote-webview.js';
@@ -449,37 +445,9 @@ function installBridge(): void {
   const media = window.matchMedia('(prefers-color-scheme: dark)');
   let theme: 'dark' | 'light' = bootstrap.systemThemeVariant;
   let lastSurfaceFocused: boolean | undefined;
-  let pendingLoginWindow: Window | null = null;
-  let pendingLoginWindowTimer: number | undefined;
   const pendingUploads = new Map<string, Promise<void>>();
 
-  const clearPendingLoginWindow = (close: boolean): void => {
-    if (pendingLoginWindowTimer !== undefined) {
-      window.clearTimeout(pendingLoginWindowTimer);
-      pendingLoginWindowTimer = undefined;
-    }
-    if (close && pendingLoginWindow !== null && !pendingLoginWindow.closed) {
-      pendingLoginWindow.close();
-    }
-    pendingLoginWindow = null;
-  };
-
-  const reserveLoginWindow = (): void => {
-    clearPendingLoginWindow(true);
-    pendingLoginWindow = window.open('about:blank', '_blank');
-    if (pendingLoginWindow !== null) pendingLoginWindow.opener = null;
-    pendingLoginWindowTimer = window.setTimeout(() => {
-      clearPendingLoginWindow(true);
-    }, 60_000);
-  };
-
   const openExternalUrl = (url: string): void => {
-    const reserved = pendingLoginWindow;
-    clearPendingLoginWindow(false);
-    if (reserved !== null && !reserved.closed) {
-      reserved.location.replace(url);
-      return;
-    }
     const opened = window.open(url, '_blank');
     if (opened !== null) {
       opened.opener = null;
@@ -531,8 +499,6 @@ function installBridge(): void {
     windowType: 'electron',
     getPreloadStartedAtMs: () => preloadStartedAt,
     sendMessageFromView: async (message) => {
-      if (isOfficialChatGptLoginRequest(message)) reserveLoginWindow();
-      if (isOfficialChatGptLoginCancellation(message)) clearPendingLoginWindow(true);
       const externalUrl = officialExternalNavigationUrl(message);
       if (externalUrl !== null) {
         openExternalUrl(externalUrl);

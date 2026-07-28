@@ -12,6 +12,7 @@
 | Reconnect      | Sequence/ack/replay produces no duplicates or gaps                                                                                             |
 | Isolation      | Cross-user filesystem, process, token, socket, and thread access tests fail closed                                                             |
 | Auth           | Authentik identity and OpenAI account state remain separate and auditable                                                                      |
+| Login UX       | official device-code card shows the server-issued code; completion reaches the main window without a reload                                    |
 | Tools          | approvals, shell, Git, MCP, skills, attachments, images, and diffs pass                                                                        |
 | Desktop parity | Every feature in the version-specific matrix has evidence                                                                                      |
 | Performance    | startup, list, open, send, stream, and resume budgets pass at p95                                                                              |

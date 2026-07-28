@@ -49,7 +49,10 @@ contract, or app-server version differs from qualification.
 
 Outer AIALRA login and the official OpenAI account login remain separate. The
 OpenAI flow uses the official device authorization route and does not depend on
-a browser callback to a developer laptop.
+a browser callback to a developer laptop. The unmodified official renderer
+receives the official `chatgptDeviceCode` result directly, displays its device
+code, and opens the verification page only when the user selects its own
+**Open browser** action.
 
 ## Validation
 

@@ -50,9 +50,11 @@ Before public cutover, all of the following are mandatory:
    filesystem, device, and privilege restrictions.
 4. Anonymous, forged, missing-proof, and cross-subject authentication attempts
    fail closed.
-5. A deliberately broken release is rejected and automatically returns to the
+5. The official device-code card displays the server-issued code and successful
+   OpenAI authorization reaches the main window without a reload.
+6. A deliberately broken release is rejected and automatically returns to the
    previous healthy release.
-6. A failed installation leaves neither a selectable target nor an incomplete
+7. A failed installation leaves neither a selectable target nor an incomplete
    directory.
-7. The final old-CodexApp conversation backup is made only after its writers are
+8. The final old-CodexApp conversation backup is made only after its writers are
    stopped. OpenCodexApp paths remain excluded.

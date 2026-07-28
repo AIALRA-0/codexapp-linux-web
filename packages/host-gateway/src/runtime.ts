@@ -16,11 +16,7 @@ import { CodexAppServerClient, type ServerRequestEvent } from '@codexapp/app-ser
 
 import type { GatewayConfig } from './config.js';
 import { identitiesMatch, userKeyForIdentity } from './identity.js';
-import {
-  prepareRendererRequest,
-  transformRendererResponse,
-  type RendererResponseTransform,
-} from './login.js';
+import { prepareRendererRequest } from './login.js';
 import { RendererFetchProxy, type HostDownloadRequest } from './network.js';
 import { OfficialAutomationController } from './official-automation.js';
 import { OfficialBrowserRuntime } from './browser-runtime.js';
@@ -57,7 +53,6 @@ const INITIAL_SIDEBAR_GLOBAL_STATE_KEYS = [
 
 interface RendererRequestMetadata {
   method: string;
-  responseTransform?: RendererResponseTransform;
   trace?: unknown;
 }
 
@@ -392,9 +387,6 @@ export class UserRuntime extends EventEmitter {
         this.#rendererRequests.set(prepared.request.id, {
           method: prepared.request.method,
           ...(prepared.request.trace === undefined ? {} : { trace: prepared.request.trace }),
-          ...(prepared.responseTransform === undefined
-            ? {}
-            : { responseTransform: prepared.responseTransform }),
         });
         await this.#requireAppServer().forwardRequest(prepared.request);
         return undefined;
@@ -621,11 +613,10 @@ export class UserRuntime extends EventEmitter {
       const parsed = jsonRpcResponseSchema.parse(response);
       const metadata = this.#rendererRequests.get(parsed.id);
       this.#rendererRequests.delete(parsed.id);
-      const rendererResponse = transformRendererResponse(parsed, metadata?.responseTransform);
       this.emit('view-message', {
         type: 'mcp-response',
         hostId: 'local',
-        message: rendererResponse,
+        message: parsed,
         ...(metadata?.trace === undefined
           ? {}
           : {
@@ -1076,6 +1067,12 @@ export class UserRuntime extends EventEmitter {
         };
       case 'has-custom-cli-executable':
         return { hasCustomCliExecutable: false };
+      case 'mcp-codex-config':
+        // The official desktop builder returns null when no qualified
+        // Browser/Computer Use node_repl runtime is available. A null
+        // per-thread overlay preserves the user's normal Codex MCP
+        // configuration while satisfying the renderer's required contract.
+        return { config: null };
       case 'account-info': {
         const token = await this.#getAuthToken(false);
         if (token === null) {
