@@ -528,6 +528,41 @@ export class UserRuntime extends EventEmitter {
       case 'electron-desktop-features-changed':
         await this.#state.set('sharedObjects', 'desktop_features', message);
         return undefined;
+      case 'codex-runtimes-config-changed':
+        await this.#state.set('sharedObjects', 'codex_runtimes_config', message.config);
+        return undefined;
+      case 'electron-window-focus-request':
+        this.emit('view-message', {
+          type: 'electron-window-focus-changed',
+          isFocused: true,
+        });
+        return undefined;
+      case 'avatar-overlay-open-state-request':
+        this.emit('view-message', {
+          type: 'avatar-overlay-open-state-changed',
+          isOpen: false,
+        });
+        return undefined;
+      case 'electron-window-zoom-changed':
+      case 'electron-set-window-mode':
+      case 'electron-set-badge-count':
+      case 'electron-avatar-overlay-restore-ready':
+      case 'electron-avatar-overlay-feedback-diagnostics-changed':
+      case 'electron-sparkle-gates-changed':
+      case 'mac-menu-bar-enabled-changed':
+      case 'global-dictation-enabled-changed':
+      case 'local-thread-activity-changed':
+      case 'set-telemetry-user':
+      case 'power-save-blocker-set':
+      case 'checkout-webview-presentation-changed':
+      case 'workspace-settings-webview-presentation-changed':
+      case 'keyboard-layout-map-changed':
+      case 'view-focused':
+        // These update native windows, docks, trays, power management, or
+        // Electron-owned webview partitions. The browser already owns those
+        // surfaces, so accepting the notification is the exact Linux/web
+        // fallback and must not become a renderer error.
+        return undefined;
       case 'electron-pick-workspace-root-option':
         this.emit('view-message', {
           type: 'workspace-root-option-picked',
