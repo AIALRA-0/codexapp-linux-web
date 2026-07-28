@@ -32,6 +32,7 @@
     "smoke:auth-isolation": "node scripts/smoke-auth-isolation.mjs",
     "smoke:core-lifecycle": "node scripts/smoke-core-lifecycle.mjs",
     "smoke:host-persistence": "node scripts/smoke-host-persistence.mjs",
+    "smoke:mcp": "node scripts/smoke-mcp.mjs",
     "smoke:official-ui": "node scripts/smoke-official-ui.mjs",
     "smoke:task-start": "node scripts/smoke-task-start.mjs",
     "ci": "npm run security:check && npm run format:check && npm run lint && npm run typecheck && npm test"

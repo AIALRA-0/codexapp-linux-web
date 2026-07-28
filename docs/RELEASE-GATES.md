@@ -14,6 +14,7 @@
 | Isolation      | Cross-user filesystem, process, token, socket, and thread access tests fail closed                                                             |
 | Auth           | Authentik identity and OpenAI account state remain separate and auditable                                                                      |
 | Login UX       | official device-code card shows the server-issued code; completion reaches the main window without a reload                                    |
+| MCP            | Official app-server discovers a required stdio server and directly calls its advertised tool with an exact result                              |
 | Tools          | approvals, shell, Git, MCP, skills, attachments, images, and diffs pass                                                                        |
 | Desktop parity | Every feature in the version-specific matrix has evidence                                                                                      |
 | Performance    | startup, list, open, send, stream, and resume budgets pass at p95                                                                              |

@@ -54,15 +54,18 @@ Before public cutover, all of the following are mandatory:
    through the browser bridge, disconnects that browser client, restarts the
    candidate service, reconnects as the same subject, reads the exact turn back,
    and deletes the synthetic thread.
-4. The hardened in-app browser smoke passes under the production system-call,
+4. `smoke:mcp` starts a required stdio MCP server from the isolated Codex home,
+   discovers its advertised tool through `mcpServerStatus/list`, calls that tool
+   through `mcpServer/tool/call`, and verifies the exact structured result.
+5. The hardened in-app browser smoke passes under the production system-call,
    filesystem, device, and privilege restrictions.
-5. Anonymous, forged, missing-proof, and cross-subject authentication attempts
+6. Anonymous, forged, missing-proof, and cross-subject authentication attempts
    fail closed.
-6. The official device-code card displays the server-issued code and successful
+7. The official device-code card displays the server-issued code and successful
    OpenAI authorization reaches the main window without a reload.
-7. A deliberately broken release is rejected and automatically returns to the
+8. A deliberately broken release is rejected and automatically returns to the
    previous healthy release.
-8. A failed installation leaves neither a selectable target nor an incomplete
+9. A failed installation leaves neither a selectable target nor an incomplete
    directory.
-9. The final old-CodexApp conversation backup is made only after its writers are
-   stopped. OpenCodexApp paths remain excluded.
+10. The final old-CodexApp conversation backup is made only after its writers are
+    stopped. OpenCodexApp paths remain excluded.
