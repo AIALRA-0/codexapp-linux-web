@@ -24,6 +24,7 @@ import { buildOfficialDeveloperInstructions } from './official-developer-instruc
 import { OfficialDesktopState } from './official-desktop-state.js';
 import { OfficialGithubService, OfficialGitWorker } from './official-git-worker.js';
 import { RequestUserInputAutoResolution } from './request-user-input-auto-resolution.js';
+import { ensureRuntimeDirectory } from './runtime-directory.js';
 import { DurableStateStore } from './state.js';
 import { assertStorageAvailableForMethod } from './storage.js';
 import { TerminalManager } from './terminal.js';
@@ -1068,6 +1069,9 @@ export class UserRuntime extends EventEmitter {
         };
       case 'has-custom-cli-executable':
         return { hasCustomCliExecutable: false };
+      case 'ensure-directory':
+        await ensureRuntimeDirectory(this, params.hostId, params.path);
+        return {};
       case 'mcp-codex-config':
         // The official desktop builder returns null when no qualified
         // Browser/Computer Use node_repl runtime is available. A null
