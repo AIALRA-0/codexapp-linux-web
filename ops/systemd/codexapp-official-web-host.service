@@ -1,0 +1,46 @@
+[Unit]
+Description=CodexApp official browser host
+Requires=codexapp-official-sandbox-policy.service
+After=network-online.target codexapp-official-sandbox-policy.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=codexappweb
+Group=codexappweb
+WorkingDirectory=/srv/aialra/apps/codexapp-official-web-host/current
+EnvironmentFile=/srv/aialra/config/secrets/codexapp-official-web-host.env
+ExecStart=/usr/bin/node /srv/aialra/apps/codexapp-official-web-host/current/apps/host/dist/main.js
+Restart=on-failure
+RestartSec=3
+TimeoutStopSec=20s
+KillMode=mixed
+UMask=0077
+TasksMax=2048
+MemoryMax=6G
+
+NoNewPrivileges=true
+PrivateTmp=true
+PrivateDevices=true
+ProtectSystem=strict
+ProtectHome=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectKernelLogs=true
+ProtectControlGroups=true
+ProtectClock=true
+RestrictSUIDSGID=true
+RestrictRealtime=true
+LockPersonality=true
+CapabilityBoundingSet=
+AmbientCapabilities=
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6 AF_NETLINK
+SystemCallArchitectures=native
+# Chrome probes Landlock/seccomp and memory protection keys before starting its
+# own renderer sandbox. Codex uses bubblewrap for Linux command sandboxes, which
+# additionally needs namespace-local mounts and route-netlink for loopback.
+SystemCallFilter=@system-service @sandbox @pkey @mount
+ReadWritePaths=/srv/aialra/state/codexapp-official
+
+[Install]
+WantedBy=multi-user.target

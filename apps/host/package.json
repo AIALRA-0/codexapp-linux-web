@@ -1,0 +1,9 @@
+{
+  "name": "@codexapp/host",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "dependencies": {
+    "@codexapp/host-gateway": "0.1.0"
+  }
+}

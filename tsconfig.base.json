@@ -1,0 +1,29 @@
+{
+  "compilerOptions": {
+    "target": "ES2022",
+    "lib": ["ES2022", "DOM"],
+    "module": "NodeNext",
+    "moduleResolution": "NodeNext",
+    "baseUrl": ".",
+    "paths": {
+      "@codexapp/contracts": ["packages/contracts/src/index.ts"],
+      "@codexapp/app-server-client": ["packages/app-server-client/src/index.ts"],
+      "@codexapp/official-package": ["packages/official-package/src/index.ts"],
+      "@codexapp/browser-bridge": ["packages/browser-bridge/src/index.ts"],
+      "@codexapp/host-gateway": ["packages/host-gateway/src/index.ts"]
+    },
+    "strict": true,
+    "noUncheckedIndexedAccess": true,
+    "exactOptionalPropertyTypes": true,
+    "noImplicitOverride": true,
+    "noFallthroughCasesInSwitch": true,
+    "noEmitOnError": true,
+    "declaration": true,
+    "declarationMap": true,
+    "sourceMap": true,
+    "composite": true,
+    "esModuleInterop": true,
+    "forceConsistentCasingInFileNames": true,
+    "skipLibCheck": true
+  }
+}

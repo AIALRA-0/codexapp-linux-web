@@ -1,0 +1,11 @@
+{
+  "files": [],
+  "references": [
+    { "path": "./packages/contracts" },
+    { "path": "./packages/app-server-client" },
+    { "path": "./packages/official-package" },
+    { "path": "./packages/browser-bridge" },
+    { "path": "./packages/host-gateway" },
+    { "path": "./apps/host" }
+  ]
+}

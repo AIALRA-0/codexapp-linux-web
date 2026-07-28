@@ -1,0 +1,8 @@
+[Unit]
+Description=Check CodexApp conversation storage reserve
+
+[Service]
+Type=oneshot
+ExecStart=/srv/aialra/apps/codexapp-official-web-host/current/ops/check-storage-reserve.sh
+Nice=10
+IOSchedulingClass=idle

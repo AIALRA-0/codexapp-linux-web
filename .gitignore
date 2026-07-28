@@ -1,19 +1,28 @@
-state/
 node_modules/
-output/
-.playwright-cli/
-__pycache__/
-*.pyc
-*.bak
-*.bak.*
-*.pre-*
-*.tmp
-*.tmp.*
-*.log
-sync-auth.sh
-npm-debug.log*
-yarn-debug.log*
-yarn-error.log*
-.env
-*.env
+dist/
+*.tsbuildinfo
+coverage/
 .DS_Store
+.env
+.env.*
+!.env.example
+
+# Official OpenAI packages and extracted renderer files are build inputs, not source.
+.official/
+artifacts/
+*.asar
+*.dmg
+*.pkg
+*.zip
+
+# Runtime and user data must never enter Git.
+runtime/
+state/
+secrets/
+*.sqlite
+*.sqlite3
+*.db
+*.jsonl
+
+# Local reports.
+reports/generated/
