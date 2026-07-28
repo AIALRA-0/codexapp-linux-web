@@ -211,7 +211,13 @@ export class ThreadMetadataGenerator {
         ...(options.signal === undefined ? {} : { signal: options.signal }),
       });
     } finally {
-      void appServer.request('thread/unsubscribe', { threadId }).catch(() => undefined);
+      // Metadata generation uses an ephemeral app-server thread that must never
+      // become a user-visible conversation. `thread/unsubscribe` only releases
+      // streaming ownership and leaves the ephemeral thread in the app-server's
+      // in-memory catalog, where the official renderer can surface it after a
+      // name/description update. Deleting it emits the renderer's normal
+      // `thread/deleted` lifecycle event and removes the temporary conversation.
+      void appServer.request('thread/delete', { threadId }).catch(() => undefined);
     }
   }
 }

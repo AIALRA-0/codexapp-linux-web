@@ -45,7 +45,7 @@ class FakeAppServer extends EventEmitter {
       });
       return Promise.resolve({ turn: { id: 'turn-1' } });
     }
-    if (method === 'thread/unsubscribe') return Promise.resolve({});
+    if (method === 'thread/delete') return Promise.resolve({});
     return Promise.reject(new Error(`Unexpected app-server request: ${method}`));
   }
 }
@@ -121,7 +121,7 @@ describe('official thread metadata generation', () => {
       (turnStart?.params.input as Array<Record<string, unknown>>)[0]?.text as string,
     ).toContain('User prompt:\n修复登录速度');
     expect(fake.requests.at(-1)).toEqual({
-      method: 'thread/unsubscribe',
+      method: 'thread/delete',
       params: { threadId: 'ephemeral-title' },
     });
   });

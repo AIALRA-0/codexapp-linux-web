@@ -19,6 +19,7 @@ import {
 } from './official-renderer-messages.js';
 import { CodexAppServerClient, type ServerRequestEvent } from '@codexapp/app-server-client';
 
+import { deleteAllArchivedThreads, deleteArchivedThread } from './archived-thread-operations.js';
 import type { GatewayConfig } from './config.js';
 import { identitiesMatch, userKeyForIdentity } from './identity.js';
 import { prepareRendererRequest } from './login.js';
@@ -970,6 +971,13 @@ export class UserRuntime extends EventEmitter {
         return this.#archiveAutomationRun(params);
       case 'automation-run-delete':
         return this.#deleteAutomationRun(params);
+      case 'delete-archived-thread':
+        return deleteArchivedThread(
+          this.#requireAppServer(),
+          parseDesktopThreadId(params.threadId, 'archived thread id'),
+        );
+      case 'delete-all-archived-threads':
+        return deleteAllArchivedThreads(this.#requireAppServer());
       case 'list-pinned-threads':
         return { threadIds: this.#getPinnedThreadIds() };
       case 'set-thread-pinned': {
