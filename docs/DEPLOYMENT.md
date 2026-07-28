@@ -63,6 +63,22 @@ post-promotion verification.
 Interrupted copies cannot become current. User state is never stored below an
 application release and is not converted by rollback.
 
+The public ChatGPT Apps directory may reject datacenter egress even while normal
+Codex turns and installed Apps remain healthy. Codex stores that directory as
+official metadata under `cache/codex_app_directory`; it contains no login token.
+When a cache is refreshed by the same Codex version and account on a trusted
+network, install it atomically into the isolated server Codex home with:
+
+```sh
+ops/install-official-app-directory-cache.sh \
+  /secure-transfer/e448a982a703ae90fd8068f6b73a30f24c3bff0d.json \
+  /srv/aialra/state/codexapp-official/users/USER_KEY/codex-home
+```
+
+The installer accepts only the official 40-character cache filename, validates
+the schema and connector records, and preserves owner-only permissions. This is
+a directory-refresh fallback, not a proxy and not a replacement Apps API.
+
 The service readiness endpoint becomes unhealthy below 5 GiB free, while
 history reads stay available and new conversation-growing operations are
 blocked. A separately allocated emergency reserve can be released by
