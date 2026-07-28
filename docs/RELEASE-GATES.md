@@ -8,7 +8,7 @@
 | App-server     | Client and server versions match; generated schema diff is reviewed and clean                                                                  |
 | Core           | New/open/list/search/archive/resume threads and streamed turns pass                                                                            |
 | Task start     | Browser bridge performs workspace, directory, Git, MCP, developer-instruction, thread-start, turn-start, and thread-read chain                 |
-| Persistence    | Forced browser/process/server restarts lose no committed turn                                                                                  |
+| Persistence    | `ops/run-host-persistence-smoke.sh` proves a committed turn survives browser disconnect and full host-service restart                          |
 | History        | 10k-thread synthetic list is paginated and bounded; no eager full-history load                                                                 |
 | Reconnect      | Sequence/ack/replay produces no duplicates or gaps                                                                                             |
 | Isolation      | Cross-user filesystem, process, token, socket, and thread access tests fail closed                                                             |

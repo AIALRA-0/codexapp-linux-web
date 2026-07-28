@@ -29,8 +29,12 @@ the old site's upstream only during the scheduled cutover.
 Nginx injects the private proxy-proof header on both HTTP and WebSocket requests.
 The value is stored in a root-only include file and is never delivered to
 browser JavaScript. `ops/nginx/codexapp-official-loopback-smoke.conf` reproduces
-that boundary on loopback for the real official-window smoke and must not be
-left enabled after the test.
+that boundary on loopback for the real official-window smoke. Run
+`ops/run-official-ui-smoke.sh` as root on the VPS: it starts a separate host on
+port 13017 with an isolated runtime root, installs the loopback proxy on port
+13016, renders and screenshots the official window in real Chromium, and removes
+the temporary service, proxy, screenshot, and runtime state on exit. The active
+port 13014 service is never restarted or reused by this gate.
 
 Interrupted copies cannot become current. User state is never stored below an
 application release and is not converted by rollback.
@@ -46,15 +50,19 @@ Before public cutover, all of the following are mandatory:
 1. `readyz`, immutable renderer hash, dependency audit, and contract checks pass.
 2. The official-window smoke renders nonblank pixels and receives a bridge-ready
    frame through the loopback Nginx boundary.
-3. The hardened in-app browser smoke passes under the production system-call,
+3. `ops/run-host-persistence-smoke.sh` creates and commits a synthetic turn
+   through the browser bridge, disconnects that browser client, restarts the
+   candidate service, reconnects as the same subject, reads the exact turn back,
+   and deletes the synthetic thread.
+4. The hardened in-app browser smoke passes under the production system-call,
    filesystem, device, and privilege restrictions.
-4. Anonymous, forged, missing-proof, and cross-subject authentication attempts
+5. Anonymous, forged, missing-proof, and cross-subject authentication attempts
    fail closed.
-5. The official device-code card displays the server-issued code and successful
+6. The official device-code card displays the server-issued code and successful
    OpenAI authorization reaches the main window without a reload.
-6. A deliberately broken release is rejected and automatically returns to the
+7. A deliberately broken release is rejected and automatically returns to the
    previous healthy release.
-7. A failed installation leaves neither a selectable target nor an incomplete
+8. A failed installation leaves neither a selectable target nor an incomplete
    directory.
-8. The final old-CodexApp conversation backup is made only after its writers are
+9. The final old-CodexApp conversation backup is made only after its writers are
    stopped. OpenCodexApp paths remain excluded.

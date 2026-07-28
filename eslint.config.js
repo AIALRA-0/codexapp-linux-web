@@ -11,7 +11,7 @@ export default tseslint.config(
       'artifacts/**',
       'eslint.config.js',
       'scripts/*.cjs',
-      'scripts/*.mjs',
+      'scripts/**/*.mjs',
       'vitest.config.ts',
     ],
   },
