@@ -27,6 +27,9 @@ workspace_root="$user_root/workspace"
 accepted_marker="$workspace_root/approval-accepted.txt"
 declined_marker="$workspace_root/approval-declined.txt"
 
+source "$application_root/ops/lib/systemd-host-hardening.sh"
+codexapp_prepare_host_hardening "$runtime_root"
+
 read_environment_value() {
   local key="$1"
   awk -F= -v key="$key" '
@@ -149,6 +152,7 @@ systemd-run \
   --gid "$service_group" \
   --working-directory "$application_root" \
   --property "EnvironmentFile=$environment_file" \
+  "${CODEXAPP_HOST_HARDENING_ARGS[@]}" \
   -- \
   /usr/bin/env \
   "PORT=$host_port" \

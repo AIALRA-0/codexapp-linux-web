@@ -55,8 +55,10 @@ port 13014 service is never restarted or reused by this gate.
 
 Before promotion, set `APPLICATION_ROOT` to the immutable staged release when
 running the official-window, desktop-tools, approval, and backup-restore smoke
-scripts. Their default remains the active `current` release for post-promotion
-verification.
+scripts. Their isolated host services use the same systemd filesystem, device,
+privilege, namespace, address-family, syscall, task, and memory restrictions as
+production. Their default remains the active `current` release for
+post-promotion verification.
 
 Interrupted copies cannot become current. User state is never stored below an
 application release and is not converted by rollback.

@@ -20,6 +20,9 @@ app_port="13017"
 proxy_port="13016"
 proxy_enabled=0
 
+source "$application_root/ops/lib/systemd-host-hardening.sh"
+codexapp_prepare_host_hardening "$runtime_root"
+
 read_environment_value() {
   local key="$1"
   awk -F= -v key="$key" '
@@ -94,6 +97,7 @@ systemd-run \
   --gid "$service_group" \
   --working-directory "$application_root" \
   --property "EnvironmentFile=$environment_file" \
+  "${CODEXAPP_HOST_HARDENING_ARGS[@]}" \
   -- \
   /usr/bin/env \
   "PORT=$app_port" \
