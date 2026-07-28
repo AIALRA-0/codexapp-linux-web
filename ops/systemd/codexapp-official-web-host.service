@@ -1,6 +1,7 @@
 [Unit]
 Description=CodexApp official browser host
-After=network-online.target
+Requires=codexapp-official-sandbox-policy.service
+After=network-online.target codexapp-official-sandbox-policy.service
 Wants=network-online.target
 
 [Service]
@@ -33,12 +34,12 @@ RestrictRealtime=true
 LockPersonality=true
 CapabilityBoundingSet=
 AmbientCapabilities=
-RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6 AF_NETLINK
 SystemCallArchitectures=native
 # Chrome probes Landlock/seccomp and memory protection keys before starting its
-# own renderer sandbox. Keep the broad system-service allowlist and add only
-# those two documented syscall groups.
-SystemCallFilter=@system-service @sandbox @pkey
+# own renderer sandbox. Codex uses bubblewrap for Linux command sandboxes, which
+# additionally needs namespace-local mounts and route-netlink for loopback.
+SystemCallFilter=@system-service @sandbox @pkey @mount
 ReadWritePaths=/srv/aialra/state/codexapp-official
 
 [Install]

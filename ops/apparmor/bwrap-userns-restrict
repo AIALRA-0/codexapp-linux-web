@@ -1,0 +1,50 @@
+# Derived from the AppArmor 4.0.2 bwrap-userns-restrict profile:
+# https://gitlab.com/apparmor/apparmor/-/raw/v4.0.2/profiles/apparmor/profiles/extras/bwrap-userns-restrict
+#
+# bwrap may create and configure its sandbox namespace. Programs launched
+# inside the sandbox are stacked with unpriv_bwrap and receive no capabilities.
+
+abi <abi/4.0>,
+
+include <tunables/global>
+
+profile bwrap /usr/bin/bwrap flags=(attach_disconnected,mediate_deleted) {
+  allow capability,
+  allow file rwlkm /{**,},
+  allow network,
+  allow unix,
+  allow ptrace,
+  allow signal,
+  allow mqueue,
+  allow io_uring,
+  allow userns,
+  allow mount,
+  allow umount,
+  allow pivot_root,
+  allow dbus,
+
+  allow px /** -> bwrap//&unpriv_bwrap,
+
+  include if exists <local/bwrap-userns-restrict>
+}
+
+profile unpriv_bwrap flags=(attach_disconnected,mediate_deleted) {
+  allow file rwlkm /{**,},
+  allow network,
+  allow unix,
+  allow ptrace,
+  allow signal,
+  allow mqueue,
+  allow io_uring,
+  allow userns,
+  allow mount,
+  allow umount,
+  allow pivot_root,
+  allow dbus,
+
+  allow pix /** -> &unpriv_bwrap,
+
+  audit deny capability,
+
+  include if exists <local/unpriv_bwrap>
+}

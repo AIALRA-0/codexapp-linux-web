@@ -19,6 +19,23 @@ chmod -R a+rX,a-w /srv/aialra/codexapp-official/releases/VERSION
 chmod -R a+rX,a-w /srv/aialra/codexapp-official/runtime-tools
 ```
 
+Ubuntu 24.04 restricts unprivileged user namespaces through AppArmor. Codex uses
+the official Linux `bwrap` sandbox, so production must install the repository's
+scoped `bwrap` policy instead of globally disabling that protection:
+
+```sh
+APPLICATION_ROOT=/srv/aialra/releases/codexapp-official-web-host/VERSION \
+  /srv/aialra/releases/codexapp-official-web-host/VERSION/ops/install-bwrap-apparmor.sh
+install -o root -g root -m 0644 \
+  /srv/aialra/releases/codexapp-official-web-host/VERSION/ops/systemd/codexapp-official-sandbox-policy.service \
+  /etc/systemd/system/codexapp-official-sandbox-policy.service
+```
+
+The host unit deliberately allows only `AF_NETLINK` and the `@mount` syscall
+group in addition to its previous restrictions. They are required for
+`bwrap` to configure loopback and namespace-local mounts. The AppArmor child
+profile removes capabilities from programs running inside the sandbox.
+
 Do not use `chmod -R a-w` alone: extraction may preserve owner-only source
 manifest files and cause a production-only startup failure.
 

@@ -1,0 +1,10 @@
+[Unit]
+Description=Install the scoped AppArmor policy for the Codex bubblewrap sandbox
+Before=codexapp-official-web-host.service
+ConditionPathExists=/srv/aialra/apps/codexapp-official-web-host/current/ops/install-bwrap-apparmor.sh
+
+[Service]
+Type=oneshot
+UMask=0022
+ExecStart=/srv/aialra/apps/codexapp-official-web-host/current/ops/install-bwrap-apparmor.sh
+
