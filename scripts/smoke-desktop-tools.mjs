@@ -47,6 +47,31 @@ try {
   });
 
   const textMarker = `desktop-tools-${smokeId}`;
+  const commandResult = await bridge.mcpRequest('command/exec', {
+    command: ['/bin/sh', '-c', `printf '${textMarker}\\n'`],
+    cwd: smokeRoot,
+    timeoutMs: 10_000,
+  });
+  if (
+    commandResult?.exitCode !== 0 ||
+    commandResult.stdout !== `${textMarker}\n` ||
+    commandResult.stderr !== ''
+  ) {
+    throw new Error(`app-server command execution changed: ${JSON.stringify(commandResult)}`);
+  }
+  const [skills, permissionProfiles, models] = await Promise.all([
+    bridge.mcpRequest('skills/list', { cwds: [smokeRoot], forceReload: true }),
+    bridge.mcpRequest('permissionProfile/list', { cwd: smokeRoot, limit: 100 }),
+    bridge.mcpRequest('model/list', { includeHidden: false, limit: 100 }),
+  ]);
+  if (
+    !Array.isArray(skills?.data) ||
+    !Array.isArray(permissionProfiles?.data) ||
+    !Array.isArray(models?.data)
+  ) {
+    throw new Error('app-server skills, permission profiles, or model catalog changed');
+  }
+
   const textPath = `${smokeRoot}/qualification.txt`;
   const initialWrite = await services.workspaceFiles.write({
     bytes: new TextEncoder().encode(`${textMarker}\n`),
@@ -356,6 +381,7 @@ try {
     `${JSON.stringify({
       ok: true,
       rendererVersion: bridge.bootstrap.rendererVersion,
+      appServer: ['command-exec', 'skills-list', 'permission-profiles', 'model-list'],
       appHost: true,
       workspaceFiles: ['write', 'read', 'etag-conflict', 'temporary-preview'],
       attachments: ['browser-upload', 'folder-count', 'clipboard-image'],
