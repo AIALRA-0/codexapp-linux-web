@@ -112,8 +112,8 @@ async function runApprovalTurn({ bridge, decision, expectedItemId, prompt, threa
   const approvalRequestPromise = bridge.waitForViewMessage(
     (message) =>
       message?.type === 'mcp-request' &&
-      message.message?.method === 'item/commandExecution/requestApproval' &&
-      message.message?.params?.itemId === expectedItemId,
+      message.request?.method === 'item/commandExecution/requestApproval' &&
+      message.request?.params?.itemId === expectedItemId,
   );
   await bridge.mcpRequest('turn/start', {
     approvalPolicy: 'untrusted',
@@ -124,27 +124,27 @@ async function runApprovalTurn({ bridge, decision, expectedItemId, prompt, threa
     threadId,
   });
   const approvalMessage = await approvalRequestPromise;
-  const requestId = approvalMessage.message?.id;
+  const requestId = approvalMessage.request?.id;
   if (requestId === undefined || requestId === null) {
     throw new Error('approval request id is missing');
   }
   const resolvedPromise = bridge.waitForViewMessage(
     (message) =>
       message?.type === 'mcp-notification' &&
-      message.message?.method === 'serverRequest/resolved' &&
-      message.message?.params?.requestId === requestId,
+      message.method === 'serverRequest/resolved' &&
+      message.params?.requestId === requestId,
   );
   const commandCompletedPromise = bridge.waitForViewMessage(
     (message) =>
       message?.type === 'mcp-notification' &&
-      message.message?.method === 'item/completed' &&
-      message.message?.params?.item?.id === expectedItemId,
+      message.method === 'item/completed' &&
+      message.params?.item?.id === expectedItemId,
   );
   const turnCompletedPromise = bridge.waitForViewMessage(
     (message) =>
       message?.type === 'mcp-notification' &&
-      message.message?.method === 'turn/completed' &&
-      message.message?.params?.turn?.id === approvalMessage.message?.params?.turnId,
+      message.method === 'turn/completed' &&
+      message.params?.turn?.id === approvalMessage.request?.params?.turnId,
   );
   await bridge.respondMcpRequest(requestId, { decision });
   const [resolvedMessage, commandCompleted, turnCompleted] = await Promise.all([
@@ -153,9 +153,9 @@ async function runApprovalTurn({ bridge, decision, expectedItemId, prompt, threa
     turnCompletedPromise,
   ]);
   const expectedStatus = decision === 'accept' ? 'completed' : 'declined';
-  if (commandCompleted.message?.params?.item?.status !== expectedStatus) {
+  if (commandCompleted.params?.item?.status !== expectedStatus) {
     throw new Error(
-      `command approval status changed: ${JSON.stringify(commandCompleted.message?.params?.item)}`,
+      `command approval status changed: ${JSON.stringify(commandCompleted.params?.item)}`,
     );
   }
   return {

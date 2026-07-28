@@ -12,6 +12,11 @@ import {
   type AuthentikIdentity,
   type JsonRpcId,
 } from '@codexapp/contracts';
+
+import {
+  toOfficialRendererNotification,
+  toOfficialRendererRequest,
+} from './official-renderer-messages.js';
 import { CodexAppServerClient, type ServerRequestEvent } from '@codexapp/app-server-client';
 
 import type { GatewayConfig } from './config.js';
@@ -641,11 +646,7 @@ export class UserRuntime extends EventEmitter {
             error: error instanceof Error ? error.message : 'automation notification failed',
           });
         });
-      const message = {
-        type: 'mcp-notification',
-        hostId: 'local',
-        message: parsedNotification,
-      };
+      const message = toOfficialRendererNotification(parsedNotification);
       if (this.#initialAppServerMessages.length < 500) {
         this.#initialAppServerMessages.push(message);
       }
@@ -653,11 +654,7 @@ export class UserRuntime extends EventEmitter {
     });
     client.on('request', (event: ServerRequestEvent) => {
       this.requestUserInputAutoResolution.observeServerRequest(event.request);
-      this.emit('view-message', {
-        type: 'mcp-request',
-        hostId: 'local',
-        message: event.request,
-      });
+      this.emit('view-message', toOfficialRendererRequest(event.request));
     });
     client.on('stderr', (line: string) => this.emit('app-server-stderr', line));
     client.on('protocol-error', (error: Error) => this.emit('error', error));
