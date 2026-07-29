@@ -142,12 +142,13 @@ export async function connectOfficialBridge({ baseUrl, identityHeaders, publicOr
     return JSON.parse(response.bodyJsonString);
   };
 
-  const mcpRequest = async (method, params) => {
+  const appServerRequest = async (messageType, method, params, extra = {}) => {
     const id = randomUUID();
     const pending = deferred();
     mcpResults.set(id, pending);
     await command({
-      type: 'mcp-request',
+      ...extra,
+      type: messageType,
       request: { jsonrpc: '2.0', id, method, params },
     });
     const response = await withTimeout(pending.promise, 120_000, `app-server request ${method}`);
@@ -156,6 +157,17 @@ export async function connectOfficialBridge({ baseUrl, identityHeaders, publicOr
     }
     return response.result;
   };
+
+  const mcpRequest = async (method, params) => appServerRequest('mcp-request', method, params);
+
+  const prewarmThreadStart = async (params) =>
+    appServerRequest('thread-prewarm-start', 'thread/start', params, {
+      expiresAtMs: Date.now() + 120_000,
+      hostId: 'local',
+      priority: 'normal',
+      source: 'official-bridge-smoke',
+      timeoutMs: 120_000,
+    });
 
   const respondMcpRequest = async (id, result) =>
     command({
@@ -276,6 +288,7 @@ export async function connectOfficialBridge({ baseUrl, identityHeaders, publicOr
     connectAppHost,
     desktopFetch,
     mcpRequest,
+    prewarmThreadStart,
     respondMcpRequest,
     waitForViewMessage,
     workerRequest,
