@@ -217,7 +217,24 @@ export class ThreadMetadataGenerator {
       // in-memory catalog, where the official renderer can surface it after a
       // name/description update. Deleting it emits the renderer's normal
       // `thread/deleted` lifecycle event and removes the temporary conversation.
-      void appServer.request('thread/delete', { threadId }).catch(() => undefined);
+      await deleteEphemeralThread(appServer, threadId);
+    }
+  }
+}
+
+async function deleteEphemeralThread(
+  appServer: CodexAppServerClient,
+  threadId: string,
+): Promise<void> {
+  const retryDelaysMs = [0, 100, 250, 500];
+  for (const delayMs of retryDelaysMs) {
+    if (delayMs > 0) await new Promise((resolve) => setTimeout(resolve, delayMs));
+    try {
+      await appServer.request('thread/delete', { threadId });
+      return;
+    } catch {
+      // A timed-out metadata turn may still be finishing its interrupt. Retry
+      // briefly so the temporary system thread cannot leak into user history.
     }
   }
 }

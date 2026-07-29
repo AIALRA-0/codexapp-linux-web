@@ -54,6 +54,34 @@ describe('renderer fetch security', () => {
 });
 
 describe('renderer fetch proxy', () => {
+  it('acknowledges blocked official event ingestion without retrying upstream', async () => {
+    const fetchImplementation = vi.fn(() => Promise.reject(new Error('must not fetch')));
+    const getAuthToken = vi.fn(() => Promise.resolve('must-not-read'));
+    const proxy = new RendererFetchProxy({
+      appVersion: '26.721.31836',
+      fetchImplementation,
+      getAuthToken,
+    });
+    const result = await proxy.perform({
+      type: 'fetch',
+      requestId: 'request-telemetry',
+      url: 'https://chatgpt.com/ces/v1/rgstr?batch=1',
+      method: 'POST',
+      headers: {},
+      body: '[]',
+    });
+    expect(result).toEqual({
+      type: 'fetch-response',
+      responseType: 'success',
+      requestId: 'request-telemetry',
+      status: 204,
+      headers: {},
+      bodyJsonString: 'null',
+    });
+    expect(fetchImplementation).not.toHaveBeenCalled();
+    expect(getAuthToken).not.toHaveBeenCalled();
+  });
+
   it('attaches an app-server token only to qualified OpenAI requests', async () => {
     const tokenPayload = Buffer.from(
       JSON.stringify({

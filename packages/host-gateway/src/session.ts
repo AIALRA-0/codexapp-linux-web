@@ -33,6 +33,10 @@ export class BrowserSession {
     runtime.requestUserInputAutoResolution.setSurfaceForegrounded(this.id, false);
   }
 
+  get pendingHostFrames(): number {
+    return this.#outbox.size;
+  }
+
   attach(socket: WebSocket, lastHostSequence: number): void {
     this.#socket?.close(4001, 'replaced by reconnect');
     this.#socket = socket;

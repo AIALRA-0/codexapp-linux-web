@@ -5,6 +5,7 @@ import { join } from 'node:path';
 
 import {
   countIdentitySessions,
+  countReconnectableIdentitySessions,
   findMissingBrowserBridgeImports,
   officialInitialRouteLocation,
   resolveBrowserFileAsset,
@@ -47,6 +48,34 @@ describe('authenticated session capacity accounting', () => {
         groups: [],
       }),
     ).toBe(2);
+  });
+
+  it('counts only disconnected sessions that are still inside the reconnect window', () => {
+    const reconnectTimer = setTimeout(() => undefined, 60_000);
+    try {
+      const entries = [
+        {
+          identity: { subject: 'subject-a', username: 'shared', groups: [] },
+          cleanupTimer: reconnectTimer,
+        },
+        {
+          identity: { subject: 'subject-a', username: 'shared', groups: [] },
+        },
+        {
+          identity: { subject: 'subject-b', username: 'shared', groups: [] },
+          cleanupTimer: reconnectTimer,
+        },
+      ];
+      expect(
+        countReconnectableIdentitySessions(entries, {
+          subject: 'subject-a',
+          username: 'renamed',
+          groups: [],
+        }),
+      ).toBe(1);
+    } finally {
+      clearTimeout(reconnectTimer);
+    }
   });
 });
 

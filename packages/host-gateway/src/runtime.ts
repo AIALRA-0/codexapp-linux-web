@@ -32,6 +32,7 @@ import type { GatewayConfig } from './config.js';
 import { identitiesMatch, userKeyForIdentity } from './identity.js';
 import { prepareRendererRequest } from './login.js';
 import { RendererFetchProxy, type HostDownloadRequest } from './network.js';
+import { OfficialAppDirectoryCache } from './official-app-directory.js';
 import { OfficialAutomationController } from './official-automation.js';
 import { OfficialBrowserRuntime } from './browser-runtime.js';
 import { buildOfficialDeveloperInstructions } from './official-developer-instructions.js';
@@ -69,6 +70,7 @@ const INITIAL_SIDEBAR_GLOBAL_STATE_KEYS = [
 
 interface RendererRequestMetadata {
   method: string;
+  startedAtMs: number;
   trace?: unknown;
 }
 
@@ -110,6 +112,7 @@ export class UserRuntime extends EventEmitter {
   readonly browserRuntime: OfficialBrowserRuntime;
 
   #appServer: CodexAppServerClient | undefined;
+  #appDirectoryCache: OfficialAppDirectoryCache;
   #fetchProxy: RendererFetchProxy;
   #state: DurableStateStore;
   #gitWorker: OfficialGitWorker | undefined;
@@ -140,6 +143,7 @@ export class UserRuntime extends EventEmitter {
       username: identity.username,
     });
     this.#state = new DurableStateStore(join(this.root, 'host-state.json'));
+    this.#appDirectoryCache = new OfficialAppDirectoryCache(this.codexHome);
     this.threadCatalog = new OfficialThreadCatalog({
       sourceRoot: config.officialSourceRoot,
       loadPersisted: () => this.#state.get('globalState', THREAD_CATALOG_STATE_KEY),
@@ -424,13 +428,39 @@ export class UserRuntime extends EventEmitter {
         return this.#handleBridgeRequest(message);
       case 'mcp-request': {
         const prepared = prepareRendererRequest(message.request);
+        const startedAtMs = Date.now();
         assertStorageAvailableForMethod(
           this.config.runtimeRoot,
           this.config.minimumFreeBytes,
           prepared.request.method,
         );
+        if (prepared.request.method === 'app/list') {
+          const cached = await this.#appDirectoryCache.list(prepared.request.params);
+          if (cached !== null) {
+            const receivedAtMs = Date.now();
+            this.emit('performance', {
+              kind: 'official-cache',
+              method: prepared.request.method,
+              durationMs: receivedAtMs - startedAtMs,
+            });
+            this.emit('view-message', {
+              type: 'mcp-response',
+              hostId: 'local',
+              message: { id: prepared.request.id, result: cached },
+              ...(prepared.request.trace === undefined
+                ? {}
+                : {
+                    receivedAtMs,
+                    requestMethod: prepared.request.method,
+                    trace: prepared.request.trace,
+                  }),
+            });
+            return undefined;
+          }
+        }
         this.#rendererRequests.set(prepared.request.id, {
           method: prepared.request.method,
+          startedAtMs,
           ...(prepared.request.trace === undefined ? {} : { trace: prepared.request.trace }),
         });
         await this.#requireAppServer().forwardRequest(prepared.request);
@@ -544,6 +574,7 @@ export class UserRuntime extends EventEmitter {
         });
         return undefined;
       case 'electron-window-zoom-changed':
+      case 'electron-app-state-snapshot-trigger':
       case 'electron-set-window-mode':
       case 'electron-set-badge-count':
       case 'electron-avatar-overlay-restore-ready':
@@ -563,6 +594,18 @@ export class UserRuntime extends EventEmitter {
         // Electron-owned webview partitions. The browser already owns those
         // surfaces, so accepting the notification is the exact Linux/web
         // fallback and must not become a renderer error.
+        return undefined;
+      case 'browser-use-session-route-capture':
+        if (
+          typeof message.browserConversationId !== 'string' ||
+          typeof message.conversationId !== 'string'
+        ) {
+          throw new Error('browser use session route is invalid');
+        }
+        // The web browser runtime already routes every surface by conversation
+        // id and persists each registered page. The Electron message only
+        // informs its native webContents lifecycle manager, so acknowledging it
+        // is the exact browser-host equivalent.
         return undefined;
       case 'electron-pick-workspace-root-option':
         this.emit('view-message', {
@@ -715,6 +758,15 @@ export class UserRuntime extends EventEmitter {
       const parsed = jsonRpcResponseSchema.parse(response);
       const metadata = this.#rendererRequests.get(parsed.id);
       this.#rendererRequests.delete(parsed.id);
+      const receivedAtMs = Date.now();
+      if (metadata !== undefined) {
+        this.emit('performance', {
+          kind: 'app-server',
+          method: metadata.method,
+          durationMs: receivedAtMs - metadata.startedAtMs,
+          error: parsed.error !== undefined,
+        });
+      }
       if (
         parsed.error !== undefined &&
         !isExpectedAppServerResponseError(metadata?.method, parsed.error.code, parsed.error.message)
@@ -733,7 +785,7 @@ export class UserRuntime extends EventEmitter {
         ...(metadata?.trace === undefined
           ? {}
           : {
-              receivedAtMs: Date.now(),
+              receivedAtMs,
               requestMethod: metadata.method,
               trace: metadata.trace,
             }),
@@ -1171,6 +1223,11 @@ export class UserRuntime extends EventEmitter {
           outputDirectory: this.workspaceRoot,
           workspaceRoot: this.workspaceRoot,
         };
+      case 'worktree-shell-environment-config':
+        // Native Electron captures additions from the user's login shell. The
+        // server process already starts Codex and terminals with the qualified
+        // service environment, so there is no extra shell delta to merge.
+        return { shellEnvironment: null };
       case 'codex-home':
         return {
           codexHome: this.codexHome,

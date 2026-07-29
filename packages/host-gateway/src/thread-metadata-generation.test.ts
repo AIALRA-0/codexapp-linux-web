@@ -12,6 +12,7 @@ class FakeAppServer extends EventEmitter {
     description: 'codexapp  登录  历史对话',
   };
   failFork = false;
+  deletePromise: Promise<unknown> | null = null;
 
   request(method: string, paramsValue?: unknown): Promise<unknown> {
     const params = (paramsValue ?? {}) as Record<string, unknown>;
@@ -45,7 +46,7 @@ class FakeAppServer extends EventEmitter {
       });
       return Promise.resolve({ turn: { id: 'turn-1' } });
     }
-    if (method === 'thread/delete') return Promise.resolve({});
+    if (method === 'thread/delete') return this.deletePromise ?? Promise.resolve({});
     return Promise.reject(new Error(`Unexpected app-server request: ${method}`));
   }
 }
@@ -156,6 +157,30 @@ describe('official thread metadata generation', () => {
       required: ['description'],
       additionalProperties: false,
     });
+  });
+
+  it('does not finish metadata generation until the temporary thread is deleted', async () => {
+    const fake = new FakeAppServer();
+    let releaseDelete: ((value: unknown) => void) | undefined;
+    fake.deletePromise = new Promise((resolve) => {
+      releaseDelete = resolve;
+    });
+    let settled = false;
+    const generation = createGenerator(fake)
+      .generateTitle({
+        prompt: '验证临时线程清理',
+        cwd: '/workspace',
+        readOnlyAppToolAllowlist: [],
+      })
+      .finally(() => {
+        settled = true;
+      });
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(fake.requests.some((request) => request.method === 'thread/delete')).toBe(true);
+    expect(settled).toBe(false);
+    releaseDelete?.({});
+    await expect(generation).resolves.toMatchObject({ title: '修复登录速度。' });
+    expect(settled).toBe(true);
   });
 
   it('does not create a fresh description thread when the official fork fails', async () => {

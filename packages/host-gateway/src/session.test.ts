@@ -48,6 +48,7 @@ describe('browser session reconnect protocol', () => {
     session.detach(firstSocket as unknown as WebSocket);
 
     const offlineMessage = session.send({ type: 'view-message', message: { value: 2 } });
+    expect(session.pendingHostFrames).toBe(1);
     const secondSocket = new SocketHarness();
     session.attach(secondSocket as unknown as WebSocket, 2);
 

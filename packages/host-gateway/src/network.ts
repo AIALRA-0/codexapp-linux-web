@@ -145,6 +145,16 @@ export class RendererFetchProxy {
         this.options.chatGptApiBase ?? DEFAULT_CHATGPT_API_BASE,
       );
       assertAllowedRendererFetchUrl(resolvedUrl);
+      if (isDiscardableTelemetryIngest(request, resolvedUrl)) {
+        return {
+          type: 'fetch-response',
+          responseType: 'success',
+          requestId: request.requestId,
+          status: 204,
+          headers: {},
+          bodyJsonString: 'null',
+        };
+      }
       const response = await this.#performWithAuth(request, resolvedUrl, signal);
       const headers = responseHeaders(response.headers);
       const bytes = await readResponseBytes(
@@ -733,6 +743,14 @@ function isOpenAiAuthAllowedUrl(url: URL): boolean {
     hostname.endsWith('.openai.com') ||
     ((hostname === 'chatgpt.com' || hostname.endsWith('.chatgpt.com')) &&
       !hostname.startsWith('ab.'))
+  );
+}
+
+function isDiscardableTelemetryIngest(request: RendererFetchRequest, url: URL): boolean {
+  return (
+    request.method === 'POST' &&
+    url.hostname.toLowerCase() === 'chatgpt.com' &&
+    url.pathname === '/ces/v1/rgstr'
   );
 }
 

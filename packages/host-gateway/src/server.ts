@@ -54,8 +54,6 @@ interface SessionEntry {
   identity: AuthentikIdentity;
   runtime: UserRuntime;
   cleanupTimer?: NodeJS.Timeout;
-  appHostDiagnosticListener?: (message: string) => void;
-  capabilityErrorListener?: (details: unknown) => void;
 }
 
 const CONTENT_TYPES: Record<string, string> = {
@@ -180,6 +178,34 @@ export async function createGateway(config: GatewayConfig): Promise<FastifyInsta
     trustProxy: false,
     requestTimeout: 130_000,
   });
+  const observedRuntimes = new WeakSet<UserRuntime>();
+  const observeRuntime = (runtime: UserRuntime): void => {
+    if (observedRuntimes.has(runtime)) return;
+    observedRuntimes.add(runtime);
+    if (process.env.NODE_ENV === 'development') {
+      runtime.on('app-host-send', (message: string) => {
+        const details = { appHostFrame: message.slice(0, 4_000) };
+        if (message.startsWith('["reject"')) {
+          app.log.warn(details, 'AppHost call rejected');
+        } else {
+          app.log.debug(details, 'AppHost frame sent');
+        }
+      });
+    }
+    runtime.on('capability-error', (details: unknown) => {
+      app.log.warn({ details }, 'renderer capability request failed');
+    });
+    runtime.on('performance', (details: unknown) => {
+      const record =
+        details !== null && typeof details === 'object' ? (details as Record<string, unknown>) : {};
+      const durationMs = typeof record.durationMs === 'number' ? record.durationMs : 0;
+      if (durationMs >= 250) {
+        app.log.info({ details: record }, 'renderer request latency');
+      } else {
+        app.log.debug({ details: record }, 'renderer request latency');
+      }
+    });
+  };
 
   await app.register(websocket, {
     options: {
@@ -407,35 +433,25 @@ export async function createGateway(config: GatewayConfig): Promise<FastifyInsta
                 return;
               }
               const runtime = await runtimes.acquire(identity);
-              const appHostDiagnosticListener =
-                process.env.NODE_ENV === 'development'
-                  ? (message: string) => {
-                      const details = { appHostFrame: message.slice(0, 4_000) };
-                      if (message.startsWith('["reject"')) {
-                        app.log.warn(details, 'AppHost call rejected');
-                      } else {
-                        app.log.debug(details, 'AppHost frame sent');
-                      }
-                    }
-                  : undefined;
-              const capabilityErrorListener = (details: unknown) => {
-                app.log.warn({ details }, 'renderer capability request failed');
-              };
-              if (appHostDiagnosticListener !== undefined) {
-                runtime.on('app-host-send', appHostDiagnosticListener);
-              }
-              if (capabilityErrorListener !== undefined) {
-                runtime.on('capability-error', capabilityErrorListener);
-              }
+              observeRuntime(runtime);
               entry = {
                 session: new BrowserSession(ticket.sessionId, runtime),
                 identity,
                 runtime,
-                ...(appHostDiagnosticListener === undefined ? {} : { appHostDiagnosticListener }),
-                ...(capabilityErrorListener === undefined ? {} : { capabilityErrorListener }),
               };
               sessions.set(ticket.sessionId, entry);
-              app.log.info({ auditUserKey, sessionId: ticket.sessionId }, 'bridge session created');
+              app.log.info(
+                {
+                  auditUserKey,
+                  sessionId: ticket.sessionId,
+                  identitySessionCount: countIdentitySessions(sessions.values(), identity),
+                  reconnectableSessionCount: countReconnectableIdentitySessions(
+                    sessions.values(),
+                    identity,
+                  ),
+                },
+                'bridge session created',
+              );
             } else if (!identitiesMatch(entry.identity, identity)) {
               app.log.warn(
                 { auditUserKey, sessionId: ticket.sessionId },
@@ -502,14 +518,17 @@ export async function createGateway(config: GatewayConfig): Promise<FastifyInsta
       if (entry.cleanupTimer === undefined) {
         entry.cleanupTimer = setTimeout(() => {
           if (entry === undefined) return;
+          const pendingHostFrames = entry.session.pendingHostFrames;
           entry.session.dispose();
           sessions.delete(entry.session.id);
-          if (entry.appHostDiagnosticListener !== undefined) {
-            entry.runtime.off('app-host-send', entry.appHostDiagnosticListener);
-          }
-          if (entry.capabilityErrorListener !== undefined) {
-            entry.runtime.off('capability-error', entry.capabilityErrorListener);
-          }
+          app.log.info(
+            {
+              auditUserKey,
+              sessionId: entry.session.id,
+              pendingHostFrames,
+            },
+            'bridge reconnect window expired',
+          );
           runtimes.release(entry.runtime);
         }, 10 * 60_000);
         entry.cleanupTimer.unref();
@@ -659,6 +678,17 @@ export function countIdentitySessions(
   let count = 0;
   for (const entry of entries) {
     if (identitiesMatch(entry.identity, identity)) count += 1;
+  }
+  return count;
+}
+
+export function countReconnectableIdentitySessions(
+  entries: Iterable<Pick<SessionEntry, 'identity' | 'cleanupTimer'>>,
+  identity: AuthentikIdentity,
+): number {
+  let count = 0;
+  for (const entry of entries) {
+    if (entry.cleanupTimer !== undefined && identitiesMatch(entry.identity, identity)) count += 1;
   }
   return count;
 }

@@ -34,6 +34,7 @@
     "smoke:approvals": "node scripts/smoke-approvals.mjs",
     "smoke:core-lifecycle": "node scripts/smoke-core-lifecycle.mjs",
     "smoke:host-persistence": "node scripts/smoke-host-persistence.mjs",
+    "smoke:large-thread": "node scripts/smoke-large-thread.mjs",
     "smoke:mcp": "node scripts/smoke-mcp.mjs",
     "smoke:official-ui": "node scripts/smoke-official-ui.mjs",
     "smoke:task-start": "node scripts/smoke-task-start.mjs",
