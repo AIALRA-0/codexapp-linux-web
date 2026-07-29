@@ -280,6 +280,30 @@ read back the exact turn, and deleted the synthetic thread. The service
 subsequently reported zero restarts, no warning-or-higher journal entries, an
 unchanged official renderer tree hash, and healthy storage.
 
+### Signed-in post-promotion browser qualification
+
+The real public browser completed the Authentik sign-in flow and loaded the
+official production renderer. All mutations below were restricted to synthetic
+performance-test threads:
+
+- a warm switch to `确认性能封测2` made the target content visible in 162 ms
+- a later switch to `确认性能封测3` made the target content visible in 44 ms
+- a synthetic send displayed the exact assistant reply in 2.03 seconds,
+  including model generation time
+- branching from the latest synthetic reply completed in 364 ms
+- archiving that new synthetic branch completed in 771 ms and returned to the
+  official new-task screen
+- hiding and restoring the conversation sidebar both worked, with the original
+  thread content preserved
+
+The browser-control layer itself repeatedly waited 10 seconds for its own
+`ab.chatgpt.com` Statsig requests and could make an automation call appear to
+take about 30 seconds. In-page clocks showed that the production renderer had
+already changed in 44--162 ms. Those controller waits are therefore excluded
+from CodexApp product latency. After these operations, the production service
+still had zero restarts, no warning-or-higher journal entries, the same official
+renderer hash, and a healthy readiness response.
+
 ## Defects found and fixed during the audit
 
 - Obsolete renderer notification envelope left completed turns visually running.
@@ -313,13 +337,7 @@ renderer before promotion.
 4. Logout, account deletion, memory deletion, plugin uninstall, paid actions, and
    production deployment of a new Site were intentionally not executed because
    they are not safely reversible.
-5. The browser-control session could not claim the already signed-in in-app
-   browser tab after promotion: browser discovery returned the in-app browser but
-   an empty claimable-tab list. Therefore post-release public-path button and send
-   timings are not represented as completed evidence. The production protocol,
-   isolated real-Chromium UI, service-restart recovery, and concurrent-invocation
-   gates did pass.
-6. The Mac's current transparent routing path adds material TLS and public
+5. The Mac's current transparent routing path adds material TLS and public
    round-trip variance. This is outside the VPS application architecture and
    should be optimized in the local proxy/routing layer.
 
