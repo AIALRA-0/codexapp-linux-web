@@ -38,9 +38,11 @@ import { OfficialBrowserRuntime } from './browser-runtime.js';
 import { buildOfficialDeveloperInstructions } from './official-developer-instructions.js';
 import { OfficialDesktopState } from './official-desktop-state.js';
 import { OfficialGithubService, OfficialGitWorker } from './official-git-worker.js';
+import { OfficialPrewarmedThreads } from './prewarmed-threads.js';
 import { RequestUserInputAutoResolution } from './request-user-input-auto-resolution.js';
 import { ensureRuntimeDirectory, resolveRuntimeDirectory } from './runtime-directory.js';
 import { DurableStateStore } from './state.js';
+import { TurnLatencyTracker } from './turn-latency.js';
 import { assertStorageAvailableForMethod } from './storage.js';
 import { TerminalManager } from './terminal.js';
 import { OfficialThreadCatalog } from './thread-catalog.js';
@@ -70,6 +72,7 @@ const INITIAL_SIDEBAR_GLOBAL_STATE_KEYS = [
 
 interface RendererRequestMetadata {
   method: string;
+  prewarmThread?: boolean;
   startedAtMs: number;
   trace?: unknown;
 }
@@ -118,6 +121,8 @@ export class UserRuntime extends EventEmitter {
   #gitWorker: OfficialGitWorker | undefined;
   #githubService: OfficialGithubService | undefined;
   #pendingGitRequests = new Map<string, string>();
+  #prewarmedThreads: OfficialPrewarmedThreads;
+  #turnLatency: TurnLatencyTracker;
   #starting: Promise<void> | undefined;
   #appServerRestartTimer: NodeJS.Timeout | undefined;
   #appServerRestartAttempt = 0;
@@ -144,6 +149,23 @@ export class UserRuntime extends EventEmitter {
     });
     this.#state = new DurableStateStore(join(this.root, 'host-state.json'));
     this.#appDirectoryCache = new OfficialAppDirectoryCache(this.codexHome);
+    this.#prewarmedThreads = new OfficialPrewarmedThreads({
+      deleteExpiredThread: (threadId) => {
+        void this.#appServer?.request('thread/delete', { threadId }).catch((error: unknown) => {
+          this.emit('capability-error', {
+            requestType: 'prewarmed-thread-delete',
+            threadId,
+            error: error instanceof Error ? error.message : 'prewarmed thread delete failed',
+          });
+        });
+      },
+      publishThreadStarted: (notification) => {
+        this.#deliverAppServerNotification(notification, false);
+      },
+    });
+    this.#turnLatency = new TurnLatencyTracker((measurement) => {
+      this.emit('performance', measurement);
+    });
     this.threadCatalog = new OfficialThreadCatalog({
       sourceRoot: config.officialSourceRoot,
       loadPersisted: () => this.#state.get('globalState', THREAD_CATALOG_STATE_KEY),
@@ -405,6 +427,8 @@ export class UserRuntime extends EventEmitter {
     this.automationController.stop();
     await this.officialDesktopState.stop();
     await this.browserRuntime.stop();
+    this.#prewarmedThreads.clear();
+    this.#turnLatency.clear();
     await this.#appServer?.stop();
     this.#appServer = undefined;
   }
@@ -460,6 +484,48 @@ export class UserRuntime extends EventEmitter {
         }
         this.#rendererRequests.set(prepared.request.id, {
           method: prepared.request.method,
+          startedAtMs,
+          ...(prepared.request.trace === undefined ? {} : { trace: prepared.request.trace }),
+        });
+        if (prepared.request.method === 'turn/start') {
+          this.#turnLatency.start(prepared.request.params, startedAtMs);
+        }
+        try {
+          await this.#requireAppServer().forwardRequest(prepared.request);
+        } catch (error) {
+          if (prepared.request.method === 'turn/start') {
+            this.#turnLatency.stop(prepared.request.params);
+          }
+          throw error;
+        }
+        if (prepared.request.method === 'turn/start') {
+          const durationMs = this.#prewarmedThreads.publishForTurnStart(
+            prepared.request.params,
+            Date.now(),
+          );
+          if (durationMs !== null) {
+            this.emit('performance', {
+              kind: 'prewarm-to-turn-start',
+              durationMs,
+            });
+          }
+        }
+        return undefined;
+      }
+      case 'thread-prewarm-start': {
+        const prepared = prepareRendererRequest(message.request);
+        if (prepared.request.method !== 'thread/start') {
+          throw new Error('thread prewarm must use thread/start');
+        }
+        const startedAtMs = Date.now();
+        assertStorageAvailableForMethod(
+          this.config.runtimeRoot,
+          this.config.minimumFreeBytes,
+          prepared.request.method,
+        );
+        this.#rendererRequests.set(prepared.request.id, {
+          method: prepared.request.method,
+          prewarmThread: true,
           startedAtMs,
           ...(prepared.request.trace === undefined ? {} : { trace: prepared.request.trace }),
         });
@@ -767,6 +833,9 @@ export class UserRuntime extends EventEmitter {
           error: parsed.error !== undefined,
         });
       }
+      if (metadata?.prewarmThread === true) {
+        this.#prewarmedThreads.trackResponse(parsed, metadata.startedAtMs);
+      }
       if (
         parsed.error !== undefined &&
         !isExpectedAppServerResponseError(metadata?.method, parsed.error.code, parsed.error.message)
@@ -793,22 +862,7 @@ export class UserRuntime extends EventEmitter {
     });
     client.on('notification', (notification: unknown) => {
       const parsedNotification = jsonRpcNotificationSchema.parse(notification);
-      this.requestUserInputAutoResolution.observeServerNotification(parsedNotification);
-      this.threadCatalog.handleNotification(parsedNotification);
-      this.emit('app-server-notification', parsedNotification);
-      void this.automationController
-        .handleNotification(parsedNotification)
-        .catch((error: unknown) => {
-          this.emit('capability-error', {
-            requestType: 'official-automation-notification',
-            error: error instanceof Error ? error.message : 'automation notification failed',
-          });
-        });
-      const message = toOfficialRendererNotification(parsedNotification);
-      if (this.#initialAppServerMessages.length < 500) {
-        this.#initialAppServerMessages.push(message);
-      }
-      this.emit('view-message', message);
+      this.#deliverAppServerNotification(parsedNotification);
     });
     client.on('request', (event: ServerRequestEvent) => {
       this.requestUserInputAutoResolution.observeServerRequest(event.request);
@@ -884,6 +938,48 @@ export class UserRuntime extends EventEmitter {
       });
     }
     this.#rendererRequests.clear();
+    this.#prewarmedThreads.clear();
+    this.#turnLatency.clear();
+  }
+
+  #deliverAppServerNotification(
+    parsedNotification: { method: string; params?: unknown },
+    suppressPrewarmedThread = true,
+  ): void {
+    this.#turnLatency.observeNotification(parsedNotification);
+    if (parsedNotification.method === 'thread/deleted') {
+      const params =
+        parsedNotification.params !== null &&
+        typeof parsedNotification.params === 'object' &&
+        !Array.isArray(parsedNotification.params)
+          ? (parsedNotification.params as Record<string, unknown>)
+          : {};
+      if (typeof params.threadId === 'string') {
+        this.#prewarmedThreads.stopTracking(params.threadId);
+      }
+    }
+    if (
+      suppressPrewarmedThread &&
+      this.#prewarmedThreads.suppressThreadStarted(parsedNotification)
+    ) {
+      return;
+    }
+    this.requestUserInputAutoResolution.observeServerNotification(parsedNotification);
+    this.threadCatalog.handleNotification(parsedNotification);
+    this.emit('app-server-notification', parsedNotification);
+    void this.automationController
+      .handleNotification(parsedNotification)
+      .catch((error: unknown) => {
+        this.emit('capability-error', {
+          requestType: 'official-automation-notification',
+          error: error instanceof Error ? error.message : 'automation notification failed',
+        });
+      });
+    const message = toOfficialRendererNotification(parsedNotification);
+    if (this.#initialAppServerMessages.length < 500) {
+      this.#initialAppServerMessages.push(message);
+    }
+    this.emit('view-message', message);
   }
 
   #requireGitWorker(): OfficialGitWorker {

@@ -19,6 +19,10 @@ if [[ ! "$cache_name" =~ ^[a-f0-9]{40}\.json$ ]]; then
   echo "cache filename must be the official 40-character cache key: $cache_name" >&2
   exit 65
 fi
+if [[ ! -d "$target_codex_home" || -L "$target_codex_home" ]]; then
+  echo "target Codex home must be an existing physical directory: $target_codex_home" >&2
+  exit 66
+fi
 
 connector_count=$(
   jq -er '
@@ -32,11 +36,13 @@ connector_count=$(
 )
 
 target_directory="$target_codex_home/cache/codex_app_directory"
-install -d -m 700 -- "$target_directory"
+target_uid=$(stat -c '%u' -- "$target_codex_home")
+target_gid=$(stat -c '%g' -- "$target_codex_home")
+install -d -o "$target_uid" -g "$target_gid" -m 700 -- "$target_directory"
 temporary_file=$(mktemp "$target_directory/.${cache_name}.XXXXXXXX")
 trap 'rm -f -- "$temporary_file"' EXIT
 
-install -m 600 -- "$source_json" "$temporary_file"
+install -o "$target_uid" -g "$target_gid" -m 600 -- "$source_json" "$temporary_file"
 mv -f -- "$temporary_file" "$target_directory/$cache_name"
 trap - EXIT
 
