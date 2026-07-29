@@ -115,6 +115,8 @@ const BROWSER_BRIDGE_MODULES = [
   'remote-webview.js',
 ] as const;
 
+const MAX_CONCURRENT_BRIDGE_INVOCATIONS = 128;
+
 export async function createGateway(config: GatewayConfig): Promise<FastifyInstance> {
   const qualification = verifyPreparedRelease(config.sourceManifest);
   if (qualification.package.version !== config.expectedRendererVersion) {
@@ -380,6 +382,7 @@ export async function createGateway(config: GatewayConfig): Promise<FastifyInsta
     let entry: SessionEntry | undefined;
     let helloReceived = false;
     let frameQueue = Promise.resolve();
+    const concurrentInvocations = new Set<Promise<void>>();
     const rateLimiter = new ConnectionRateLimiter(
       config.maxBridgeMessagesPerSecond,
       config.maxBridgeMessagesPerSecond * 2,
@@ -514,6 +517,28 @@ export async function createGateway(config: GatewayConfig): Promise<FastifyInsta
               },
               'bridge frame received',
             );
+          }
+          if (isConcurrentBridgeInvocation(frame)) {
+            if (concurrentInvocations.size >= MAX_CONCURRENT_BRIDGE_INVOCATIONS) {
+              app.log.warn(
+                {
+                  auditUserKey,
+                  sessionId: entry.session.id,
+                  concurrentInvocationCount: concurrentInvocations.size,
+                },
+                'bridge concurrent invocation limit exceeded',
+              );
+              socket.close(4429, 'concurrent invocation limit exceeded');
+              return;
+            }
+            const invocation = handleClientFrame(entry.session, frame)
+              .catch((error: unknown) => {
+                app.log.error({ err: error }, 'concurrent bridge frame failed');
+                socket.close(4500, 'host command failed');
+              })
+              .finally(() => concurrentInvocations.delete(invocation));
+            concurrentInvocations.add(invocation);
+            return;
           }
           await handleClientFrame(entry.session, frame);
         })
@@ -714,6 +739,10 @@ export function officialInitialRouteLocation(initialRoute: '/' | '/login'): stri
 
 export function missingBridgeSessionRequiresReload(lastHostSequence: number): boolean {
   return lastHostSequence > 0;
+}
+
+export function isConcurrentBridgeInvocation(frame: ClientFrame): boolean {
+  return frame.type === 'command' || frame.type === 'worker-command';
 }
 
 export function shouldServeRendererIndex(

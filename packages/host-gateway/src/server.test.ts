@@ -7,6 +7,7 @@ import {
   countIdentitySessions,
   countReconnectableIdentitySessions,
   findMissingBrowserBridgeImports,
+  isConcurrentBridgeInvocation,
   missingBridgeSessionRequiresReload,
   officialInitialRouteLocation,
   resolveBrowserFileAsset,
@@ -133,5 +134,46 @@ describe('authenticated official file protocol route', () => {
     } finally {
       await rm(parent, { force: true, recursive: true });
     }
+  });
+});
+
+describe('official Electron invocation concurrency', () => {
+  it('does not serialize independent invoke handlers behind a slow command', () => {
+    expect(
+      isConcurrentBridgeInvocation({
+        contractVersion: 1,
+        type: 'command',
+        sequence: 1,
+        commandId: 'command-1',
+        message: { type: 'fetch' },
+      }),
+    ).toBe(true);
+    expect(
+      isConcurrentBridgeInvocation({
+        contractVersion: 1,
+        type: 'worker-command',
+        sequence: 2,
+        commandId: 'command-2',
+        worker: 'official-worker',
+        message: {},
+      }),
+    ).toBe(true);
+    expect(
+      isConcurrentBridgeInvocation({
+        contractVersion: 1,
+        type: 'ack',
+        sequence: 3,
+        hostSequence: 1,
+      }),
+    ).toBe(false);
+    expect(
+      isConcurrentBridgeInvocation({
+        contractVersion: 1,
+        type: 'host-port-message',
+        sequence: 4,
+        portId: 'port-1',
+        message: 'frame',
+      }),
+    ).toBe(false);
   });
 });

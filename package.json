@@ -28,6 +28,7 @@
     "official:prepare": "tsx packages/official-package/src/cli.ts prepare",
     "contracts:check": "npm run build --silent && tsx packages/browser-bridge/src/check-contract.ts",
     "security:check": "bash ops/check-source-boundaries.sh",
+    "measure:bridge-latency": "node scripts/measure-bridge-latency.mjs",
     "smoke:browser": "node scripts/smoke-browser-runtime.mjs",
     "smoke:desktop-tools": "node scripts/smoke-desktop-tools.mjs",
     "smoke:auth-isolation": "node scripts/smoke-auth-isolation.mjs",
