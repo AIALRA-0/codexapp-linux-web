@@ -3,18 +3,18 @@
 ## Final production baseline
 
 - URL: `https://codexapp.aialra.online`
-- Release: `20260729.11-official-26.721.31836`
+- Release: `20260729.18-official-26.721.31836`
 - Renderer: the unmodified official renderer `26.721.31836`
 - Runtime: official `codex-cli 0.146.0-alpha.3.1`
 - Authentication: Authentik at the reverse-proxy boundary plus the official
   OpenAI/Codex account inside the isolated user runtime
 - Protected systems: OpenCodexApp and its state were not changed
-- Rollback target: `20260729.10-official-26.721.31836`
+- Rollback target: `20260729.16-official-26.721.31836`
 
 The production release passed the official-renderer, authentication-isolation,
 task-start, desktop-tools, approval, backup/restore, core-lifecycle, MCP,
-browser-runtime, and service-restart persistence gates. The local test suite
-contains 179 passing tests in 38 files.
+browser-runtime, large-thread, concurrent-invocation, and service-restart
+persistence gates. The local test suite contains 196 passing tests in 41 files.
 
 ## How this audit was performed
 
@@ -203,10 +203,91 @@ A staging attempt that accidentally contained macOS native Node dependencies was
 rejected before promotion by the immutable release gate. The final release was
 built from the Linux release base and passed all gates.
 
+## Performance investigation and release .18
+
+### Root cause separated by layer
+
+The real signed-in browser was observed through command/result metadata without
+reading conversation payloads. A trivial browser-to-host command took 456 ms at
+p50 and 978 ms at p95 over the then-current public client path. The same bridge
+operation on VPS loopback took about 10–14 ms at p50. Nginx already used an
+unbuffered WebSocket proxy, so neither response buffering nor the host bridge was
+responsible for the approximately half-second public round trip.
+
+The official renderer sends multiple independent Electron-style invocations
+during startup, thread opening, branching, and sending. The host gateway had
+incorrectly placed every incoming WebSocket frame behind one global promise
+queue. A slow `/wham/usage` request therefore blocked unrelated local calls such
+as `codex-home`, global state, directory checks, and eventually `turn/start`.
+Release .18 preserves frame parsing and sequence validation in order, but runs
+independent `command` and `worker-command` invocations concurrently, capped at
+128 per connection. Acknowledgements and host-port messages remain ordered. This
+matches independent Electron `ipcRenderer.invoke`/`ipcMain.handle` semantics and
+does not add a cache, private index, or replacement protocol.
+
+The production concurrency qualification issued the same slow official usage
+request alongside a fast local `codex-home` request ten times. The fast request
+finished first in 10/10 samples, with 20 ms p50 and 27 ms p95. The slow request
+was 245 ms p50 and 329 ms p95. Post-release loopback no-op latency was 13.0 ms
+p50 and 25.9 ms p95, compared with 13.8 ms and 37.9 ms immediately before
+promotion.
+
+### Public network remains visible
+
+From the Mac, five unauthenticated HTTPS handshakes through the current
+transparent path took 2.13–3.16 seconds end to end. The explicit direct SOCKS
+path took 1.01–1.62 seconds for four warm samples, with one cold outlier at 6.62
+seconds. These measurements stop at the Authentik redirect and contain no
+conversation data. They show that client routing and TLS currently dominate the
+remaining public-path variability after the server-side queue was removed.
+
+### Large-thread boundary
+
+An isolated copy of a real 422,572,440-byte rollout was tested on the VPS using
+the exact official app-server:
+
+- startup: 596 ms
+- recent thread list: 43 ms
+- metadata-only read: 14 ms
+- resume with 10 recent summary turns: 48.2 seconds
+- latest 10 summary turns: 34.0 seconds
+- previous 10 summary turns: 33.6 seconds
+- full read: 33.2 seconds, returning 160 MB of JSON
+- app-server process-tree peak: 1.15 GB
+
+The same class of rollout reads in a few seconds on the Mac. VPS disk was not
+busy during the tests; the official app-server reparses the large JSONL for each
+page and saturates a CPU core. Release .18 deliberately does not introduce a
+private conversation index or alternate history store. Old conversations remain
+backup-only, as agreed, and very large rollouts are an upstream app-server/CPU
+limit rather than a web-host bridge defect.
+
+### Cold-start gate correction
+
+The first .17 candidate cold-started correctly but the visual smoke captured its
+official login route before visible content appeared. The old gate waited a
+fixed three seconds after bridge readiness. Release .18 instead waits up to 30
+seconds for a mounted official root with visible, non-empty content and still
+rejects blank pixels, page errors, local asset failures, or a missing bridge.
+Two consecutive isolated official-window runs passed before promotion.
+
+### Post-promotion recovery
+
+Promotion was atomic and retained .16 as the rollback target. The production
+persistence gate created and committed a synthetic turn, disconnected the
+browser bridge, restarted the full service, reconnected with the same subject,
+read back the exact turn, and deleted the synthetic thread. The service
+subsequently reported zero restarts, no warning-or-higher journal entries, an
+unchanged official renderer tree hash, and healthy storage.
+
 ## Defects found and fixed during the audit
 
 - Obsolete renderer notification envelope left completed turns visually running.
 - Missing host lifecycle messages could produce a white page.
+- A global WebSocket frame queue serialized independent official Electron
+  invocations behind slow network requests.
+- The visual release gate guessed readiness with a fixed delay instead of
+  waiting for visible official content.
 - Missing file picker, attachment, terminal, Git, worktree, browser-permission,
   approval, and task-start host contracts.
 - Missing official discovery responses for recommended skills, imported
@@ -232,6 +313,15 @@ renderer before promotion.
 4. Logout, account deletion, memory deletion, plugin uninstall, paid actions, and
    production deployment of a new Site were intentionally not executed because
    they are not safely reversible.
+5. The browser-control session could not claim the already signed-in in-app
+   browser tab after promotion: browser discovery returned the in-app browser but
+   an empty claimable-tab list. Therefore post-release public-path button and send
+   timings are not represented as completed evidence. The production protocol,
+   isolated real-Chromium UI, service-restart recovery, and concurrent-invocation
+   gates did pass.
+6. The Mac's current transparent routing path adds material TLS and public
+   round-trip variance. This is outside the VPS application architecture and
+   should be optimized in the local proxy/routing layer.
 
 These limitations are explicitly separated from renderer parity: the production
 host uses the official renderer and official app-server protocols; no replacement
