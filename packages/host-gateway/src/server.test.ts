@@ -7,6 +7,7 @@ import {
   countIdentitySessions,
   countReconnectableIdentitySessions,
   findMissingBrowserBridgeImports,
+  missingBridgeSessionRequiresReload,
   officialInitialRouteLocation,
   resolveBrowserFileAsset,
   shouldServeRendererIndex,
@@ -104,6 +105,12 @@ describe('official renderer navigation fallback', () => {
       { terminate: () => terminations.push('second') },
     ]);
     expect(terminations).toEqual(['first', 'second']);
+  });
+
+  it('requests a renderer reload only when reconnecting session state was lost', () => {
+    expect(missingBridgeSessionRequiresReload(0)).toBe(false);
+    expect(missingBridgeSessionRequiresReload(1)).toBe(true);
+    expect(missingBridgeSessionRequiresReload(50_000)).toBe(true);
   });
 });
 

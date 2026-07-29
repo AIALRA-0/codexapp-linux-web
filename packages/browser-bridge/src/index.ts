@@ -9,7 +9,7 @@ import {
 import { browserFileResourceUrl, rewriteOfficialResourceAttribute } from './file-protocol.js';
 import { officialExternalNavigationUrl } from './navigation.js';
 import { OrderedBuffer } from './ordered-buffer.js';
-import { isTerminalBridgeCloseCode } from './reconnect.js';
+import { isReloadBridgeCloseCode, isTerminalBridgeCloseCode } from './reconnect.js';
 import { installRemoteWebviewAdapter } from './remote-webview.js';
 
 declare global {
@@ -114,6 +114,11 @@ export class BrowserHostTransport extends EventTarget {
       this.#receive(event.data);
     });
     socket.addEventListener('close', (event) => {
+      if (isReloadBridgeCloseCode(event.code)) {
+        this.#closed = true;
+        window.location.reload();
+        return;
+      }
       if (isTerminalBridgeCloseCode(event.code)) {
         this.#closed = true;
         const error = new Error(`browser host session was rejected (${String(event.code)})`);

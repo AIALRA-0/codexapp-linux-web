@@ -424,6 +424,18 @@ export async function createGateway(config: GatewayConfig): Promise<FastifyInsta
             helloReceived = true;
             entry = sessions.get(ticket.sessionId);
             if (entry === undefined) {
+              if (missingBridgeSessionRequiresReload(frame.lastHostSequence)) {
+                app.log.info(
+                  {
+                    auditUserKey,
+                    sessionId: ticket.sessionId,
+                    lastHostSequence: frame.lastHostSequence,
+                  },
+                  'bridge session state unavailable; renderer reload requested',
+                );
+                socket.close(4410, 'browser session state unavailable');
+                return;
+              }
               if (
                 sessions.size >= config.maxSessions ||
                 countIdentitySessions(sessions.values(), identity) >= config.maxSessionsPerUser
@@ -698,6 +710,10 @@ export function officialInitialRouteLocation(initialRoute: '/' | '/login'): stri
   const url = new URL('http://official-renderer.invalid/');
   url.searchParams.set('initialRoute', initialRoute);
   return `${url.pathname}${url.search}`;
+}
+
+export function missingBridgeSessionRequiresReload(lastHostSequence: number): boolean {
+  return lastHostSequence > 0;
 }
 
 export function shouldServeRendererIndex(
