@@ -66,7 +66,24 @@ try {
     { timeout: 30_000 },
   );
   await waitFor(() => bridgeReady, 30_000);
-  await page.waitForTimeout(3_000);
+  await page.waitForFunction(
+    () => {
+      const root = document.querySelector('#root');
+      if (root === null || document.body.innerText.trim().length === 0) return false;
+      return Array.from(root.querySelectorAll('*')).some((element) => {
+        const rect = element.getBoundingClientRect();
+        const style = getComputedStyle(element);
+        return (
+          rect.width > 0 &&
+          rect.height > 0 &&
+          style.display !== 'none' &&
+          style.visibility !== 'hidden' &&
+          style.opacity !== '0'
+        );
+      });
+    },
+    { timeout: 30_000 },
+  );
 
   const renderer = await page.evaluate(() => ({
     bootstrapVersion: window.__CODEX_BROWSER_BOOTSTRAP__?.rendererVersion,
