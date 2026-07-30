@@ -159,6 +159,8 @@ systemd-run \
   "PUBLIC_ORIGIN=$public_origin" \
   "RUNTIME_ROOT=$runtime_root" \
   "BROWSER_BRIDGE_SCRIPT=$application_root/packages/browser-bridge/dist/index.js" \
+  "ELECTRON_NET_WORKER=$application_root/scripts/electron-net-worker.cjs" \
+  "ELECTRON_NET_USER_DATA_DIR=$runtime_root/electron-network" \
   "NO_PROXY=127.0.0.1,localhost" \
   "no_proxy=127.0.0.1,localhost" \
   /usr/bin/node "$application_root/apps/host/dist/main.js"

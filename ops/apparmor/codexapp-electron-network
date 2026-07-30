@@ -1,0 +1,10 @@
+abi <abi/4.0>,
+
+include <tunables/global>
+
+# Chromium's user-namespace sandbox is blocked for downloaded binaries by
+# Ubuntu 23.10 and newer. Keep the global restriction enabled and allow only
+# the immutable, root-owned Electron runtime pinned for the Projects endpoint.
+profile codexapp_electron_network /srv/aialra/codexapp-official/electron-runtime/43.2.0/node_modules/electron/dist/electron flags=(unconfined) {
+  userns,
+}

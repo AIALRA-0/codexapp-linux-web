@@ -31,6 +31,7 @@ import {
 import type { GatewayConfig } from './config.js';
 import { identitiesMatch, userKeyForIdentity } from './identity.js';
 import { prepareRendererRequest } from './login.js';
+import { OfficialElectronNetwork } from './electron-network.js';
 import { RendererFetchProxy, type HostDownloadRequest } from './network.js';
 import { OfficialAppDirectoryCache } from './official-app-directory.js';
 import { OfficialAutomationController } from './official-automation.js';
@@ -132,7 +133,11 @@ export class UserRuntime extends EventEmitter {
   #initialAppServerMessages: unknown[] = [];
   #browserDownloads = new Map<string, BrowserDownload & { expiresAt: number }>();
 
-  constructor(identity: AuthentikIdentity, config: GatewayConfig) {
+  constructor(
+    identity: AuthentikIdentity,
+    config: GatewayConfig,
+    electronNetwork?: OfficialElectronNetwork,
+  ) {
     super();
     this.identity = identity;
     this.config = config;
@@ -261,6 +266,9 @@ export class UserRuntime extends EventEmitter {
     });
     this.#fetchProxy = new RendererFetchProxy({
       appVersion: config.expectedRendererVersion,
+      ...(electronNetwork === undefined
+        ? {}
+        : { electronFetchImplementation: electronNetwork.fetch.bind(electronNetwork) }),
       ...(config.openAiEgressProxyUrl === undefined
         ? {}
         : { egressProxyUrl: config.openAiEgressProxyUrl }),
@@ -1890,16 +1898,29 @@ interface RuntimeEntry {
 export class RuntimeRegistry {
   readonly config: GatewayConfig;
   #entries = new Map<string, RuntimeEntry>();
+  #electronNetwork: OfficialElectronNetwork | undefined;
 
   constructor(config: GatewayConfig) {
     this.config = config;
+    if (config.electronNetBin !== undefined) {
+      this.#electronNetwork = new OfficialElectronNetwork({
+        electronBin: config.electronNetBin,
+        workerPath: config.electronNetWorker as string,
+        userDataDir: config.electronNetUserDataDir as string,
+        expectedElectronVersion: config.expectedElectronNetVersion as string,
+        expectedChromiumVersion: config.expectedElectronNetChromiumVersion as string,
+      });
+    }
   }
 
   async acquire(identity: AuthentikIdentity): Promise<UserRuntime> {
     const key = userKeyForIdentity(identity);
     let entry = this.#entries.get(key);
     if (entry === undefined) {
-      entry = { runtime: new UserRuntime(identity, this.config), references: 0 };
+      entry = {
+        runtime: new UserRuntime(identity, this.config, this.#electronNetwork),
+        references: 0,
+      };
       this.#entries.set(key, entry);
     }
     if (!identitiesMatch(entry.runtime.identity, identity)) {
@@ -1934,5 +1955,6 @@ export class RuntimeRegistry {
       if (entry.stopTimer !== undefined) clearTimeout(entry.stopTimer);
       await entry.runtime.stop();
     }
+    await this.#electronNetwork?.stop();
   }
 }

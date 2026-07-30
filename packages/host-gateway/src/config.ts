@@ -45,6 +45,11 @@ const configSchema = z.object({
   expectedAppBrand: z.string().min(1).default('chatgpt'),
   sourceManifest: z.string().min(1),
   browserBridgeScript: z.string().min(1),
+  electronNetBin: z.string().min(1).optional(),
+  electronNetWorker: z.string().min(1).optional(),
+  electronNetUserDataDir: z.string().min(1).optional(),
+  expectedElectronNetVersion: z.string().min(1).optional(),
+  expectedElectronNetChromiumVersion: z.string().min(1).optional(),
   openAiEgressProxyUrl: loopbackProxyUrlSchema.optional(),
   sessionSigningKeyFile: z.string().min(1),
   authSubjectHeader: z.string().min(1).default('x-authentik-uid'),
@@ -97,6 +102,11 @@ export function loadConfig(environment: NodeJS.ProcessEnv = process.env): Gatewa
     expectedAppBrand: environment.EXPECTED_APP_BRAND,
     sourceManifest: environment.SOURCE_MANIFEST,
     browserBridgeScript: environment.BROWSER_BRIDGE_SCRIPT,
+    electronNetBin: environment.ELECTRON_NET_BIN,
+    electronNetWorker: environment.ELECTRON_NET_WORKER,
+    electronNetUserDataDir: environment.ELECTRON_NET_USER_DATA_DIR,
+    expectedElectronNetVersion: environment.ELECTRON_NET_EXPECTED_VERSION,
+    expectedElectronNetChromiumVersion: environment.ELECTRON_NET_EXPECTED_CHROMIUM_VERSION,
     openAiEgressProxyUrl: environment.OPENAI_EGRESS_PROXY_URL,
     sessionSigningKeyFile: environment.SESSION_SIGNING_KEY_FILE,
     authSubjectHeader: environment.AUTH_SUBJECT_HEADER,
@@ -117,6 +127,23 @@ export function loadConfig(environment: NodeJS.ProcessEnv = process.env): Gatewa
     minimumFreeBytes: environment.MINIMUM_FREE_BYTES,
     devIdentity: environment.NODE_ENV === 'development' ? environment.DEV_IDENTITY : undefined,
   });
+  const electronNetworkValues = [
+    values.electronNetBin,
+    values.electronNetWorker,
+    values.electronNetUserDataDir,
+    values.expectedElectronNetVersion,
+    values.expectedElectronNetChromiumVersion,
+  ];
+  const configuredElectronNetworkValues = electronNetworkValues.filter(
+    (value) => value !== undefined,
+  ).length;
+  if (configuredElectronNetworkValues !== 0 && configuredElectronNetworkValues !== 5) {
+    throw new Error(
+      'Electron network requires ELECTRON_NET_BIN, ELECTRON_NET_WORKER, ' +
+        'ELECTRON_NET_USER_DATA_DIR, ELECTRON_NET_EXPECTED_VERSION, and ' +
+        'ELECTRON_NET_EXPECTED_CHROMIUM_VERSION',
+    );
+  }
   const sessionSigningKey = readFileSync(resolve(values.sessionSigningKeyFile));
   if (sessionSigningKey.length < 32) {
     throw new Error('session signing key must contain at least 32 bytes');
@@ -139,6 +166,15 @@ export function loadConfig(environment: NodeJS.ProcessEnv = process.env): Gatewa
       : { browserExecutable: resolve(values.browserExecutable) }),
     sourceManifest: resolve(values.sourceManifest),
     browserBridgeScript: resolve(values.browserBridgeScript),
+    ...(values.electronNetBin === undefined
+      ? {}
+      : {
+          electronNetBin: resolve(values.electronNetBin),
+          electronNetWorker: resolve(values.electronNetWorker as string),
+          electronNetUserDataDir: resolve(values.electronNetUserDataDir as string),
+          expectedElectronNetVersion: values.expectedElectronNetVersion,
+          expectedElectronNetChromiumVersion: values.expectedElectronNetChromiumVersion,
+        }),
     sessionSigningKeyFile: resolve(values.sessionSigningKeyFile),
     sessionSigningKey,
     ...(values.authProxySecretFile === undefined

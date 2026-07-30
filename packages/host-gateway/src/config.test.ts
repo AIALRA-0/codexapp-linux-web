@@ -85,4 +85,24 @@ describe('gateway production configuration', () => {
       }),
     ).toThrow('credentials');
   });
+
+  it('requires the complete version-locked Electron network configuration', async () => {
+    const fixture = await environment();
+    expect(() =>
+      loadConfig({
+        ...fixture.values,
+        ELECTRON_NET_BIN: join(fixture.root, 'electron'),
+      }),
+    ).toThrow('Electron network requires');
+    const config = loadConfig({
+      ...fixture.values,
+      ELECTRON_NET_BIN: join(fixture.root, 'electron'),
+      ELECTRON_NET_WORKER: join(fixture.root, 'electron-worker.cjs'),
+      ELECTRON_NET_USER_DATA_DIR: join(fixture.root, 'electron-data'),
+      ELECTRON_NET_EXPECTED_VERSION: '43.2.0',
+      ELECTRON_NET_EXPECTED_CHROMIUM_VERSION: '150.0.7871.129',
+    });
+    expect(config.expectedElectronNetVersion).toBe('43.2.0');
+    expect(config.expectedElectronNetChromiumVersion).toBe('150.0.7871.129');
+  });
 });

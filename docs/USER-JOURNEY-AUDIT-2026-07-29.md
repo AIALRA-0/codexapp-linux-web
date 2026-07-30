@@ -3,18 +3,19 @@
 ## Final production baseline
 
 - URL: `https://codexapp.aialra.online`
-- Release: `20260730.01-official-26.721.31836`
+- Release: `20260730.08-official-26.721.31836`
 - Renderer: the unmodified official renderer `26.721.31836`
 - Runtime: official `codex-cli 0.146.0-alpha.3.1`
 - Authentication: Authentik at the reverse-proxy boundary plus the official
   OpenAI/Codex account inside the isolated user runtime
 - Protected systems: OpenCodexApp and its state were not changed
-- Rollback target: `20260729.18-official-26.721.31836`
+- Rollback target: `20260730.07-official-26.721.31836`
 
 The production release passed the official-renderer, authentication-isolation,
 task-start, desktop-tools, approval, backup/restore, core-lifecycle, MCP,
 browser-runtime, large-thread, concurrent-invocation, and service-restart
-persistence gates. The local test suite contains 199 passing tests in 41 files.
+persistence gates. The local and Linux candidate suites contain 205 passing
+tests in 42 files.
 
 The 2026-07-30 release was staged and qualified separately before promotion.
 The same official-window, task-start, authentication-isolation, desktop-tools,
@@ -61,9 +62,9 @@ deleted through the official app-server API.
 - Plugins.
 - Task search and historical task opening.
 
-Sites, Scheduled tasks, and Plugins loaded real data. Pull requests correctly
-reported that GitHub CLI is installed but not authenticated; this is an account
-configuration dependency, not a renderer or host failure.
+Sites, Scheduled tasks, and Plugins loaded real data. The production user's
+GitHub device authorization was completed, and `gh auth status` now succeeds
+inside that user's isolated server home.
 
 ### Settings
 
@@ -131,6 +132,17 @@ reputation. It does not prevent installed Apps from being discovered or called,
 and it does not prevent the renderer's plugin catalog from loading. An official
 Codex-generated directory cache is present on the server, but online public
 directory refresh will remain dependent on a trusted egress route.
+
+The ChatGPT Projects sidebar is a separate official endpoint. A normal Node.js
+request from the VPS receives the same Cloudflare 403 challenge, but Electron
+43.2.0 with Chromium 150 returns HTTP 200 for the same authenticated account.
+Production now routes only that exact official GET request through one shared,
+persistent Electron worker. The worker keeps Chromium's user-namespace sandbox,
+inherits no host secrets, receives the token only through its pipe, and accepts
+no generic URL. Automatic Cookie credentials and response caching are disabled,
+so no reusable account state crosses authenticated requests. WARP was removed from the application dependency after the
+renderer host route returned HTTP 200 with valid JSON. The post-promotion `.08`
+sample completed the full gateway route in about 893 ms.
 
 ## Automated end-to-end coverage
 
@@ -249,17 +261,17 @@ remaining public-path variability after the server-side queue was removed.
 
 ### Large-thread boundary
 
-An isolated copy of a real 422,572,440-byte rollout was tested on the VPS using
+An isolated copy of a real 442,034,684-byte rollout was tested on the VPS using
 the exact official app-server:
 
-- startup: 596 ms
-- recent thread list: 43 ms
-- metadata-only read: 14 ms
-- resume with 10 recent summary turns: 48.2 seconds
-- latest 10 summary turns: 34.0 seconds
-- previous 10 summary turns: 33.6 seconds
-- full read: 33.2 seconds, returning 160 MB of JSON
-- app-server process-tree peak: 1.15 GB
+- startup: 14.9 seconds
+- recent thread list: 24 ms
+- metadata-only read: 15 ms
+- resume with 10 recent summary turns: 19.5 seconds
+- latest 10 summary turns: 15.4 seconds
+- previous 10 summary turns: 15.5 seconds
+- full read: 16.1 seconds
+- app-server process-tree peak: 1.12 GB
 
 The same class of rollout reads in a few seconds on the Mac. VPS disk was not
 busy during the tests; the official app-server reparses the large JSONL for each
@@ -328,32 +340,30 @@ renderer hash, and a healthy readiness response.
   failures.
 - Undefined locale values were injected into terminal environments.
 - Candidate releases could contain native dependencies from the build machine.
+- The Node.js network stack and WARP both triggered a Cloudflare challenge on
+  the authenticated Projects endpoint; a version-pinned Chromium network worker
+  now carries only that request.
+- The first worker candidate disabled Chromium's sandbox and inherited the host
+  environment. The release gate rejected it. The promoted worker keeps the
+  namespace sandbox and starts with a sealed environment.
 
 Each fix has a regression test and was rechecked against the real official
 renderer before promotion.
 
 ## Remaining external dependencies
 
-1. GitHub pull-request operations still require the server user to finish one
-   GitHub passkey or Touch ID confirmation. The device flow has reached GitHub's
-   sudo-mode confirmation page, but `gh auth status` must pass before this
-   capability is marked complete.
-2. Live refresh of the entire public Apps directory requires a trusted
+1. Live refresh of the entire public Apps directory requires a trusted
    non-datacenter egress route or a change in OpenAI's Cloudflare treatment.
-   The 2026-07-30 host can route the official ChatGPT projects-sidebar request
-   through a credential-free Cloudflare WARP loopback proxy without changing the
-   official endpoint or the VPS default route. The operator accepted the vendor
-   terms, WARP is connected, and the proxy listens only on `127.0.0.1`. Both
-   direct and proxied unauthenticated requests still receive the OpenAI
-   Cloudflare challenge, so the signed-in Projects UI remains a required
-   business-level check.
-3. Voice capture and Computer Use depend on browser/device capabilities and
+   Installed Apps, cached official catalog data, and real App tool calls already
+   work. The separate Projects endpoint now passes through the pinned Electron
+   route and is no longer blocked.
+2. Voice capture and Computer Use depend on browser/device capabilities and
    permissions available to the connecting client. Their settings routes and host
    contracts load, but unattended microphone/camera consent was not granted.
-4. Logout, account deletion, memory deletion, plugin uninstall, paid actions, and
+3. Logout, account deletion, memory deletion, plugin uninstall, paid actions, and
    production deployment of a new Site were intentionally not executed because
    they are not safely reversible.
-5. The Mac's current transparent routing path adds material TLS and public
+4. The Mac's current transparent routing path adds material TLS and public
    round-trip variance. This is outside the VPS application architecture and
    should be optimized in the local proxy/routing layer.
 

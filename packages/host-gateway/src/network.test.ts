@@ -5,6 +5,7 @@ import {
   parseRendererFetchRequest,
   RendererFetchProxy,
   resolveRendererFetchUrl,
+  shouldUseOfficialElectronNetwork,
   shouldUseRendererEgressProxy,
 } from './network.js';
 
@@ -69,6 +70,45 @@ describe('renderer fetch proxy', () => {
         new URL('https://openai.com/backend-api/gizmos/snorlax/sidebar'),
       ),
     ).toBe(false);
+    expect(
+      shouldUseOfficialElectronNetwork(
+        new URL('https://chatgpt.com/backend-api/gizmos/snorlax/sidebar?limit=10'),
+      ),
+    ).toBe(true);
+    expect(
+      shouldUseOfficialElectronNetwork(
+        new URL('https://chatgpt.com:8443/backend-api/gizmos/snorlax/sidebar'),
+      ),
+    ).toBe(false);
+  });
+
+  it('prefers the pinned official Electron network and bypasses the proxy fallback', async () => {
+    const electronFetchImplementation = vi.fn((_url: URL | RequestInfo, init?: RequestInit) => {
+      expect(
+        (init as (RequestInit & { dispatcher?: unknown }) | undefined)?.dispatcher,
+      ).toBeUndefined();
+      return Promise.resolve(
+        new Response(JSON.stringify({ items: [] }), {
+          status: 200,
+          headers: { 'content-type': 'application/json' },
+        }),
+      );
+    }) as typeof fetch;
+    const proxy = new RendererFetchProxy({
+      appVersion: '26.721.31836',
+      egressProxyUrl: 'http://127.0.0.1:40000',
+      electronFetchImplementation,
+      getAuthToken: () => Promise.resolve(null),
+    });
+    const result = await proxy.perform({
+      type: 'fetch',
+      requestId: 'request-projects-electron',
+      url: 'https://chatgpt.com/backend-api/gizmos/snorlax/sidebar',
+      method: 'GET',
+      headers: {},
+    });
+    expect(result).toMatchObject({ responseType: 'success', status: 200 });
+    expect(electronFetchImplementation).toHaveBeenCalledTimes(1);
   });
 
   it('adds a proxy dispatcher only to the official projects request', async () => {

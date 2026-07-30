@@ -26,6 +26,8 @@ scoped `bwrap` policy instead of globally disabling that protection:
 ```sh
 APPLICATION_ROOT=/srv/aialra/releases/codexapp-official-web-host/VERSION \
   /srv/aialra/releases/codexapp-official-web-host/VERSION/ops/install-bwrap-apparmor.sh
+APPLICATION_ROOT=/srv/aialra/releases/codexapp-official-web-host/VERSION \
+  /srv/aialra/releases/codexapp-official-web-host/VERSION/ops/install-electron-network-apparmor.sh
 install -o root -g root -m 0644 \
   /srv/aialra/releases/codexapp-official-web-host/VERSION/ops/systemd/codexapp-official-sandbox-policy.service \
   /etc/systemd/system/codexapp-official-sandbox-policy.service
@@ -79,35 +81,38 @@ The installer accepts only the official 40-character cache filename, validates
 the schema and connector records, and preserves owner-only permissions. This is
 a directory-refresh fallback, not a proxy and not a replacement Apps API.
 
-The official ChatGPT projects sidebar can receive the same Cloudflare challenge.
-The host supports an optional credential-free HTTP CONNECT proxy on loopback for
-that exact official request. It does not replace the endpoint and does not route
-model turns, downloads, SSH, or other VPS traffic through the proxy.
+The official ChatGPT projects sidebar receives an OpenAI Cloudflare challenge
+when it is fetched through Node.js from the VPS. Production therefore uses one
+persistent, version-pinned Electron process for only that exact official GET
+request. It does not replace the endpoint and does not route model turns,
+downloads, SSH, or other VPS traffic.
 
-Cloudflare WARP local-proxy mode is one supported transport. Follow the current
-[official Linux installation instructions](https://developers.cloudflare.com/warp-client/get-started/linux/),
-accept the vendor terms as the operator, and configure only the loopback proxy:
+Install Electron 43.2.0 under the path shown in
+`ops/codexapp-official-web-host.env.example`, make the complete runtime
+root-owned and non-writable, and configure all five `ELECTRON_NET_*` values.
+The host refuses a partial configuration and verifies both Electron and Chromium
+versions before sending a token.
 
-```sh
-warp-cli --accept-tos registration new
-warp-cli --accept-tos tunnel protocol set MASQUE
-warp-cli --accept-tos mode proxy
-warp-cli --accept-tos proxy port 40000
-warp-cli --accept-tos connect
-curl --proxy http://127.0.0.1:40000 \
-  https://www.cloudflare.com/cdn-cgi/trace
-```
+Ubuntu keeps its global unprivileged-user-namespace restriction enabled. The
+repository AppArmor installer opens `userns` only for the exact immutable
+Electron binary. The service uses Chromium's namespace sandbox and never passes
+`--no-sandbox`.
 
-After verifying the proxy, add this value to the private production environment
-file and restart the candidate service:
+The worker:
 
-```sh
-OPENAI_EGRESS_PROXY_URL=http://127.0.0.1:40000
-```
+- accepts only `GET https://chatgpt.com/backend-api/gizmos/snorlax/sidebar`;
+- receives authentication through the parent-child pipe instead of disk or
+  command-line arguments;
+- starts with a sealed environment that excludes host secrets;
+- omits browser credentials and response caching so a shared worker carries no
+  reusable account state between authenticated requests;
+- limits concurrent requests, response size, and request duration;
+- stays alive for warm requests and restarts on the next request after failure.
 
-The configuration rejects non-loopback proxies and credentials embedded in the
-URL. Cloudflare documents a ten-second local-proxy request limit, so the route is
-deliberately restricted to the short projects-sidebar request.
+`OPENAI_EGRESS_PROXY_URL` remains an optional loopback-only fallback in the
+configuration schema, but it is not configured in production. Cloudflare WARP
+was removed from the service dependency after the authenticated Electron route
+returned HTTP 200 with valid JSON before and after promotion.
 
 The service readiness endpoint becomes unhealthy below 5 GiB free, while
 history reads stay available and new conversation-growing operations are

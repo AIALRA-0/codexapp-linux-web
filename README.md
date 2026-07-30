@@ -70,7 +70,7 @@ flowchart TD
 | 页面     | 新任务、拉取请求、站点、已安排、插件和全部设置页面                   |
 | 运维     | 备份、恢复、不可变发布、健康检查和失败自动回滚                       |
 
-自动化仓库检查当前覆盖 41 个测试文件和 199 个测试
+自动化仓库检查当前覆盖 42 个测试文件和 205 个测试
 
 真实运行环境还会执行官方窗口、任务生命周期、MCP、权限、文件、终端、Git、浏览器、备份恢复和持久化烟雾测试
 
@@ -106,6 +106,28 @@ flowchart TD
 瓶颈是官方 app-server 重复解析超大 JSONL 文件，不是浏览器桥接或公网往返
 
 项目不会为了掩盖这个上游限制再维护一套私有历史数据库，旧任务应先备份，需要时再恢复
+
+## ChatGPT 项目列表
+
+VPS 使用普通服务器网络请求访问 ChatGPT 项目列表时会收到 Cloudflare 403 挑战
+
+项目没有伪造项目数据，也没有改写官方接口，而是为这一个官方路径启动版本锁定的 Electron 网络进程：
+
+- 只允许读取 `https://chatgpt.com/backend-api/gizmos/snorlax/sidebar`
+- 使用 Electron 43.2.0 和 Chromium 150.0.7871.129，与官方客户端的 Chromium 150 主版本一致
+- 进程长期复用，避免每次点击都重新启动浏览器内核
+- 不继承宿主服务的账号和服务器密钥，OpenAI 访问令牌只通过父子进程管道传递
+- 不保存或携带浏览器 Cookie，不复用账号相关响应缓存
+- 保留 Chromium 用户命名空间沙箱，不使用 `--no-sandbox`
+- Ubuntu 只对这个不可变、由 root 管理的可执行文件开放用户命名空间，系统全局限制保持开启
+
+版本对应关系来自 [Electron 43.2.0 官方发布记录](https://releases.electronjs.org/release/v43.2.0)，Ubuntu 的按文件开放方式来自 [Chromium 官方 AppArmor 说明](https://chromium.googlesource.com/chromium/src/+/main/docs/security/apparmor-userns-restrictions.md)
+
+真实登录态下，普通请求返回 403；同一账号通过生产 renderer 路由返回 200 和有效 JSON
+
+`.08` 发布后的真实复验中，冷启动约 1.36 秒，复用连接约 1.04 秒，完整宿主路由约 0.89 秒
+
+Cloudflare WARP 已从生产依赖中移除并停用
 
 ## 验证结果
 
@@ -200,20 +222,17 @@ GitHub 的 CI 持续集成（Continuous Integration）只验证不依赖私有�
 
 提交前检查由 [`ops/check-source-boundaries.sh`](./ops/check-source-boundaries.sh) 执行
 
-## 当前外部依赖
+## 当前外部边界
 
 以下能力不能靠改写官方界面解决：
 
-- 拉取请求页面需要当前服务器用户完成一次 GitHub 官方设备授权
-- ChatGPT 项目列表和公开插件目录仍可能被 OpenAI 拒绝机房出口
+- 公开插件目录的在线刷新仍可能被 OpenAI 拒绝机房出口；已安装插件、连接应用和官方缓存不受影响
 - 语音和 Computer Use 需要连接设备提供麦克风、摄像头或屏幕权限
 - 付费操作、账号删除和不可恢复删除不会进入无人值守测试
 
-项目为受机房出口影响的官方项目列表提供可选的本地代理出口；当前生产环境已通过 Cloudflare WARP 启用这条最小范围路线
+服务器用户的 GitHub OAuth 已完成，`gh auth status`、拉取请求读取、Git 状态、差异和工作树链路均已通过
 
-代理只处理已确认受影响的官方请求，不接管模型对话、SSH 或整台 VPS 的网络
-
-WARP 连接和回环隔离已经通过，但未登录请求经直连和 WARP 都仍收到 OpenAI Cloudflare 挑战，因此还需要在真实 ChatGPT 登录态下复验项目列表，不能把传输通过写成业务通过
+ChatGPT 项目列表的真实登录态业务响应已经通过，不再依赖 WARP 或自建项目数据库
 
 ## 文档
 
@@ -230,6 +249,7 @@ WARP 连接和回环隔离已经通过，但未登录请求经直连和 WARP 都
 - 官方构建号：`5828`
 - Codex app-server：`0.146.0-alpha.3.1`
 - preload 契约：19 个方法
+- 项目列表网络进程：Electron `43.2.0`、Chromium `150.0.7871.129`
 
 宿主发现版本、哈希、品牌、构建号或契约不一致时会拒绝启动
 

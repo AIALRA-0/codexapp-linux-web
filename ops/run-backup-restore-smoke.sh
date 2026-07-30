@@ -102,6 +102,8 @@ start_isolated_host() {
     "PUBLIC_ORIGIN=$public_origin" \
     "RUNTIME_ROOT=$runtime_root" \
     "BROWSER_BRIDGE_SCRIPT=$application_root/packages/browser-bridge/dist/index.js" \
+    "ELECTRON_NET_WORKER=$application_root/scripts/electron-net-worker.cjs" \
+    "ELECTRON_NET_USER_DATA_DIR=$runtime_root/electron-network" \
     /usr/bin/node "$application_root/apps/host/dist/main.js"
 
   for _attempt in $(seq 1 45); do

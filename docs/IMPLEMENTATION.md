@@ -17,10 +17,11 @@
    models, configuration, authentication status, and account operations.
 7. Host-only features (filesystem, PTY, Git, menus, file drag, system integration)
    are delegated through explicit capability handlers.
-8. An optional credential-free loopback HTTP CONNECT proxy can carry only the
-   official ChatGPT projects-sidebar request when OpenAI challenges datacenter
-   egress. The official URL and protocol stay unchanged, and normal model turns
-   keep the direct route.
+8. One shared, sandboxed Electron 43.2.0 network process carries only the
+   official ChatGPT projects-sidebar GET request when Node.js receives an OpenAI
+   Cloudflare challenge. The exact official URL and response remain unchanged,
+   tokens travel only through the parent-child pipe, and normal model turns keep
+   the direct route.
 
 ## Delivery order
 

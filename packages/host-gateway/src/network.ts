@@ -1,4 +1,4 @@
-import { ProxyAgent, type Dispatcher } from 'undici';
+import { fetch as undiciFetch, ProxyAgent, type Dispatcher } from 'undici';
 
 const DEFAULT_CHATGPT_API_BASE = 'https://chatgpt.com/backend-api/';
 const DEFAULT_MAX_RESPONSE_BYTES = 32 * 1024 * 1024;
@@ -74,6 +74,7 @@ export interface RendererFetchProxyOptions {
   egressProxyUrl?: string;
   maxResponseBytes?: number;
   fetchImplementation?: typeof fetch;
+  electronFetchImplementation?: typeof fetch;
 }
 
 export interface HostDownloadRequest {
@@ -345,7 +346,6 @@ export class RendererFetchProxy {
       this.options.appVersion,
       integrityState,
     );
-    const fetchImplementation = this.options.fetchImplementation ?? fetch;
     const requestSignal = combineWithTimeout(signal);
 
     for (let redirectCount = 0; ; redirectCount += 1) {
@@ -356,8 +356,25 @@ export class RendererFetchProxy {
         redirect: 'manual',
         signal: requestSignal,
       };
-      const proxyAgent = rendererEgressProxyAgent(url, this.options.egressProxyUrl);
+      const useOfficialElectronNetwork =
+        this.options.fetchImplementation === undefined &&
+        this.options.electronFetchImplementation !== undefined &&
+        shouldUseOfficialElectronNetwork(url);
+      const proxyAgent = useOfficialElectronNetwork
+        ? undefined
+        : rendererEgressProxyAgent(url, this.options.egressProxyUrl);
       if (proxyAgent !== undefined) requestInit.dispatcher = proxyAgent;
+      let fetchImplementation = this.options.fetchImplementation;
+      if (fetchImplementation === undefined) {
+        if (useOfficialElectronNetwork) {
+          fetchImplementation = this.options.electronFetchImplementation;
+          if (fetchImplementation === undefined) {
+            throw new RendererFetchError('official Electron network is unavailable', 503);
+          }
+        } else {
+          fetchImplementation = proxyAgent === undefined ? fetch : (undiciFetch as typeof fetch);
+        }
+      }
       const response = await fetchImplementation(url, requestInit);
       if (![301, 302, 303, 307, 308].includes(response.status)) {
         if (request.attachIntegrityState) {
@@ -454,7 +471,16 @@ export function parseRendererFetchRequest(
 }
 
 export function shouldUseRendererEgressProxy(url: URL): boolean {
-  return url.hostname === 'chatgpt.com' && url.pathname === '/backend-api/gizmos/snorlax/sidebar';
+  return (
+    url.protocol === 'https:' &&
+    url.port.length === 0 &&
+    url.hostname === 'chatgpt.com' &&
+    url.pathname === '/backend-api/gizmos/snorlax/sidebar'
+  );
+}
+
+export function shouldUseOfficialElectronNetwork(url: URL): boolean {
+  return shouldUseRendererEgressProxy(url);
 }
 
 function rendererEgressProxyAgent(url: URL, proxyUrl: string | undefined): ProxyAgent | undefined {
