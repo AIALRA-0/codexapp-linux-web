@@ -1,3 +1,5 @@
+import { ProxyAgent, type Dispatcher } from 'undici';
+
 const DEFAULT_CHATGPT_API_BASE = 'https://chatgpt.com/backend-api/';
 const DEFAULT_MAX_RESPONSE_BYTES = 32 * 1024 * 1024;
 const MAX_REDIRECTS = 5;
@@ -48,6 +50,8 @@ const ALLOWED_HOST_SUFFIXES = [
   'mapbox.com',
 ] as const;
 
+const SHARED_EGRESS_PROXY_AGENTS = new Map<string, ProxyAgent>();
+
 export interface RendererFetchRequest {
   requestId: string;
   url: string;
@@ -67,6 +71,7 @@ export interface RendererFetchProxyOptions {
   storeIntegrityState?: (expected: string | null, value: string) => Promise<boolean>;
   appVersion: string;
   chatGptApiBase?: string;
+  egressProxyUrl?: string;
   maxResponseBytes?: number;
   fetchImplementation?: typeof fetch;
 }
@@ -344,13 +349,16 @@ export class RendererFetchProxy {
     const requestSignal = combineWithTimeout(signal);
 
     for (let redirectCount = 0; ; redirectCount += 1) {
-      const response = await fetchImplementation(url, {
+      const requestInit: RequestInit & { dispatcher?: Dispatcher } = {
         method,
         headers,
         ...(body === undefined ? {} : { body }),
         redirect: 'manual',
         signal: requestSignal,
-      });
+      };
+      const proxyAgent = rendererEgressProxyAgent(url, this.options.egressProxyUrl);
+      if (proxyAgent !== undefined) requestInit.dispatcher = proxyAgent;
+      const response = await fetchImplementation(url, requestInit);
       if (![301, 302, 303, 307, 308].includes(response.status)) {
         if (request.attachIntegrityState) {
           const nextState = validIntegrityState(response.headers.get(INTEGRITY_UPDATE_HEADER));
@@ -443,6 +451,20 @@ export function parseRendererFetchRequest(
     attachDesktopSurface,
     attachIntegrityState,
   };
+}
+
+export function shouldUseRendererEgressProxy(url: URL): boolean {
+  return url.hostname === 'chatgpt.com' && url.pathname === '/backend-api/gizmos/snorlax/sidebar';
+}
+
+function rendererEgressProxyAgent(url: URL, proxyUrl: string | undefined): ProxyAgent | undefined {
+  if (proxyUrl === undefined || !shouldUseRendererEgressProxy(url)) return undefined;
+  let agent = SHARED_EGRESS_PROXY_AGENTS.get(proxyUrl);
+  if (agent === undefined) {
+    agent = new ProxyAgent(proxyUrl);
+    SHARED_EGRESS_PROXY_AGENTS.set(proxyUrl, agent);
+  }
+  return agent;
 }
 
 export function resolveRendererFetchUrl(value: string, chatGptApiBase: string): URL {

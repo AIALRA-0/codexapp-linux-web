@@ -3,18 +3,24 @@
 ## Final production baseline
 
 - URL: `https://codexapp.aialra.online`
-- Release: `20260729.18-official-26.721.31836`
+- Release: `20260730.01-official-26.721.31836`
 - Renderer: the unmodified official renderer `26.721.31836`
 - Runtime: official `codex-cli 0.146.0-alpha.3.1`
 - Authentication: Authentik at the reverse-proxy boundary plus the official
   OpenAI/Codex account inside the isolated user runtime
 - Protected systems: OpenCodexApp and its state were not changed
-- Rollback target: `20260729.16-official-26.721.31836`
+- Rollback target: `20260729.18-official-26.721.31836`
 
 The production release passed the official-renderer, authentication-isolation,
 task-start, desktop-tools, approval, backup/restore, core-lifecycle, MCP,
 browser-runtime, large-thread, concurrent-invocation, and service-restart
-persistence gates. The local test suite contains 196 passing tests in 41 files.
+persistence gates. The local test suite contains 199 passing tests in 41 files.
+
+The 2026-07-30 release was staged and qualified separately before promotion.
+The same official-window, task-start, authentication-isolation, desktop-tools,
+approval, core-lifecycle, MCP, browser-runtime, backup/restore, and
+service-restart persistence gates passed before and after the atomic switch.
+See [`VALIDATION-2026-07-30.md`](./VALIDATION-2026-07-30.md).
 
 ## How this audit was performed
 
@@ -331,6 +337,10 @@ renderer before promotion.
 1. GitHub pull-request operations require `gh auth login` for the server user.
 2. Live refresh of the entire public Apps directory requires a trusted
    non-datacenter egress route or a change in OpenAI's Cloudflare treatment.
+   The 2026-07-30 host can route the official ChatGPT projects-sidebar request
+   through an optional credential-free loopback proxy without changing the
+   official endpoint or the VPS default route. The proxy remains disabled until
+   the operator accepts the proxy vendor's terms and verifies the route.
 3. Voice capture and Computer Use depend on browser/device capabilities and
    permissions available to the connecting client. Their settings routes and host
    contracts load, but unattended microphone/camera consent was not granted.

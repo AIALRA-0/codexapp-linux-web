@@ -5,6 +5,7 @@ import {
   parseRendererFetchRequest,
   RendererFetchProxy,
   resolveRendererFetchUrl,
+  shouldUseRendererEgressProxy,
 } from './network.js';
 
 describe('renderer fetch security', () => {
@@ -54,6 +55,62 @@ describe('renderer fetch security', () => {
 });
 
 describe('renderer fetch proxy', () => {
+  it('routes only the Cloudflare-challenged official projects request through trusted egress', () => {
+    expect(
+      shouldUseRendererEgressProxy(
+        new URL('https://chatgpt.com/backend-api/gizmos/snorlax/sidebar?limit=10'),
+      ),
+    ).toBe(true);
+    expect(
+      shouldUseRendererEgressProxy(new URL('https://chatgpt.com/backend-api/conversation')),
+    ).toBe(false);
+    expect(
+      shouldUseRendererEgressProxy(
+        new URL('https://openai.com/backend-api/gizmos/snorlax/sidebar'),
+      ),
+    ).toBe(false);
+  });
+
+  it('adds a proxy dispatcher only to the official projects request', async () => {
+    const fetchImplementation = vi.fn((url: URL | RequestInfo, init?: RequestInit) => {
+      void url;
+      void init;
+      return Promise.resolve(
+        new Response(JSON.stringify({ items: [] }), {
+          status: 200,
+          headers: { 'content-type': 'application/json' },
+        }),
+      );
+    });
+    const proxy = new RendererFetchProxy({
+      appVersion: '26.721.31836',
+      egressProxyUrl: 'http://127.0.0.1:40000',
+      fetchImplementation,
+      getAuthToken: () => Promise.resolve(null),
+    });
+    await proxy.perform({
+      type: 'fetch',
+      requestId: 'request-projects',
+      url: 'https://chatgpt.com/backend-api/gizmos/snorlax/sidebar',
+      method: 'GET',
+      headers: {},
+    });
+    const projectRequest = fetchImplementation.mock.calls[0]?.[1] as
+      (RequestInit & { dispatcher?: unknown }) | undefined;
+    expect(projectRequest?.dispatcher).toBeDefined();
+    fetchImplementation.mockClear();
+    await proxy.perform({
+      type: 'fetch',
+      requestId: 'request-conversation',
+      url: 'https://chatgpt.com/backend-api/conversation',
+      method: 'GET',
+      headers: {},
+    });
+    const conversationRequest = fetchImplementation.mock.calls[0]?.[1] as
+      (RequestInit & { dispatcher?: unknown }) | undefined;
+    expect(conversationRequest?.dispatcher).toBeUndefined();
+  });
+
   it('acknowledges blocked official event ingestion without retrying upstream', async () => {
     const fetchImplementation = vi.fn(() => Promise.reject(new Error('must not fetch')));
     const getAuthToken = vi.fn(() => Promise.resolve('must-not-read'));

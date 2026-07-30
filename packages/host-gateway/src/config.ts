@@ -3,6 +3,31 @@ import { resolve } from 'node:path';
 
 import { z } from 'zod';
 
+const loopbackProxyUrlSchema = z
+  .string()
+  .url()
+  .superRefine((value, context) => {
+    const url = new URL(value);
+    if (!['http:', 'https:'].includes(url.protocol)) {
+      context.addIssue({
+        code: 'custom',
+        message: 'OpenAI egress proxy must use HTTP or HTTPS',
+      });
+    }
+    if (!['127.0.0.1', '[::1]', 'localhost'].includes(url.hostname)) {
+      context.addIssue({
+        code: 'custom',
+        message: 'OpenAI egress proxy must listen on loopback',
+      });
+    }
+    if (url.username.length > 0 || url.password.length > 0) {
+      context.addIssue({
+        code: 'custom',
+        message: 'OpenAI egress proxy URL must not contain credentials',
+      });
+    }
+  });
+
 const configSchema = z.object({
   host: z.string().default('127.0.0.1'),
   port: z.coerce.number().int().min(1).max(65535).default(13010),
@@ -20,6 +45,7 @@ const configSchema = z.object({
   expectedAppBrand: z.string().min(1).default('chatgpt'),
   sourceManifest: z.string().min(1),
   browserBridgeScript: z.string().min(1),
+  openAiEgressProxyUrl: loopbackProxyUrlSchema.optional(),
   sessionSigningKeyFile: z.string().min(1),
   authSubjectHeader: z.string().min(1).default('x-authentik-uid'),
   authUsernameHeader: z.string().min(1).default('x-authentik-username'),
@@ -71,6 +97,7 @@ export function loadConfig(environment: NodeJS.ProcessEnv = process.env): Gatewa
     expectedAppBrand: environment.EXPECTED_APP_BRAND,
     sourceManifest: environment.SOURCE_MANIFEST,
     browserBridgeScript: environment.BROWSER_BRIDGE_SCRIPT,
+    openAiEgressProxyUrl: environment.OPENAI_EGRESS_PROXY_URL,
     sessionSigningKeyFile: environment.SESSION_SIGNING_KEY_FILE,
     authSubjectHeader: environment.AUTH_SUBJECT_HEADER,
     authUsernameHeader: environment.AUTH_HEADER,

@@ -261,6 +261,9 @@ export class UserRuntime extends EventEmitter {
     });
     this.#fetchProxy = new RendererFetchProxy({
       appVersion: config.expectedRendererVersion,
+      ...(config.openAiEgressProxyUrl === undefined
+        ? {}
+        : { egressProxyUrl: config.openAiEgressProxyUrl }),
       getAuthToken: async (refreshToken) => this.#getAuthToken(refreshToken),
       getIntegrityState: () => {
         const value = this.#state.get('globalState', 'openai-integrity-state');

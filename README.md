@@ -1,104 +1,226 @@
-# CodexApp Official Web Host
+<div align="center">
 
-This repository replaces the old custom CodexApp web client. It hosts the
-**unchanged, version-locked official ChatGPT/Codex desktop renderer** behind a
-browser compatibility layer and the matching official Codex app-server. It does
-not reimplement the user interface.
+# CodexApp Linux Web
 
-## Non-negotiable invariants
+把官方 ChatGPT / Codex 桌面界面放到 Linux 服务器上，让同一批任务可以在浏览器中持续使用
 
-- Official renderer JavaScript, CSS, images, fonts, and source HTML are immutable
-  build inputs. A byte-for-byte manifest is checked before serving. The host may
-  produce a deterministic runtime copy of the HTML containing only the audited
-  bridge bootstrap tag; the signed source remains untouched.
-- Official packages, extracted assets, user conversations, credentials, traces,
-  and generated runtime state are never committed to Git.
-- Every browser-to-host method is explicit and versioned. Unknown methods fail
-  loudly and block promotion.
-- Each authenticated user gets one isolated runtime and one `CODEX_HOME`.
-- The existing OpenCodexApp is outside this project's ownership and deletion scope.
-- Releases promote from qualification to staging to production; production always
-  has a tested rollback version.
+[![CI](https://github.com/AIALRA-0/codexapp-linux-web/actions/workflows/ci.yml/badge.svg)](https://github.com/AIALRA-0/codexapp-linux-web/actions/workflows/ci.yml)
+[![Node.js 24](https://img.shields.io/badge/Node.js-24-339933?logo=nodedotjs&logoColor=white)](https://nodejs.org/)
+[![Official renderer](https://img.shields.io/badge/renderer-26.721.31836-111111)](./manifests/official-26.721.31836.json)
+[![License: MIT](https://img.shields.io/badge/code-MIT-blue.svg)](./LICENSE)
 
-The official ChatGPT application, renderer, images, fonts, and Codex binaries are
-not part of this repository and are not covered by this repository's MIT license.
-Operators must supply and qualify their own authorized official package.
+[它解决什么](#它解决什么) · [真实界面](#真实界面) · [实现方式](#实现方式) · [验证结果](#验证结果) · [部署与升级](#部署与升级) · [数据边界](#数据边界)
 
-## Qualified version
+</div>
 
-- ChatGPT/Codex renderer: `26.721.31836`, build `5828`
-- Electron/Chromium declared by the package: `42.3.0` / `150.0.7871.128`
-- Codex app-server: `0.146.0-alpha.3.1`
-- Preload surface: 19 methods, pinned in
-  `manifests/preload-contracts/preload-26.721.31836.json`
+## 它解决什么
 
-The host fails closed if package identity, renderer bytes, host bytes, preload
-contract, or app-server version differs from qualification.
+桌面端离线或设备不在身边时，任务会停在某一台电脑上
 
-## Architecture
+CodexApp Linux Web 把官方界面、官方 Codex app-server 和每个用户自己的运行目录放到服务器上，浏览器只负责显示和交互
 
-1. Existing AIALRA unified authentication verifies the outer browser session.
-2. Nginx forwards an immutable Authentik subject plus a private proxy proof.
-3. Each subject receives an isolated runtime, workspace, `CODEX_HOME`, browser
-   profile, terminal set, and app-server process.
-4. The unchanged official renderer calls a versioned browser bridge that
-   reproduces the qualified desktop preload contract.
-5. Official app-server owns conversations, turns, approvals, MCP, skills,
-   models, login, and configuration. Host-only desktop services are explicit,
-   audited adapters.
+项目坚持三条边界：
 
-Outer AIALRA login and the official OpenAI account login remain separate. The
-OpenAI flow uses the official device authorization route and does not depend on
-a browser callback to a developer laptop. The unmodified official renderer
-receives the official `chatgptDeviceCode` result directly, displays its device
-code, and opens the verification page only when the user selects its own
-**Open browser** action.
+- 不重写一套相似的网页界面
+- 不自建对话协议、历史索引或插件协议
+- 不把官方安装包、账号凭据、真实对话和服务器状态提交到 GitHub
 
-## Validation
+## 真实界面
+
+下面两张图来自真实部署界面，只裁掉了包含账号和任务列表的侧栏，没有重绘界面或替换组件
+
+### 对话、输入和消息操作
+
+![真实对话界面](./docs/assets/codexapp-conversation.jpg)
+
+### 插件、技能和连接应用
+
+![真实插件界面](./docs/assets/codexapp-plugins.jpg)
+
+## 实现方式
+
+项目直接加载经过版本锁定和哈希校验的官方 renderer，也就是官方桌面客户端负责显示界面的那部分代码
+
+浏览器兼容层只补齐桌面环境原本提供的能力，例如文件选择、终端、Git、工作树、浏览器控制和权限确认
+
+```mermaid
+flowchart TD
+    A["浏览器打开 CodexApp"] --> B["统一登录确认访问者"]
+    B --> C["按稳定用户标识进入隔离运行目录"]
+    C --> D["加载未经重写的官方界面"]
+    D --> E["版本锁定的兼容层转发桌面能力"]
+    E --> F["官方 Codex app-server 处理任务、模型、MCP 和设置"]
+    F --> G["对话、文件和配置写入服务器用户目录"]
+```
+
+这条链路让界面升级仍然以官方包为准，也让宿主代码可以单独测试、回滚和审计
+
+## 已验证功能
+
+| 范围     | 已验证结果                                                           |
+| -------- | -------------------------------------------------------------------- |
+| 登录     | 统一登录与 OpenAI 官方设备登录分离，用户之间不能互用会话票据         |
+| 任务     | 新建、发送、读取、搜索、分支、归档、恢复、删除和服务重启后恢复       |
+| 历史记录 | 最近任务、搜索结果、长任务读取和浏览器断线重连                       |
+| 文件     | 上传、附件、文件夹、图片、预览、下载和跨用户下载拒绝                 |
+| 开发工具 | 终端、Git 状态、差异、分支和受管工作树                               |
+| 权限     | 命令批准、拒绝、浏览器来源权限和完全控制开关                         |
+| MCP      | MCP 模型上下文协议（Model Context Protocol）发现、握手和真实工具调用 |
+| 插件     | 插件目录、已安装插件、技能页和连接应用读取                           |
+| 页面     | 新任务、拉取请求、站点、已安排、插件和全部设置页面                   |
+| 运维     | 备份、恢复、不可变发布、健康检查和失败自动回滚                       |
+
+自动化仓库检查当前覆盖 41 个测试文件和 199 个测试
+
+真实运行环境还会执行官方窗口、任务生命周期、MCP、权限、文件、终端、Git、浏览器、备份恢复和持久化烟雾测试
+
+完整证据与未执行的高风险操作见 [端到端验收记录](./docs/USER-JOURNEY-AUDIT-2026-07-29.md)
+
+## 性能边界
+
+宿主曾把所有桌面调用排成一条队列，导致一个慢网络请求拖住本地按钮、历史记录和发送操作
+
+修复后，独立调用可以并发执行，同时保留需要顺序处理的确认和端口消息
+
+| 项目                           |             验收结果 |
+| ------------------------------ | -------------------: |
+| 服务器本地桥接延迟中位数       |              13.0 ms |
+| 服务器本地桥接延迟第 95 百分位 |              25.9 ms |
+| 已登录任务切换                 |            44–162 ms |
+| 发送到收到准确回复             | 2.03 s，包含模型生成 |
+| 创建对话分支                   |               364 ms |
+| 归档测试分支                   |               771 ms |
+
+超大旧任务仍受官方 app-server 重复解析超大 JSONL 文件的限制
+
+项目不会为了掩盖这个上游限制再维护一套私有历史数据库，旧任务应先备份，需要时再恢复
+
+## 验证结果
+
+仓库级检查：
 
 ```sh
+# 安装锁定依赖
 npm ci
+
+# 运行安全、格式、静态检查、类型检查和全部单元测试
 npm run ci
+
+# 用获得授权的官方包核对版本、哈希和桌面契约
 npm run contracts:check
 ```
 
-The repository also contains real-runtime smoke suites for the official main
-window, in-app browser, authenticated user isolation, and app-server
-conversation lifecycle:
+服务器候选版本还必须通过以下真实链路：
 
 ```sh
+# 官方主窗口和浏览器兼容层
 npm run smoke:official-ui
 npm run smoke:browser
+
+# 登录隔离、任务持久化和完整生命周期
 npm run smoke:auth-isolation
 npm run smoke:core-lifecycle
+
+# 文件、终端、Git、工作树和权限
 npm run smoke:desktop-tools
 npm run smoke:approvals
+
+# MCP 真实服务发现和调用
+npm run smoke:mcp
 ```
 
-They require the qualified private package and are executed in staging before
-promotion. The main-window smoke requires a loopback reverse proxy because the
-browser must never possess the private Nginx-to-host proof header; the same rule
-applies to production WebSocket upgrades.
+GitHub 的 CI 持续集成（Continuous Integration）只验证不依赖私有官方包的部分
 
-The approval smoke uses the real, version-locked app-server and complete browser
-bridge in an isolated runtime. It proves that approval executes the proposed
-command, rejection does not execute it, both responses return to the model, and
-both turns complete without touching the production runtime.
+正式发布不能用 CI 代替服务器上的官方包、真实浏览器、备份恢复和重启持久化验收
 
-GitHub CI runs the package-independent repository checks on Node.js 24. Private
-official-package integrity, real renderer, browser, app-server, persistence, and
-recovery gates remain mandatory staging checks and are never replaced by CI.
+## 部署与升级
 
-## Operations
+仓库不包含官方安装包
 
-See:
+部署者需要提供自己有权使用的官方包，并先生成来源清单、renderer 哈希和 preload 契约
 
-- [`docs/IMPLEMENTATION.md`](docs/IMPLEMENTATION.md)
-- [`docs/RELEASE-GATES.md`](docs/RELEASE-GATES.md)
-- [`docs/DEPLOYMENT.md`](docs/DEPLOYMENT.md)
-- [`docs/OLD-CODEXAPP-BACKUP.md`](docs/OLD-CODEXAPP-BACKUP.md)
+发布流程按以下顺序执行：
 
-Production uses immutable releases and an atomic `current` link. A failed
-promotion automatically restores the previous version. User state lives outside
-release directories. The old CodexApp and OpenCodexApp are outside this
-project's deletion boundary.
+1. 在独立目录构建候选版本
+2. 执行仓库检查和官方包契约检查
+3. 在隔离用户和临时端口上执行真实运行测试
+4. 把通过验收的目录设为只读版本
+5. 原子切换 `current` 链接并检查健康状态
+6. 健康检查失败时自动切回上一版本
+
+部署细节见 [部署与回滚](./docs/DEPLOYMENT.md)
+
+## 登录与用户隔离
+
+外层统一登录决定谁能进入站点，内层 OpenAI 登录决定 Codex 使用哪个 OpenAI 账号
+
+两层登录不共用令牌
+
+每个稳定用户标识对应独立的：
+
+- `CODEX_HOME`
+- 工作目录
+- 对话和设置
+- 浏览器配置
+- 终端
+- 下载票据
+- GitHub CLI 登录
+
+用户名变化不会改变稳定用户标识，因此不会让原任务消失
+
+## 数据边界
+
+仓库允许提交：
+
+- 宿主源代码
+- 版本与契约清单
+- 部署脚本
+- 脱敏后的测试证据
+- 裁掉账号和任务侧栏的公开截图
+
+仓库禁止提交：
+
+- 官方 ChatGPT / Codex 安装包及其解包文件
+- OpenAI、GitHub、Authentik 或代理凭据
+- 真实对话、附件和浏览器资料
+- 用户运行目录、数据库、日志和备份
+- 服务器私有密钥、内部地址和临时授权码
+
+提交前检查由 [`ops/check-source-boundaries.sh`](./ops/check-source-boundaries.sh) 执行
+
+## 当前外部依赖
+
+以下能力不能靠改写官方界面解决：
+
+- 拉取请求页面需要当前服务器用户完成一次 GitHub 官方设备授权
+- ChatGPT 项目列表和公开插件目录刷新可能被 OpenAI 拒绝机房出口
+- 语音和 Computer Use 需要连接设备提供麦克风、摄像头或屏幕权限
+- 付费操作、账号删除和不可恢复删除不会进入无人值守测试
+
+项目为受机房出口影响的官方项目列表提供可选的本地代理出口
+
+代理只处理已确认受影响的官方请求，不接管模型对话、SSH 或整台 VPS 的网络
+
+## 文档
+
+- [实现与模块边界](./docs/IMPLEMENTATION.md)
+- [发布关卡](./docs/RELEASE-GATES.md)
+- [部署与回滚](./docs/DEPLOYMENT.md)
+- [生产端到端验收记录](./docs/USER-JOURNEY-AUDIT-2026-07-29.md)
+- [2026-07-30 发布复验](./docs/VALIDATION-2026-07-30.md)
+- [旧 CodexApp 备份边界](./docs/OLD-CODEXAPP-BACKUP.md)
+
+## 已锁定上游版本
+
+- ChatGPT / Codex renderer：`26.721.31836`
+- 官方构建号：`5828`
+- Codex app-server：`0.146.0-alpha.3.1`
+- preload 契约：19 个方法
+
+宿主发现版本、哈希、品牌、构建号或契约不一致时会拒绝启动
+
+## 许可
+
+本仓库自有代码使用 [MIT License](./LICENSE)
+
+官方 ChatGPT / Codex 界面、图片、字体、安装包和二进制文件不属于本仓库，也不受本仓库 MIT 许可覆盖

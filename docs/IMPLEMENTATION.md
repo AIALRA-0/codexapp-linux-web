@@ -17,6 +17,10 @@
    models, configuration, authentication status, and account operations.
 7. Host-only features (filesystem, PTY, Git, menus, file drag, system integration)
    are delegated through explicit capability handlers.
+8. An optional credential-free loopback HTTP CONNECT proxy can carry only the
+   official ChatGPT projects-sidebar request when OpenAI challenges datacenter
+   egress. The official URL and protocol stay unchanged, and normal model turns
+   keep the direct route.
 
 ## Delivery order
 

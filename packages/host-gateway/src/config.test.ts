@@ -63,4 +63,26 @@ describe('gateway production configuration', () => {
     await writeFile(fixture.proxySecret, 'short\n');
     expect(() => loadConfig(fixture.values)).toThrow('proxy secret');
   });
+
+  it('accepts only a credential-free loopback OpenAI egress proxy', async () => {
+    const fixture = await environment();
+    expect(
+      loadConfig({
+        ...fixture.values,
+        OPENAI_EGRESS_PROXY_URL: 'http://127.0.0.1:40000',
+      }).openAiEgressProxyUrl,
+    ).toBe('http://127.0.0.1:40000');
+    expect(() =>
+      loadConfig({
+        ...fixture.values,
+        OPENAI_EGRESS_PROXY_URL: 'http://proxy.example.com:40000',
+      }),
+    ).toThrow('loopback');
+    expect(() =>
+      loadConfig({
+        ...fixture.values,
+        OPENAI_EGRESS_PROXY_URL: 'http://user:secret@127.0.0.1:40000',
+      }),
+    ).toThrow('credentials');
+  });
 });
