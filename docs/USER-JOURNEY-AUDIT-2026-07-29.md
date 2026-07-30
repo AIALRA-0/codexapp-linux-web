@@ -334,13 +334,19 @@ renderer before promotion.
 
 ## Remaining external dependencies
 
-1. GitHub pull-request operations require `gh auth login` for the server user.
+1. GitHub pull-request operations still require the server user to finish one
+   GitHub passkey or Touch ID confirmation. The device flow has reached GitHub's
+   sudo-mode confirmation page, but `gh auth status` must pass before this
+   capability is marked complete.
 2. Live refresh of the entire public Apps directory requires a trusted
    non-datacenter egress route or a change in OpenAI's Cloudflare treatment.
    The 2026-07-30 host can route the official ChatGPT projects-sidebar request
-   through an optional credential-free loopback proxy without changing the
-   official endpoint or the VPS default route. The proxy remains disabled until
-   the operator accepts the proxy vendor's terms and verifies the route.
+   through a credential-free Cloudflare WARP loopback proxy without changing the
+   official endpoint or the VPS default route. The operator accepted the vendor
+   terms, WARP is connected, and the proxy listens only on `127.0.0.1`. Both
+   direct and proxied unauthenticated requests still receive the OpenAI
+   Cloudflare challenge, so the signed-in Projects UI remains a required
+   business-level check.
 3. Voice capture and Computer Use depend on browser/device capabilities and
    permissions available to the connecting client. Their settings routes and host
    contracts load, but unattended microphone/camera consent was not granted.

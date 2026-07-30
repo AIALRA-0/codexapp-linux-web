@@ -19,6 +19,9 @@ const client = new CodexAppServerClient({
   extraArgs: ['-c', 'features.code_mode_host=true'],
   requestTimeoutMs: 180_000,
 });
+const appServerStderr = [];
+let appServerError;
+let activeMeasurement = 'startup';
 client.on('request', (event) => {
   void event.respond({
     error: {
@@ -26,6 +29,13 @@ client.on('request', (event) => {
       message: `unexpected server request during large-thread smoke: ${event.request.method}`,
     },
   });
+});
+client.on('stderr', (line) => {
+  appServerStderr.push(safeDiagnostic(line));
+  if (appServerStderr.length > 20) appServerStderr.shift();
+});
+client.on('error', (error) => {
+  appServerError = error;
 });
 
 const measurements = {};
@@ -88,11 +98,23 @@ try {
       measurements,
     })}\n`,
   );
+} catch (error) {
+  process.stderr.write(
+    `${JSON.stringify({
+      ok: false,
+      failedMeasurement: activeMeasurement,
+      error: error instanceof Error ? error.message : String(error),
+      appServerError: appServerError instanceof Error ? appServerError.message : undefined,
+      appServerStderr,
+    })}\n`,
+  );
+  process.exitCode = 1;
 } finally {
   await client.stop().catch(() => undefined);
 }
 
 async function measure(name, operation) {
+  activeMeasurement = name;
   let sampling = true;
   let appServerTreePeakRssBytes = 0;
   const sampler = (async () => {
@@ -168,4 +190,16 @@ function requiredEnvironment(name) {
   const value = process.env[name];
   if (value === undefined || value.length === 0) throw new Error(`${name} is required`);
   return value;
+}
+
+function safeDiagnostic(value) {
+  return String(value)
+    .replaceAll(/\/srv\/aialra\/state\/codexapp-official\/(?:users\/)?[^/\s:]+/gu, '[state-path]')
+    .replaceAll(/[0-9a-f]{8}-(?:[0-9a-f]{4}-){3}[0-9a-f]{12}/giu, '[thread-id]')
+    .replaceAll(/\b[0-9a-f]{40,}\b/giu, '[secret-redacted]')
+    .replaceAll(
+      /\b(authorization|cookie|token|secret|password)\b(\s*[:=]\s*)\S+/giu,
+      '$1$2[secret-redacted]',
+    )
+    .slice(0, 500);
 }
