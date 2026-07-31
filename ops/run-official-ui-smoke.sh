@@ -21,6 +21,8 @@ proxy_port="13016"
 proxy_enabled=0
 
 source "$application_root/ops/lib/systemd-host-hardening.sh"
+source "$application_root/ops/lib/pinned-official-release.sh"
+codexapp_load_pinned_official_release "$application_root"
 codexapp_prepare_host_hardening "$runtime_root"
 
 read_environment_value() {
@@ -84,7 +86,7 @@ chown "$service_user:$service_group" "$runtime_root"
 chmod 0700 "$runtime_root"
 
 browser_executable="$(read_environment_value BROWSER_EXECUTABLE)"
-renderer_version="$(read_environment_value EXPECTED_RENDERER_VERSION)"
+renderer_version="$CODEXAPP_PINNED_RENDERER_VERSION"
 proxy_secret_file="$(read_environment_value AUTH_PROXY_SECRET_FILE)"
 if [[ -z "$browser_executable" || -z "$renderer_version" || -z "$proxy_secret_file" ]]; then
   echo "browser executable, renderer version, or proxy proof file is missing" >&2
@@ -111,6 +113,7 @@ systemd-run \
   "${CODEXAPP_HOST_HARDENING_ARGS[@]}" \
   -- \
   /usr/bin/env \
+  "${CODEXAPP_PINNED_OFFICIAL_ENV[@]}" \
   "PORT=$app_port" \
   "PUBLIC_ORIGIN=http://127.0.0.1:$proxy_port" \
   "RUNTIME_ROOT=$runtime_root" \

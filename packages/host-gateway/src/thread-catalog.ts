@@ -1,8 +1,10 @@
 import { createHash } from 'node:crypto';
 import { createRequire } from 'node:module';
-import { join, resolve } from 'node:path';
+import { resolve } from 'node:path';
 
 import type { CodexAppServerClient } from '@codexapp/app-server-client';
+
+import { resolveOfficialSharedModulePath } from './official-shared-module.js';
 
 const PAGE_LIMIT = 100;
 const MAX_CATALOG_ENTRIES = 50_000;
@@ -149,9 +151,9 @@ export class OfficialThreadCatalog {
     if (!this.#loaded) throw new Error('Thread catalog must be loaded before it starts');
     if (this.#stopped) throw new Error('Thread catalog is stopped');
     this.#client = client;
-    const sharedPath = join(this.sourceRoot, '.vite', 'build', 'src-DChWimf7.js');
     const shared =
-      this.#loadOfficialShared?.() ?? (require(sharedPath) as Partial<OfficialSharedModule>);
+      this.#loadOfficialShared?.() ??
+      (require(resolveOfficialSharedModulePath(this.sourceRoot)) as Partial<OfficialSharedModule>);
     if (typeof shared.o !== 'function' || !Array.isArray(shared.Fi)) {
       throw new Error('qualified official thread catalog exports changed');
     }

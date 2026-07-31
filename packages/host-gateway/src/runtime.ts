@@ -32,7 +32,11 @@ import type { GatewayConfig } from './config.js';
 import { identitiesMatch, userKeyForIdentity } from './identity.js';
 import { prepareRendererRequest } from './login.js';
 import { OfficialElectronNetwork } from './electron-network.js';
-import { RendererFetchProxy, type HostDownloadRequest } from './network.js';
+import {
+  RendererFetchProxy,
+  resolveRendererFetchUrl,
+  type HostDownloadRequest,
+} from './network.js';
 import { OfficialAppDirectoryCache } from './official-app-directory.js';
 import { OfficialAutomationController } from './official-automation.js';
 import { OfficialBrowserRuntime } from './browser-runtime.js';
@@ -129,6 +133,7 @@ export class UserRuntime extends EventEmitter {
   #appServerRestartAttempt = 0;
   #stopping = false;
   #rendererRequests = new Map<JsonRpcId, RendererRequestMetadata>();
+  #modelProviderCapabilities: unknown;
   #fetchControllers = new Map<string, AbortController>();
   #initialAppServerMessages: unknown[] = [];
   #browserDownloads = new Map<string, BrowserDownload & { expiresAt: number }>();
@@ -442,6 +447,7 @@ export class UserRuntime extends EventEmitter {
     this.#turnLatency.clear();
     await this.#appServer?.stop();
     this.#appServer = undefined;
+    this.#modelProviderCapabilities = undefined;
   }
 
   async handleViewMessage(messageValue: unknown, browserSessionId?: string): Promise<unknown> {
@@ -492,6 +498,33 @@ export class UserRuntime extends EventEmitter {
             });
             return undefined;
           }
+        }
+        if (
+          prepared.request.method === 'modelProvider/capabilities/read' &&
+          this.#modelProviderCapabilities !== undefined
+        ) {
+          const receivedAtMs = Date.now();
+          this.emit('performance', {
+            kind: 'official-cache',
+            method: prepared.request.method,
+            durationMs: receivedAtMs - startedAtMs,
+          });
+          this.emit('view-message', {
+            type: 'mcp-response',
+            hostId: 'local',
+            message: {
+              id: prepared.request.id,
+              result: this.#modelProviderCapabilities,
+            },
+            ...(prepared.request.trace === undefined
+              ? {}
+              : {
+                  receivedAtMs,
+                  requestMethod: prepared.request.method,
+                  trace: prepared.request.trace,
+                }),
+          });
+          return undefined;
         }
         this.#rendererRequests.set(prepared.request.id, {
           method: prepared.request.method,
@@ -890,6 +923,7 @@ export class UserRuntime extends EventEmitter {
     });
     this.#appServer = client;
     await client.start();
+    await this.#refreshModelProviderCapabilities(client);
     this.#appServerRestartAttempt = 0;
     await this.threadCatalog.start(client);
     await this.automationController.start();
@@ -897,6 +931,7 @@ export class UserRuntime extends EventEmitter {
 
   async #restartAppServer(client: CodexAppServerClient): Promise<void> {
     await client.start();
+    await this.#refreshModelProviderCapabilities(client);
     this.#appServerRestartAttempt = 0;
     await this.threadCatalog.requestStartupSync().catch((error: unknown) => {
       this.emit('capability-error', {
@@ -904,6 +939,22 @@ export class UserRuntime extends EventEmitter {
         error: error instanceof Error ? error.message : 'thread catalog recovery failed',
       });
     });
+  }
+
+  async #refreshModelProviderCapabilities(client: CodexAppServerClient): Promise<void> {
+    try {
+      this.#modelProviderCapabilities = await client.request(
+        'modelProvider/capabilities/read',
+        {},
+        15_000,
+      );
+    } catch (error) {
+      this.#modelProviderCapabilities = undefined;
+      this.emit('capability-error', {
+        requestType: 'model-provider-capabilities-cache',
+        error: error instanceof Error ? error.message : 'capabilities request failed',
+      });
+    }
   }
 
   #scheduleAppServerRestart(): void {
@@ -1083,8 +1134,19 @@ export class UserRuntime extends EventEmitter {
     }
     if (!url.startsWith('vscode://codex/')) {
       const controller = this.#createFetchController(requestId);
+      const startedAtMs = Date.now();
       try {
-        this.emit('view-message', await this.#fetchProxy.perform(message, controller.signal));
+        const response = await this.#fetchProxy.perform(message, controller.signal);
+        this.emit('performance', {
+          kind: 'renderer-fetch',
+          method:
+            typeof message.method === 'string' ? message.method.toUpperCase().slice(0, 16) : 'GET',
+          ...rendererFetchTargetForDiagnostic(url),
+          status: response.status,
+          responseType: response.responseType,
+          durationMs: Date.now() - startedAtMs,
+        });
+        this.emit('view-message', response);
       } finally {
         if (this.#fetchControllers.get(requestId) === controller) {
           this.#fetchControllers.delete(requestId);
@@ -1654,6 +1716,30 @@ export class UserRuntime extends EventEmitter {
     for (const [token, download] of this.#browserDownloads) {
       if (download.expiresAt <= now) this.#browserDownloads.delete(token);
     }
+  }
+}
+
+function rendererFetchTargetForDiagnostic(url: string): {
+  host: string;
+  route: string;
+  queryKeys: string[];
+} {
+  try {
+    const parsed = resolveRendererFetchUrl(url, 'https://chatgpt.com/backend-api/');
+    const parts = parsed.pathname.split('/').filter((part) => part.length > 0);
+    const route =
+      parsed.pathname === '/backend-api/gizmos/snorlax/sidebar'
+        ? parsed.pathname
+        : parts[0] === 'backend-api' && parts[1] !== undefined
+          ? `/backend-api/${parts[1]}/[...]`
+          : '/[other]';
+    return {
+      host: parsed.hostname,
+      route,
+      queryKeys: [...new Set(parsed.searchParams.keys())].sort().slice(0, 20),
+    };
+  } catch {
+    return { host: '[invalid]', route: '[invalid]', queryKeys: [] };
   }
 }
 

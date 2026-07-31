@@ -22,6 +22,8 @@ service_group="codexappweb"
 active_unit=""
 
 source "$application_root/ops/lib/systemd-host-hardening.sh"
+source "$application_root/ops/lib/pinned-official-release.sh"
+codexapp_load_pinned_official_release "$application_root"
 codexapp_prepare_host_hardening "$runtime_root"
 
 read_environment_value() {
@@ -98,6 +100,7 @@ start_isolated_host() {
     "${CODEXAPP_HOST_HARDENING_ARGS[@]}" \
     -- \
     /usr/bin/env \
+    "${CODEXAPP_PINNED_OFFICIAL_ENV[@]}" \
     "PORT=$app_port" \
     "PUBLIC_ORIGIN=$public_origin" \
     "RUNTIME_ROOT=$runtime_root" \

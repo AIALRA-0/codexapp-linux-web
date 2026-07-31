@@ -39,20 +39,21 @@ describe('official Electron network protocol', () => {
     expect(parseElectronNetworkLine('CODEX_ELECTRON_NET_V1 {"type":"ready"}')).toBeNull();
   });
 
-  it('allows only the exact official projects endpoint', () => {
-    expect(() =>
-      assertOfficialElectronNetworkUrl(
-        new URL('https://chatgpt.com/backend-api/gizmos/snorlax/sidebar?conversations_per_gizmo=0'),
-      ),
-    ).not.toThrow();
+  it('allows only the official ChatGPT backend API boundary', () => {
+    for (const target of [
+      'https://chatgpt.com/backend-api/gizmos/snorlax/sidebar?conversations_per_gizmo=0&cursor=opaque',
+      'https://chatgpt.com/backend-api/projects/project-id/files',
+      'https://chatgpt.com/backend-api/subscriptions/auto_top_up/settings?include_payment_method=false',
+    ]) {
+      expect(() => assertOfficialElectronNetworkUrl(new URL(target))).not.toThrow();
+    }
     for (const target of [
       'http://chatgpt.com/backend-api/gizmos/snorlax/sidebar',
       'https://chatgpt.com:8443/backend-api/gizmos/snorlax/sidebar',
-      'https://chatgpt.com/backend-api/conversation',
       'https://openai.com/backend-api/gizmos/snorlax/sidebar',
-      'https://chatgpt.com/backend-api/gizmos/snorlax/sidebar?unexpected=value',
-      'https://chatgpt.com/backend-api/gizmos/snorlax/sidebar?limit=10&limit=20',
-      'https://chatgpt.com/backend-api/gizmos/snorlax/sidebar?owned_only=maybe',
+      'https://chatgpt.com/backend-api',
+      'https://chatgpt.com/public-api/projects',
+      'https://user:password@chatgpt.com/backend-api/projects',
       'https://chatgpt.com/backend-api/gizmos/snorlax/sidebar#fragment',
     ]) {
       expect(() => assertOfficialElectronNetworkUrl(new URL(target))).toThrow();
@@ -92,13 +93,24 @@ describe('official Electron network protocol', () => {
         'const buffered = [];',
         'const respond = (message) => {',
         '  process.stdout.write(marker + JSON.stringify({',
-        "    type: 'response',",
+        "    type: 'response-start',",
         '    id: message.id,',
         '    status: 200,',
         "    statusText: 'OK',",
         "    headers: [['content-type', 'application/json']],",
-        "    bodyBase64: Buffer.from(JSON.stringify({ requestsBeforeReady })).toString('base64'),",
         "  }) + '\\n');",
+        "  if (message.method !== 'HEAD') {",
+        '    process.stdout.write(marker + JSON.stringify({',
+        "      type: 'response-chunk',",
+        '      id: message.id,',
+        '      bodyBase64: Buffer.from(JSON.stringify({',
+        '        requestsBeforeReady,',
+        '        method: message.method,',
+        "        body: message.bodyBase64 === undefined ? null : Buffer.from(message.bodyBase64, 'base64').toString(),",
+        "      })).toString('base64'),",
+        "    }) + '\\n');",
+        '  }',
+        "  process.stdout.write(marker + JSON.stringify({ type: 'response-end', id: message.id }) + '\\n');",
         '};',
         'const input = readline.createInterface({ input: process.stdin, crlfDelay: Infinity });',
         "input.on('line', (line) => {",
@@ -130,14 +142,32 @@ describe('official Electron network protocol', () => {
         client.fetch('https://chatgpt.com/backend-api/gizmos/snorlax/sidebar?limit=1', {
           headers: { Authorization: 'Bearer test-one' },
         }),
-        client.fetch('https://chatgpt.com/backend-api/gizmos/snorlax/sidebar?limit=2', {
+        client.fetch('https://chatgpt.com/backend-api/projects', {
+          method: 'POST',
           headers: { Authorization: 'Bearer test-two' },
+          body: JSON.stringify({ name: 'test project' }),
         }),
       ]);
       await expect(Promise.all(responses.map((response) => response.json()))).resolves.toEqual([
-        { requestsBeforeReady: 0 },
-        { requestsBeforeReady: 0 },
+        { requestsBeforeReady: 0, method: 'GET', body: null },
+        {
+          requestsBeforeReady: 0,
+          method: 'POST',
+          body: JSON.stringify({ name: 'test project' }),
+        },
       ]);
+      const headResponse = await client.fetch('https://chatgpt.com/backend-api/projects', {
+        method: 'HEAD',
+      });
+      await expect(headResponse.text()).resolves.toBe('');
+
+      const alreadyAborted = new AbortController();
+      alreadyAborted.abort();
+      await expect(
+        client.fetch('https://chatgpt.com/backend-api/projects', {
+          signal: alreadyAborted.signal,
+        }),
+      ).rejects.toMatchObject({ name: 'AbortError' });
     } finally {
       await client.stop();
       await rm(root, { force: true, recursive: true });

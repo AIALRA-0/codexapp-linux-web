@@ -5,7 +5,7 @@ const baseUrl = process.env.SMOKE_BASE_URL;
 const browserExecutable = process.env.BROWSER_EXECUTABLE;
 const proxySecret = process.env.SMOKE_PROXY_SECRET;
 const screenshotPath = process.env.SMOKE_SCREENSHOT_PATH;
-const expectedRendererVersion = process.env.SMOKE_RENDERER_VERSION ?? '26.721.31836';
+const expectedRendererVersion = process.env.SMOKE_RENDERER_VERSION ?? '26.721.81911';
 if (baseUrl === undefined || browserExecutable === undefined) {
   throw new Error('SMOKE_BASE_URL and BROWSER_EXECUTABLE are required');
 }

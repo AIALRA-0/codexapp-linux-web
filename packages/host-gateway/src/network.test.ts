@@ -56,7 +56,7 @@ describe('renderer fetch security', () => {
 });
 
 describe('renderer fetch proxy', () => {
-  it('routes only the Cloudflare-challenged official projects request through trusted egress', () => {
+  it('keeps the fallback narrow while routing every official backend API request through Electron', () => {
     expect(
       shouldUseRendererEgressProxy(
         new URL('https://chatgpt.com/backend-api/gizmos/snorlax/sidebar?limit=10'),
@@ -77,12 +77,23 @@ describe('renderer fetch proxy', () => {
     ).toBe(true);
     expect(
       shouldUseOfficialElectronNetwork(
+        new URL('https://chatgpt.com/backend-api/projects/project-id/files'),
+      ),
+    ).toBe(true);
+    expect(
+      shouldUseOfficialElectronNetwork(new URL('https://chatgpt.com/backend-api/conversation')),
+    ).toBe(true);
+    expect(
+      shouldUseOfficialElectronNetwork(
         new URL('https://chatgpt.com:8443/backend-api/gizmos/snorlax/sidebar'),
       ),
     ).toBe(false);
+    expect(
+      shouldUseOfficialElectronNetwork(new URL('https://chatgpt.com/public-api/projects')),
+    ).toBe(false);
   });
 
-  it('prefers the pinned official Electron network and bypasses the proxy fallback', async () => {
+  it('prefers the pinned official Electron network for backend API requests', async () => {
     const electronFetchImplementation = vi.fn((_url: URL | RequestInfo, init?: RequestInit) => {
       expect(
         (init as (RequestInit & { dispatcher?: unknown }) | undefined)?.dispatcher,
@@ -103,9 +114,10 @@ describe('renderer fetch proxy', () => {
     const result = await proxy.perform({
       type: 'fetch',
       requestId: 'request-projects-electron',
-      url: 'https://chatgpt.com/backend-api/gizmos/snorlax/sidebar',
-      method: 'GET',
+      url: 'https://chatgpt.com/backend-api/projects',
+      method: 'POST',
       headers: {},
+      body: JSON.stringify({ name: 'test' }),
     });
     expect(result).toMatchObject({ responseType: 'success', status: 200 });
     expect(electronFetchImplementation).toHaveBeenCalledTimes(1);

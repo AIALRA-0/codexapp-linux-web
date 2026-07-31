@@ -14,6 +14,8 @@ import {
 } from 'node:fs/promises';
 import { basename, dirname, isAbsolute, join, posix, relative, resolve } from 'node:path';
 
+import { resolveOfficialSharedModulePath } from './official-shared-module.js';
+
 interface WorkerRequest {
   type: 'request';
   id: number;
@@ -150,7 +152,7 @@ if (typeof sourceRootValue !== 'string' || sourceRootValue.length === 0) {
 const sourceRoot = resolve(sourceRootValue);
 const officialRequire = createRequire(join(sourceRoot, 'package.json'));
 const official = officialRequire(
-  join(sourceRoot, '.vite', 'build', 'src-DChWimf7.js'),
+  resolveOfficialSharedModulePath(sourceRoot),
 ) as Partial<OfficialDesktopStateModule>;
 
 for (const exportName of [

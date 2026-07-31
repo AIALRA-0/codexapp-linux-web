@@ -9,7 +9,8 @@ const threadId = requiredEnvironment('SMOKE_THREAD_ID');
 const rolloutPath = process.env.SMOKE_ROLLOUT_PATH;
 const workspace = process.env.SMOKE_WORKSPACE ?? process.cwd();
 const includeFullRead = process.env.SMOKE_INCLUDE_FULL_READ === '1';
-const rendererVersion = process.env.SMOKE_RENDERER_VERSION ?? '26.721.31836';
+const includeLegacyComparison = process.env.SMOKE_INCLUDE_LEGACY_COMPARISON === '1';
+const rendererVersion = process.env.SMOKE_RENDERER_VERSION ?? '26.721.81911';
 
 const client = new CodexAppServerClient({
   codexBin,
@@ -41,49 +42,68 @@ client.on('error', (error) => {
 const measurements = {};
 try {
   await measure('startup', () => client.start());
-  await measure('listRecent20', () =>
+  const listed = await measure('listRecent20', () =>
     client.request('thread/list', {
       archived: false,
       limit: 20,
       sortKey: 'updated_at',
       sortDirection: 'desc',
+      useStateDbOnly: true,
     }),
   );
-  await measure('readMetadataOnly', () =>
+  const metadata = await measure('readMetadataOnly', () =>
     client.request('thread/read', { threadId, includeTurns: false }),
   );
-  await measure('resumeRecent10Summary', () =>
+  const listedThread = threadRowsFrom(listed).find((thread) => thread?.id === threadId);
+  const historyMode =
+    stringValue(listedThread?.historyMode) ??
+    stringValue(metadata?.thread?.historyMode) ??
+    'legacy';
+  const paginatedHistory = historyMode === 'paginated';
+  const resumed = await measure('latestRendererResume', () =>
     client.request('thread/resume', {
       threadId,
       ...(rolloutPath === undefined ? {} : { path: rolloutPath }),
       excludeTurns: true,
-      initialTurnsPage: {
-        limit: 10,
-        sortDirection: 'desc',
-        itemsView: 'summary',
-      },
+      ...(paginatedHistory
+        ? {}
+        : {
+            initialTurnsPage: {
+              limit: 5,
+              sortDirection: 'desc',
+              itemsView: 'full',
+            },
+          }),
     }),
   );
-  const recentPage = await measure('turnsRecent10Summary', () =>
-    client.request('thread/turns/list', {
-      threadId,
-      cursor: null,
-      limit: 10,
-      sortDirection: 'desc',
-      itemsView: 'summary',
-    }),
-  );
-  const cursor = nextCursorFrom(recentPage);
-  if (cursor !== null) {
-    await measure('turnsPrevious10Summary', () =>
+  const rendererHistory =
+    paginatedHistory && stringValue(resumed?.turnsBackwardsCursor) !== null
+      ? await measure('latestRendererTurnsAndItems', () =>
+          hydrateLatestPaginatedHistory(client, threadId, resumed),
+        )
+      : summarizeInitialPage(resumed?.initialTurnsPage);
+  if (includeLegacyComparison) {
+    const recentPage = await measure('legacyTurnsRecent10Summary', () =>
       client.request('thread/turns/list', {
         threadId,
-        cursor,
+        cursor: null,
         limit: 10,
         sortDirection: 'desc',
         itemsView: 'summary',
       }),
     );
+    const cursor = nextCursorFrom(recentPage);
+    if (cursor !== null) {
+      await measure('legacyTurnsPrevious10Summary', () =>
+        client.request('thread/turns/list', {
+          threadId,
+          cursor,
+          limit: 10,
+          sortDirection: 'desc',
+          itemsView: 'summary',
+        }),
+      );
+    }
   }
   if (includeFullRead) {
     await measure('readAllTurns', () =>
@@ -94,7 +114,11 @@ try {
     `${JSON.stringify({
       ok: true,
       threadId,
+      rendererVersion,
+      historyMode,
+      rendererHistory,
       includeFullRead,
+      includeLegacyComparison,
       measurements,
     })}\n`,
   );
@@ -111,6 +135,85 @@ try {
   process.exitCode = 1;
 } finally {
   await client.stop().catch(() => undefined);
+}
+
+async function hydrateLatestPaginatedHistory(appServer, id, resumed) {
+  const turnsCursor = stringValue(resumed?.turnsBackwardsCursor);
+  const itemsCursor = stringValue(resumed?.itemsBackwardsCursor);
+  if (turnsCursor === null) {
+    return { turns: 0, items: 0, nextCursor: null, fullyHydratedTurns: 0 };
+  }
+  const page = await appServer.request('thread/turns/list', {
+    threadId: id,
+    cursor: turnsCursor,
+    limit: 5,
+    itemsView: 'notLoaded',
+    sortDirection: 'desc',
+  });
+  const turns = threadRowsFrom(page);
+  let remainingItems = 500;
+  let items = 0;
+  let fullyHydratedTurns = 0;
+  for (const turn of turns) {
+    const turnId = stringValue(turn?.id);
+    if (turnId === null || remainingItems === 0) continue;
+    let cursor = itemsCursor;
+    const seenCursors = new Set();
+    const seenItems = new Set();
+    let requestedPage = false;
+    while ((!requestedPage || cursor !== null) && remainingItems > 0) {
+      if (seenCursors.has(cursor)) {
+        throw new Error(`thread/items/list repeated a cursor for turn ${turnId}`);
+      }
+      seenCursors.add(cursor);
+      requestedPage = true;
+      const itemPage = await appServer.request('thread/items/list', {
+        threadId: id,
+        turnId,
+        cursor,
+        limit: Math.min(100, remainingItems),
+        sortDirection: 'desc',
+      });
+      const rows = threadRowsFrom(itemPage);
+      for (const row of rows) {
+        const itemId = stringValue(row?.item?.id);
+        if (itemId !== null && seenItems.has(itemId)) continue;
+        if (itemId !== null) seenItems.add(itemId);
+        items += 1;
+        remainingItems -= 1;
+      }
+      cursor = nextCursorFrom(itemPage);
+    }
+    if (cursor === null) fullyHydratedTurns += 1;
+  }
+  return {
+    turns: turns.length,
+    items,
+    nextCursor: nextCursorFrom(page),
+    fullyHydratedTurns,
+  };
+}
+
+function summarizeInitialPage(value) {
+  const turns = threadRowsFrom(value);
+  return {
+    turns: turns.length,
+    items: turns.reduce(
+      (count, turn) => count + (Array.isArray(turn?.items) ? turn.items.length : 0),
+      0,
+    ),
+    nextCursor: nextCursorFrom(value),
+    fullyHydratedTurns: turns.filter((turn) => turn?.itemsView === 'full').length,
+  };
+}
+
+function threadRowsFrom(value) {
+  const rows = value?.data ?? value?.threads;
+  return Array.isArray(rows) ? rows : [];
+}
+
+function stringValue(value) {
+  return typeof value === 'string' && value.length > 0 ? value : null;
 }
 
 async function measure(name, operation) {

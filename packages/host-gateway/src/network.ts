@@ -480,7 +480,15 @@ export function shouldUseRendererEgressProxy(url: URL): boolean {
 }
 
 export function shouldUseOfficialElectronNetwork(url: URL): boolean {
-  return shouldUseRendererEgressProxy(url);
+  return (
+    url.protocol === 'https:' &&
+    url.username.length === 0 &&
+    url.password.length === 0 &&
+    url.port.length === 0 &&
+    url.hostname === 'chatgpt.com' &&
+    url.pathname.startsWith('/backend-api/') &&
+    url.hash.length === 0
+  );
 }
 
 function rendererEgressProxyAgent(url: URL, proxyUrl: string | undefined): ProxyAgent | undefined {

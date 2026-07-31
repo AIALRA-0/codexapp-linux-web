@@ -28,6 +28,8 @@ accepted_marker="$workspace_root/approval-accepted.txt"
 declined_marker="$workspace_root/approval-declined.txt"
 
 source "$application_root/ops/lib/systemd-host-hardening.sh"
+source "$application_root/ops/lib/pinned-official-release.sh"
+codexapp_load_pinned_official_release "$application_root"
 codexapp_prepare_host_hardening "$runtime_root"
 
 read_environment_value() {
@@ -155,6 +157,7 @@ systemd-run \
   "${CODEXAPP_HOST_HARDENING_ARGS[@]}" \
   -- \
   /usr/bin/env \
+  "${CODEXAPP_PINNED_OFFICIAL_ENV[@]}" \
   "PORT=$host_port" \
   "PUBLIC_ORIGIN=$public_origin" \
   "RUNTIME_ROOT=$runtime_root" \

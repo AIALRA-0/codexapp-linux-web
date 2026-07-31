@@ -47,7 +47,26 @@ cp -a "$source_root/." "$incomplete/"
 (
   cd "$incomplete"
   qualified_official_source_root="${QUALIFIED_OFFICIAL_SOURCE_ROOT:?QUALIFIED_OFFICIAL_SOURCE_ROOT is required}"
+  qualified_source_manifest="$(
+    realpath "$qualified_official_source_root/../qualification/source-manifest.json"
+  )"
+  if [[ ! -f "$qualified_source_manifest" || -L "$qualified_source_manifest" ]]; then
+    echo "qualified official source manifest is missing or symbolic" >&2
+    exit 1
+  fi
+  jq -e \
+    --slurpfile source "$qualified_source_manifest" \
+    '
+      .version == $source[0].package.version
+      and .buildNumber == $source[0].package.buildNumber
+      and .asarSha256 == $source[0].package.asarSha256
+      and .rendererTreeSha256 == $source[0].renderer.treeSha256
+      and .hostTreeSha256 == $source[0].host.treeSha256
+      and .preloadSourceSha256 == $source[0].preload.sourceSha256
+    ' \
+    manifests/current-official.json >/dev/null
   npm run ci
+  OFFICIAL_TEST_SOURCE_ROOT="$qualified_official_source_root" npm test
   OFFICIAL_SOURCE_ROOT="$qualified_official_source_root" npm run contracts:check
   npm audit --audit-level=high
   npm audit --omit=dev --audit-level=high
@@ -66,39 +85,5 @@ if [[ "$activate" == "--stage" ]]; then
   exit 0
 fi
 
-previous_target=""
-if [[ -L "$current_link" ]]; then
-  previous_target="$(readlink -f "$current_link")"
-fi
-next_link="$application_root/.current.${release_id}.next"
-ln -s "$target" "$next_link"
-mv -Tf "$next_link" "$current_link"
-
-rollback() {
-  local exit_code=$?
-  if (( exit_code != 0 )); then
-    if [[ -n "$previous_target" && -d "$previous_target" ]]; then
-      rollback_link="$application_root/.current.rollback"
-      ln -s "$previous_target" "$rollback_link"
-      mv -Tf "$rollback_link" "$current_link"
-      systemctl restart "$service_name" || true
-    elif [[ -L "$current_link" && "$(readlink -f "$current_link")" == "$target" ]]; then
-      rm -- "$current_link"
-      systemctl stop "$service_name" || true
-    fi
-  fi
-  exit "$exit_code"
-}
-trap rollback EXIT
-
-systemctl restart "$service_name"
-for _attempt in $(seq 1 30); do
-  if curl -fs "$health_url" >/dev/null 2>&1; then
-    trap - EXIT
-    printf '{"ok":true,"active":"%s","previous":"%s"}\n' "$target" "$previous_target"
-    exit 0
-  fi
-  sleep 1
-done
-echo "new release did not become ready" >&2
-exit 1
+trap - EXIT
+exec "$target/ops/promote-release.sh" "$release_id"

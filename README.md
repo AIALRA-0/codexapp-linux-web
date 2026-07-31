@@ -6,7 +6,7 @@
 
 [![CI](https://github.com/AIALRA-0/codexapp-linux-web/actions/workflows/ci.yml/badge.svg)](https://github.com/AIALRA-0/codexapp-linux-web/actions/workflows/ci.yml)
 [![Node.js 24](https://img.shields.io/badge/Node.js-24-339933?logo=nodedotjs&logoColor=white)](https://nodejs.org/)
-[![Official renderer](https://img.shields.io/badge/renderer-26.721.31836-111111)](./manifests/official-26.721.31836.json)
+[![Official renderer](https://img.shields.io/badge/renderer-26.721.81911-111111)](./manifests/official-26.721.81911.json)
 [![License: MIT](https://img.shields.io/badge/code-MIT-blue.svg)](./LICENSE)
 
 [它解决什么](#它解决什么) · [真实界面](#真实界面) · [实现方式](#实现方式) · [验证结果](#验证结果) · [部署与升级](#部署与升级) · [数据边界](#数据边界)
@@ -70,7 +70,7 @@ flowchart TD
 | 页面     | 新任务、拉取请求、站点、已安排、插件和全部设置页面                   |
 | 运维     | 备份、恢复、不可变发布、健康检查和失败自动回滚                       |
 
-自动化仓库检查当前覆盖 42 个测试文件和 205 个测试
+自动化仓库检查当前覆盖 43 个测试文件和 210 个测试
 
 真实运行环境还会执行官方窗口、任务生命周期、MCP、权限、文件、终端、Git、浏览器、备份恢复和持久化烟雾测试
 
@@ -82,24 +82,25 @@ flowchart TD
 
 修复后，独立调用可以并发执行，同时保留需要顺序处理的确认和端口消息
 
-| 项目                           |             验收结果 |
-| ------------------------------ | -------------------: |
-| 服务器本地桥接延迟中位数       |              13.0 ms |
-| 服务器本地桥接延迟第 95 百分位 |              25.9 ms |
-| 已登录任务切换                 |            44–162 ms |
-| 发送到收到准确回复             | 2.03 s，包含模型生成 |
-| 创建对话分支                   |               364 ms |
-| 归档测试分支                   |               771 ms |
+| 项目                           |                  验收结果 |
+| ------------------------------ | ------------------------: |
+| 服务器本地桥接延迟中位数       |                   13.0 ms |
+| 服务器本地桥接延迟第 95 百分位 |                   25.9 ms |
+| 已登录任务切换                 |                 44–162 ms |
+| 发送到收到准确回复             | 3.56–4.41 s，包含模型生成 |
+| 创建对话分支                   |                    342 ms |
+| 归档测试分支                   |                    771 ms |
 
-另外从 Mac 取一条 442 MB 的真实旧任务，经过逐字节校验后放入服务器隔离目录封测：
+另外从 Mac 取一条约 450 MiB 的真实旧任务，经过逐字节校验后放入服务器隔离目录封测：
 
-| 442 MB 真实旧任务         | 服务器内部耗时 |
-| ------------------------- | -------------: |
-| 启动官方 app-server       |         14.9 s |
-| 恢复最近 10 条消息摘要    |         19.5 s |
-| 读取相邻 10 条消息摘要    |         15.5 s |
-| 完整读取全部消息          |         16.1 s |
-| app-server 进程树峰值内存 |        1.12 GB |
+| 约 450 MiB 真实旧任务       | 服务器内部耗时 |
+| --------------------------- | -------------: |
+| 启动官方 app-server         |         0.59 s |
+| 列出最近任务                |          16 ms |
+| 读取任务元数据              |          23 ms |
+| 按最新官方界面恢复最近 5 轮 |         31.6 s |
+| 返回页面数据                |        6.37 MB |
+| app-server 进程树峰值内存   |        1.23 GB |
 
 这条任务可以完整读取，不丢内容，也没有超时，但不适合当作日常在线任务
 
@@ -111,9 +112,11 @@ flowchart TD
 
 VPS 使用普通服务器网络请求访问 ChatGPT 项目列表时会收到 Cloudflare 403 挑战
 
-项目没有伪造项目数据，也没有改写官方接口，而是为这一个官方路径启动版本锁定的 Electron 网络进程：
+项目没有伪造项目数据，也没有改写官方接口，而是为官方 renderer 的完整
+`https://chatgpt.com/backend-api/` 边界启动版本锁定的 Electron 网络进程：
 
-- 只允许读取 `https://chatgpt.com/backend-api/gizmos/snorlax/sidebar`
+- 只允许官方 `chatgpt.com` 主机和 `/backend-api/` 路径，拒绝自定义端口、Cookie 和跳转到其他主机
+- 按官方请求保留 `GET`、`POST`、`PUT`、`PATCH`、`DELETE`、`HEAD` 和 `OPTIONS`，并支持流式响应
 - 使用 Electron 43.2.0 和 Chromium 150.0.7871.129，与官方客户端的 Chromium 150 主版本一致
 - 进程长期复用，避免每次点击都重新启动浏览器内核
 - 不继承宿主服务的账号和服务器密钥，OpenAI 访问令牌只通过父子进程管道传递
@@ -240,13 +243,14 @@ ChatGPT 项目列表的真实登录态业务响应已经通过，不再依赖 WA
 - [发布关卡](./docs/RELEASE-GATES.md)
 - [部署与回滚](./docs/DEPLOYMENT.md)
 - [生产端到端验收记录](./docs/USER-JOURNEY-AUDIT-2026-07-29.md)
+- [2026-07-31 发布复验](./docs/VALIDATION-2026-07-31.md)
 - [2026-07-30 发布复验](./docs/VALIDATION-2026-07-30.md)
 - [旧 CodexApp 备份边界](./docs/OLD-CODEXAPP-BACKUP.md)
 
 ## 已锁定上游版本
 
-- ChatGPT / Codex renderer：`26.721.31836`
-- 官方构建号：`5828`
+- ChatGPT / Codex renderer：`26.721.81911`
+- 官方构建号：`5973`
 - Codex app-server：`0.146.0-alpha.3.1`
 - preload 契约：19 个方法
 - 项目列表网络进程：Electron `43.2.0`、Chromium `150.0.7871.129`

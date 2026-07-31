@@ -53,12 +53,36 @@ try {
     threadToolsEnabled: false,
   });
   const instructions = requiredString(developerInstructions.instructions, 'developer instructions');
+  const modelProviderCapabilities = await bridge.mcpRequest('modelProvider/capabilities/read', {});
+  if (modelProviderCapabilities?.namespaceTools !== true) {
+    throw new Error('App-server namespace tools are unavailable');
+  }
 
   const started = await bridge.prewarmThreadStart({
     cwd: workspaceRoot,
     developerInstructions: instructions,
     ephemeral: true,
     experimentalRawEvents: false,
+    dynamicTools: [
+      {
+        type: 'namespace',
+        name: 'codexapp_smoke',
+        description: 'Synthetic namespace used only by the release smoke test.',
+        tools: [
+          {
+            type: 'function',
+            name: 'never_called',
+            description: 'Synthetic deferred tool that must never be called.',
+            inputSchema: {
+              type: 'object',
+              properties: {},
+              additionalProperties: false,
+            },
+            deferLoading: true,
+          },
+        ],
+      },
+    ],
   });
   threadId = requiredString(started?.thread?.id ?? started?.threadId, 'thread id');
   const leakedBeforeTurnStart = await bridge
@@ -105,10 +129,12 @@ try {
         'git-origins',
         'mcp-codex-config',
         'developer-instructions',
+        'modelProvider/capabilities/read cache',
       ],
       appServer: ['thread-prewarm-start', 'turn/start', 'thread/read', 'thread/delete'],
       gitOriginCount: gitOrigins.origins.length,
       prewarmHiddenUntilTurnStart: true,
+      namespaceToolsAccepted: true,
       turnAccepted: turn !== null,
     })}\n`,
   );

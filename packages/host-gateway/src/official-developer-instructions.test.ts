@@ -15,8 +15,19 @@ describe('qualified official developer instructions', () => {
     const buildRoot = join(root, '.vite', 'build');
     await mkdir(buildRoot, { recursive: true });
     await writeFile(
-      join(buildRoot, 'src-DChWimf7.js'),
-      'exports.an = (input) => JSON.stringify(input);',
+      join(buildRoot, 'main-TestBuild.js'),
+      'require("./src-TestOfficial.js");',
+      'utf8',
+    );
+    await writeFile(
+      join(buildRoot, 'src-TestOfficial.js'),
+      [
+        'Object.defineProperty(exports,"At",{get:function(){return () => undefined}});',
+        'Object.defineProperty(exports,"Di",{get:function(){return "none"}});',
+        'Object.defineProperty(exports,"Fi",{get:function(){return []}});',
+        'Object.defineProperty(exports,"il",{get:function(){return 268435456}});',
+        'Object.defineProperty(exports,"an",{get:function(){return (input) => JSON.stringify(input)}});',
+      ].join(''),
       'utf8',
     );
     const input: OfficialDeveloperInstructionsInput = {

@@ -7,8 +7,9 @@ const PROTOCOL_MARKER = 'CODEX_ELECTRON_NET_V1 ';
 const STARTUP_TIMEOUT_MS = 30_000;
 const REQUEST_TIMEOUT_MS = 120_000;
 const MAX_IN_FLIGHT = 32;
+const MAX_REQUEST_BYTES = 32 * 1024 * 1024;
 const MAX_RESPONSE_BYTES = 32 * 1024 * 1024;
-const PROJECTS_QUERY_KEYS = new Set(['conversations_per_gizmo', 'limit', 'owned_only']);
+const ALLOWED_METHODS = new Set(['DELETE', 'GET', 'HEAD', 'OPTIONS', 'PATCH', 'POST', 'PUT']);
 
 interface ElectronNetworkReady {
   type: 'ready';
@@ -17,12 +18,22 @@ interface ElectronNetworkReady {
 }
 
 interface ElectronNetworkResponse {
-  type: 'response';
+  type: 'response-start';
   id: string;
   status: number;
   statusText: string;
   headers: Array<[string, string]>;
+}
+
+interface ElectronNetworkResponseChunk {
+  type: 'response-chunk';
+  id: string;
   bodyBase64: string;
+}
+
+interface ElectronNetworkResponseEnd {
+  type: 'response-end';
+  id: string;
 }
 
 interface ElectronNetworkError {
@@ -38,13 +49,24 @@ interface ElectronNetworkFatal {
 }
 
 type ElectronNetworkMessage =
-  ElectronNetworkReady | ElectronNetworkResponse | ElectronNetworkError | ElectronNetworkFatal;
+  | ElectronNetworkReady
+  | ElectronNetworkResponse
+  | ElectronNetworkResponseChunk
+  | ElectronNetworkResponseEnd
+  | ElectronNetworkError
+  | ElectronNetworkFatal;
 
 interface PendingRequest {
-  resolve: (response: Response) => void;
-  reject: (error: Error) => void;
+  resolveResponse: (response: Response) => void;
+  rejectResponse: (error: Error) => void;
+  streamController: ReadableStreamDefaultController<Uint8Array> | undefined;
+  responseStarted: boolean;
+  responseBytes: number;
+  method: string;
   timeout: NodeJS.Timeout;
-  removeAbortListener: () => void;
+  resetTimeout: () => void;
+  abort: () => void;
+  signal: AbortSignal | undefined;
 }
 
 export interface OfficialElectronNetworkOptions {
@@ -95,9 +117,10 @@ export class OfficialElectronNetwork {
     const parsedUrl = url instanceof URL ? url : new URL(requestUrl(url));
     assertOfficialElectronNetworkUrl(parsedUrl);
     const method = init?.method?.toUpperCase() ?? 'GET';
-    if (method !== 'GET' || init?.body !== undefined) {
-      throw new TypeError('official Electron network only accepts GET requests');
+    if (!ALLOWED_METHODS.has(method)) {
+      throw new TypeError('official Electron network method is not allowed');
     }
+    const bodyBase64 = encodeRequestBody(init?.body, method);
     if (this.#pending.size >= MAX_IN_FLIGHT) {
       throw new Error('official Electron network is at capacity');
     }
@@ -113,46 +136,38 @@ export class OfficialElectronNetwork {
       headers[name] = value;
     });
     return new Promise<Response>((resolve, reject) => {
-      let settled = false;
-      const finishReject = (error: Error): void => {
-        if (settled) return;
-        settled = true;
-        const pending = this.#pending.get(id);
-        if (pending !== undefined) {
-          clearTimeout(pending.timeout);
-          pending.removeAbortListener();
-          this.#pending.delete(id);
-        }
-        reject(error);
-      };
       const abort = (): void => {
-        this.#write({ type: 'cancel', id });
-        finishReject(new DOMException('The operation was aborted', 'AbortError'));
+        this.#sendCancel(id);
+        this.#failPending(id, new DOMException('The operation was aborted', 'AbortError'));
       };
-      const signal = init?.signal;
+      const signal = init?.signal ?? undefined;
+      const onTimeout = (): void => {
+        this.#sendCancel(id);
+        this.#failPending(id, new Error('official Electron network request timed out'));
+      };
+      const pending: PendingRequest = {
+        resolveResponse: resolve,
+        rejectResponse: reject,
+        streamController: undefined,
+        responseStarted: false,
+        responseBytes: 0,
+        method,
+        timeout: setTimeout(onTimeout, REQUEST_TIMEOUT_MS),
+        resetTimeout: () => {
+          clearTimeout(pending.timeout);
+          pending.timeout = setTimeout(onTimeout, REQUEST_TIMEOUT_MS);
+          pending.timeout.unref();
+        },
+        abort,
+        signal,
+      };
+      pending.timeout.unref();
+      this.#pending.set(id, pending);
+      signal?.addEventListener('abort', abort, { once: true });
       if (signal?.aborted === true) {
         abort();
         return;
       }
-      signal?.addEventListener('abort', abort, { once: true });
-      const timeout = setTimeout(() => {
-        this.#write({ type: 'cancel', id });
-        finishReject(new Error('official Electron network request timed out'));
-      }, REQUEST_TIMEOUT_MS);
-      timeout.unref();
-      this.#pending.set(id, {
-        resolve: (response) => {
-          if (settled) return;
-          settled = true;
-          clearTimeout(timeout);
-          signal?.removeEventListener('abort', abort);
-          this.#pending.delete(id);
-          resolve(response);
-        },
-        reject: finishReject,
-        timeout,
-        removeAbortListener: () => signal?.removeEventListener('abort', abort),
-      });
       try {
         this.#write({
           type: 'fetch',
@@ -160,9 +175,13 @@ export class OfficialElectronNetwork {
           url: parsedUrl.href,
           method,
           headers,
+          ...(bodyBase64 === undefined ? {} : { bodyBase64 }),
         });
       } catch (error) {
-        finishReject(error instanceof Error ? error : new Error('Electron network write failed'));
+        this.#failPending(
+          id,
+          error instanceof Error ? error : new Error('Electron network write failed'),
+        );
       }
     });
   }
@@ -294,27 +313,90 @@ export class OfficialElectronNetwork {
     if (message.type === 'ready') return;
     const pending = this.#pending.get(message.id);
     if (pending === undefined) return;
+    pending.resetTimeout();
     if (message.type === 'error') {
-      pending.reject(
+      this.#failPending(
+        message.id,
         message.aborted
           ? new DOMException('The operation was aborted', 'AbortError')
           : new Error(message.error.message),
       );
       return;
     }
-    if (Buffer.byteLength(message.bodyBase64, 'base64') > MAX_RESPONSE_BYTES) {
-      pending.reject(new RangeError('official Electron response exceeded the configured limit'));
-      this.#child?.kill('SIGTERM');
+    if (message.type === 'response-start') {
+      if (pending.responseStarted) {
+        this.#failPending(message.id, new Error('duplicate official Electron response start'));
+        return;
+      }
+      pending.responseStarted = true;
+      try {
+        const bodyAllowed = pending.method !== 'HEAD' && ![204, 205, 304].includes(message.status);
+        const body = bodyAllowed
+          ? new ReadableStream<Uint8Array>({
+              start: (controller) => {
+                pending.streamController = controller;
+              },
+              cancel: () => {
+                this.#sendCancel(message.id);
+                this.#finishPending(message.id);
+              },
+            })
+          : null;
+        pending.resolveResponse(
+          new Response(body, {
+            status: message.status,
+            statusText: message.statusText,
+            headers: new Headers(message.headers),
+          }),
+        );
+      } catch (error) {
+        this.#failPending(
+          message.id,
+          error instanceof Error ? error : new Error('invalid official Electron response'),
+        );
+      }
       return;
     }
-    const headers = new Headers(message.headers);
-    pending.resolve(
-      new Response(Buffer.from(message.bodyBase64, 'base64'), {
-        status: message.status,
-        statusText: message.statusText,
-        headers,
-      }),
-    );
+    if (!pending.responseStarted) {
+      this.#failPending(message.id, new Error('invalid official Electron response sequence'));
+      return;
+    }
+    if (message.type === 'response-chunk') {
+      if (pending.streamController === undefined) {
+        this.#failPending(message.id, new Error('official Electron response body is not allowed'));
+        return;
+      }
+      const chunk = Buffer.from(message.bodyBase64, 'base64');
+      pending.responseBytes += chunk.byteLength;
+      if (pending.responseBytes > MAX_RESPONSE_BYTES) {
+        this.#sendCancel(message.id);
+        this.#failPending(
+          message.id,
+          new RangeError('official Electron response exceeded the configured limit'),
+        );
+        return;
+      }
+      pending.streamController.enqueue(chunk);
+      return;
+    }
+    pending.streamController?.close();
+    this.#finishPending(message.id);
+  }
+
+  #finishPending(id: string): void {
+    const pending = this.#pending.get(id);
+    if (pending === undefined) return;
+    clearTimeout(pending.timeout);
+    pending.signal?.removeEventListener('abort', pending.abort);
+    this.#pending.delete(id);
+  }
+
+  #failPending(id: string, error: Error): void {
+    const pending = this.#pending.get(id);
+    if (pending === undefined) return;
+    if (pending.responseStarted) pending.streamController?.error(error);
+    else pending.rejectResponse(error);
+    this.#finishPending(id);
   }
 
   #write(message: unknown): void {
@@ -325,8 +407,16 @@ export class OfficialElectronNetwork {
     child.stdin.write(`${JSON.stringify(message)}\n`);
   }
 
+  #sendCancel(id: string): void {
+    try {
+      this.#write({ type: 'cancel', id });
+    } catch {
+      // The request still needs to settle when the worker exits between frames.
+    }
+  }
+
   #rejectPending(error: Error): void {
-    for (const pending of [...this.#pending.values()]) pending.reject(error);
+    for (const id of [...this.#pending.keys()]) this.#failPending(id, error);
   }
 
   #terminateChild(): void {
@@ -353,28 +443,34 @@ export function assertOfficialElectronNetworkUrl(url: URL): void {
     url.password.length > 0 ||
     url.port.length > 0 ||
     url.hostname !== 'chatgpt.com' ||
-    url.pathname !== '/backend-api/gizmos/snorlax/sidebar' ||
+    !url.pathname.startsWith('/backend-api/') ||
     url.hash.length > 0
   ) {
     throw new TypeError('official Electron network target is not allowed');
-  }
-  const seen = new Set<string>();
-  for (const [name, value] of url.searchParams) {
-    if (!PROJECTS_QUERY_KEYS.has(name) || seen.has(name)) {
-      throw new TypeError('official Electron network query is not allowed');
-    }
-    seen.add(name);
-    if (
-      (name === 'owned_only' && !['true', 'false'].includes(value)) ||
-      (name !== 'owned_only' && !/^[0-9]{1,3}$/u.test(value))
-    ) {
-      throw new TypeError('official Electron network query is not allowed');
-    }
   }
 }
 
 function requestUrl(request: RequestInfo): string {
   return typeof request === 'string' ? request : request.url;
+}
+
+function encodeRequestBody(body: BodyInit | null | undefined, method: string): string | undefined {
+  if (body === undefined || body === null) return undefined;
+  if (method === 'GET' || method === 'HEAD') {
+    throw new TypeError('official Electron GET and HEAD requests cannot have a body');
+  }
+  let bytes: Uint8Array;
+  if (typeof body === 'string') bytes = Buffer.from(body);
+  else if (body instanceof ArrayBuffer) bytes = new Uint8Array(body);
+  else if (ArrayBuffer.isView(body)) {
+    bytes = new Uint8Array(body.buffer, body.byteOffset, body.byteLength);
+  } else {
+    throw new TypeError('official Electron network request body type is not supported');
+  }
+  if (bytes.byteLength > MAX_REQUEST_BYTES) {
+    throw new RangeError('official Electron request exceeded the configured limit');
+  }
+  return Buffer.from(bytes).toString('base64');
 }
 
 function safeDiagnostic(value: string): string {
@@ -395,14 +491,22 @@ function isElectronNetworkMessage(value: unknown): value is ElectronNetworkMessa
     );
   }
   if (record.type === 'fatal') return isSafeError(record.error);
-  if ((record.type === 'response' || record.type === 'error') && typeof record.id !== 'string') {
+  if (
+    (record.type === 'response-start' ||
+      record.type === 'response-chunk' ||
+      record.type === 'response-end' ||
+      record.type === 'error') &&
+    typeof record.id !== 'string'
+  ) {
     return false;
   }
   if (record.type === 'error') {
     return typeof record.aborted === 'boolean' && isSafeError(record.error);
   }
+  if (record.type === 'response-chunk') return typeof record.bodyBase64 === 'string';
+  if (record.type === 'response-end') return true;
   return (
-    record.type === 'response' &&
+    record.type === 'response-start' &&
     typeof record.status === 'number' &&
     typeof record.statusText === 'string' &&
     Array.isArray(record.headers) &&
@@ -411,8 +515,7 @@ function isElectronNetworkMessage(value: unknown): value is ElectronNetworkMessa
         Array.isArray(entry) &&
         entry.length === 2 &&
         entry.every((part) => typeof part === 'string'),
-    ) &&
-    typeof record.bodyBase64 === 'string'
+    )
   );
 }
 

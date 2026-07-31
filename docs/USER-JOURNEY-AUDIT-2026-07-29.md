@@ -136,13 +136,18 @@ directory refresh will remain dependent on a trusted egress route.
 The ChatGPT Projects sidebar is a separate official endpoint. A normal Node.js
 request from the VPS receives the same Cloudflare 403 challenge, but Electron
 43.2.0 with Chromium 150 returns HTTP 200 for the same authenticated account.
-Production now routes only that exact official GET request through one shared,
-persistent Electron worker. The worker keeps Chromium's user-namespace sandbox,
-inherits no host secrets, receives the token only through its pipe, and accepts
-no generic URL. Automatic Cookie credentials and response caching are disabled,
-so no reusable account state crosses authenticated requests. WARP was removed from the application dependency after the
-renderer host route returned HTTP 200 with valid JSON. The post-promotion `.08`
-sample completed the full gateway route in about 893 ms.
+The first production correction routed that exact GET through one shared,
+persistent Electron worker; its `.08` sample completed the full gateway route
+in about 893 ms.
+
+The 2026-07-31 follow-up found that the official renderer also uses the same
+backend boundary for project details, conversations, files, patches, create and
+delete operations, account bootstrap, and subscription reads. The worker now
+carries the complete official `https://chatgpt.com/backend-api/` boundary,
+including request bodies and streaming responses. It still rejects every other
+host and path, keeps Chromium's user-namespace sandbox, inherits no host
+secrets, receives tokens only through its pipe, and disables automatic Cookie
+credentials and caching. WARP remains outside the application dependency.
 
 ## Automated end-to-end coverage
 

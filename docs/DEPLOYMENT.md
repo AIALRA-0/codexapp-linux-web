@@ -12,11 +12,17 @@ and restores the previous link on failure. `ops/rollback-release.sh RELEASE`
 performs the same guarded operation for an explicit previous release.
 
 Prepared official-package and runtime-tool snapshots must remain root-owned,
-readable and executable by the service, and unwritable by every account:
+readable and executable by the service, and unwritable by every service account.
+The official source tree may be world-readable, but the qualification directory
+must use the service group because its source manifest is intentionally not
+public:
 
 ```sh
 chmod -R a+rX,a-w /srv/aialra/codexapp-official/releases/VERSION
 chmod -R a+rX,a-w /srv/aialra/codexapp-official/runtime-tools
+chown -R root:codexappweb /srv/aialra/codexapp-official/releases/VERSION/qualification
+find /srv/aialra/codexapp-official/releases/VERSION/qualification -type d -exec chmod 0750 {} +
+find /srv/aialra/codexapp-official/releases/VERSION/qualification -type f -exec chmod 0640 {} +
 ```
 
 Ubuntu 24.04 restricts unprivileged user namespaces through AppArmor. Codex uses
@@ -39,7 +45,8 @@ group in addition to its previous restrictions. They are required for
 profile removes capabilities from programs running inside the sandbox.
 
 Do not use `chmod -R a-w` alone: extraction may preserve owner-only source
-manifest files and cause a production-only startup failure.
+manifest files and cause a production-only startup failure. Do not make the
+qualification manifest world-readable merely to avoid that failure.
 
 The production Nginx candidate continues to use the existing AIALRA unified
 authentication snippets and forwards only to loopback port 13014. It replaces
@@ -81,10 +88,11 @@ The installer accepts only the official 40-character cache filename, validates
 the schema and connector records, and preserves owner-only permissions. This is
 a directory-refresh fallback, not a proxy and not a replacement Apps API.
 
-The official ChatGPT projects sidebar receives an OpenAI Cloudflare challenge
-when it is fetched through Node.js from the VPS. Production therefore uses one
-persistent, version-pinned Electron process for only that exact official GET
-request. It does not replace the endpoint and does not route model turns,
+Official ChatGPT backend requests used by the renderer can receive an OpenAI
+Cloudflare challenge when they are fetched through Node.js from the VPS.
+Production therefore uses one persistent, version-pinned Electron process for
+the renderer's complete `https://chatgpt.com/backend-api/` boundary. It does not
+replace any endpoint and does not route app-server model turns, arbitrary
 downloads, SSH, or other VPS traffic.
 
 Install Electron 43.2.0 under the path shown in
@@ -100,14 +108,24 @@ Electron binary. The service uses Chromium's namespace sandbox and never passes
 
 The worker:
 
-- accepts only `GET https://chatgpt.com/backend-api/gizmos/snorlax/sidebar`;
+- accepts only credential-free HTTPS URLs on the exact `chatgpt.com` host below
+  `/backend-api/`, with no custom port or fragment;
+- supports the official renderer's `DELETE`, `GET`, `HEAD`, `OPTIONS`, `PATCH`,
+  `POST`, and `PUT` requests, including request bodies and streaming responses;
 - receives authentication through the parent-child pipe instead of disk or
   command-line arguments;
 - starts with a sealed environment that excludes host secrets;
 - omits browser credentials and response caching so a shared worker carries no
   reusable account state between authenticated requests;
-- limits concurrent requests, response size, and request duration;
+- rejects forbidden hop-by-hop and cookie headers, and limits header count,
+  header bytes, request bytes, response bytes, concurrent requests, and idle
+  duration;
 - stays alive for warm requests and restarts on the next request after failure.
+
+The ordinary Node.js egress path remains available only as a narrow fallback for
+the projects-sidebar GET. It is not a generic proxy. Renderer diagnostics record
+only method, route family, query-key names, status, response type, and duration;
+they never record query values, bodies, tokens, or resource identifiers.
 
 `OPENAI_EGRESS_PROXY_URL` remains an optional loopback-only fallback in the
 configuration schema, but it is not configured in production. Cloudflare WARP
@@ -156,3 +174,5 @@ Before public cutover, all of the following are mandatory:
     directory.
 13. The final old-CodexApp conversation backup is made only after its writers are
     stopped. OpenCodexApp paths remain excluded.
+14. `smoke:core-lifecycle` creates a real `thread/fork`, reads and lists the
+    fork, then deletes both the fork and source thread.

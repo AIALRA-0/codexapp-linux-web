@@ -4,9 +4,46 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { describe, expect, it } from 'vitest';
 
-import { sha256Buffer, sha256File, verifyPreparedRelease } from './index.js';
+import {
+  extractElectronBridgeMethods,
+  extractPreloadChannels,
+  sha256Buffer,
+  sha256File,
+  verifyPreparedRelease,
+} from './index.js';
 
 describe('official package verification', () => {
+  it('derives the exposed bridge methods from the actual preload object', () => {
+    const source = `
+      const readTheme = () => 'dark';
+      const bridge = {
+        windowType: 'electron',
+        sendMessageFromView: async message => message,
+        getSystemThemeVariant: readTheme,
+        "showContextMenu": async (menu) => menu,
+      };
+      contextBridge.exposeInMainWorld('electronBridge', bridge);
+    `;
+
+    expect(extractElectronBridgeMethods(source)).toEqual([
+      'getSystemThemeVariant',
+      'sendMessageFromView',
+      'showContextMenu',
+    ]);
+  });
+
+  it('rejects a preload that does not expose the official bridge', () => {
+    expect(() => extractElectronBridgeMethods('const bridge = {};')).toThrow(
+      'official preload did not expose electronBridge',
+    );
+  });
+
+  it('extracts and sorts official IPC channel names', () => {
+    expect(
+      extractPreloadChannels('`codex_desktop:z`; `codex_desktop:a`; `codex_desktop:z`;'),
+    ).toEqual(['codex_desktop:a', 'codex_desktop:z']);
+  });
+
   it('uses stable SHA-256 bytes', async () => {
     const root = mkdtempSync(join(tmpdir(), 'official-package-test-'));
     mkdirSync(join(root, 'nested'));

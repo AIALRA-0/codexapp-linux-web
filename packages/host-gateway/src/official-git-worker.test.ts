@@ -16,7 +16,7 @@ import {
 const execFileAsync = promisify(execFile);
 const sourceRoot =
   process.env.OFFICIAL_TEST_SOURCE_ROOT ??
-  resolve(process.cwd(), '.official', 'releases', '26.721.31836', 'source');
+  resolve(process.cwd(), '.official', 'releases', '26.721.81911', 'source');
 const describeQualified = existsSync(join(sourceRoot, '.vite', 'build', 'worker.js'))
   ? describe
   : describe.skip;

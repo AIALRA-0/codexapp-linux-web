@@ -1,5 +1,6 @@
 import { createRequire } from 'node:module';
-import { join } from 'node:path';
+
+import { resolveOfficialSharedModulePath } from './official-shared-module.js';
 
 export interface OfficialDeveloperInstructionsInput {
   baseInstructions: unknown;
@@ -27,7 +28,7 @@ export function buildOfficialDeveloperInstructions(
   officialSourceRoot: string,
   input: OfficialDeveloperInstructionsInput,
 ): string {
-  const modulePath = join(officialSourceRoot, '.vite', 'build', 'src-DChWimf7.js');
+  const modulePath = resolveOfficialSharedModulePath(officialSourceRoot);
   let officialModule = modules.get(modulePath);
   if (officialModule === undefined) {
     officialModule = require(modulePath) as OfficialDesktopRuntimeModule;

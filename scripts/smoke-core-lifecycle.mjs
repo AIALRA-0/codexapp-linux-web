@@ -9,7 +9,7 @@ import { CodexAppServerClient } from '../packages/app-server-client/dist/index.j
 const codexBin = process.env.SMOKE_CODEX_BIN;
 if (codexBin === undefined) throw new Error('SMOKE_CODEX_BIN is required');
 
-const rendererVersion = process.env.SMOKE_RENDERER_VERSION ?? '26.721.31836';
+const rendererVersion = process.env.SMOKE_RENDERER_VERSION ?? '26.721.81911';
 const root = await mkdtemp(join(tmpdir(), 'codex-core-lifecycle-'));
 const codexHome = join(root, 'codex-home');
 const workspace = join(root, 'workspace');
@@ -164,6 +164,34 @@ try {
   if (!listedThreadIds(searchList).includes(threadId)) {
     throw new Error('named thread was absent from exact history search');
   }
+
+  const forkAt = performance.now();
+  const forked = await secondClient.request('thread/fork', {
+    threadId,
+    path: null,
+    cwd: workspace,
+    ephemeral: false,
+    threadSource: 'user',
+  });
+  const forkMs = performance.now() - forkAt;
+  const forkedThreadId = threadIdFrom(forked);
+  if (forkedThreadId === threadId) {
+    throw new Error('thread/fork returned the source thread id');
+  }
+  const forkedRead = await secondClient.request('thread/read', {
+    threadId: forkedThreadId,
+    includeTurns: true,
+  });
+  if ((forkedRead?.thread?.id ?? forkedRead?.id) !== forkedThreadId) {
+    throw new Error('forked thread could not be read back');
+  }
+  await waitForListedThread(secondClient, forkedThreadId, { archived: false });
+  await secondClient.request('thread/delete', { threadId: forkedThreadId });
+  await waitForListedThread(secondClient, forkedThreadId, {
+    archived: false,
+    expected: false,
+  });
+
   await secondClient.request('thread/delete', { threadId });
   await waitForListedThread(secondClient, threadId, {
     archived: false,
@@ -177,8 +205,9 @@ try {
     readMs: 2_000,
     listMs: 2_000,
     searchMs: 2_000,
+    forkMs: 5_000,
   };
-  const observed = { firstStartupMs, restartMs, startMs, readMs, listMs, searchMs };
+  const observed = { firstStartupMs, restartMs, startMs, readMs, listMs, searchMs, forkMs };
   for (const [metric, budget] of Object.entries(budgets)) {
     if (observed[metric] > budget) {
       throw new Error(`${metric} exceeded ${String(budget)}ms: ${String(observed[metric])}ms`);
@@ -199,6 +228,10 @@ try {
         'unarchive',
         'name',
         'search',
+        'fork',
+        'read-fork',
+        'list-fork',
+        'delete-fork',
         'delete',
       ],
       turnStartOutcome,

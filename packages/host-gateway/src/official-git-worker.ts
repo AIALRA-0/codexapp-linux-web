@@ -17,6 +17,8 @@ import { Readable, Writable } from 'node:stream';
 import { pipeline } from 'node:stream/promises';
 import { MessageChannel, Worker, type MessagePort } from 'node:worker_threads';
 
+import { resolveOfficialSharedModulePath } from './official-shared-module.js';
+
 interface OfficialRpcSession {
   [Symbol.dispose](): void;
 }
@@ -87,7 +89,7 @@ export class OfficialGithubService {
   readonly #service: OfficialGithubServiceTarget;
 
   constructor(options: OfficialGitWorkerOptions) {
-    const sharedPath = join(options.sourceRoot, '.vite', 'build', 'src-DChWimf7.js');
+    const sharedPath = resolveOfficialSharedModulePath(options.sourceRoot);
     const shared = require(sharedPath) as Partial<OfficialSharedModule>;
     if (typeof shared.D !== 'function' || typeof shared.F !== 'function') {
       throw new Error('qualified official GitHub service exports changed');
@@ -256,7 +258,7 @@ export class OfficialGitWorker extends EventEmitter {
       mkdir(join(this.options.userRoot, 'home'), { recursive: true, mode: 0o700 }),
       mkdir(join(this.options.userRoot, 'tmp'), { recursive: true, mode: 0o700 }),
     ]);
-    const sharedPath = join(this.options.sourceRoot, '.vite', 'build', 'src-DChWimf7.js');
+    const sharedPath = resolveOfficialSharedModulePath(this.options.sourceRoot);
     const workerPath = join(this.options.sourceRoot, '.vite', 'build', 'worker.js');
     const shared = require(sharedPath) as Partial<OfficialSharedModule>;
     if (typeof shared.At !== 'function' || typeof shared.I !== 'function') {

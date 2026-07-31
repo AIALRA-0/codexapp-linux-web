@@ -14,8 +14,8 @@ import { OfficialDesktopState } from './official-desktop-state.js';
 
 const sourceRoot =
   process.env.OFFICIAL_TEST_SOURCE_ROOT ??
-  resolve(process.cwd(), '.official', 'releases', '26.721.31836', 'source');
-const describeQualified = existsSync(join(sourceRoot, '.vite', 'build', 'src-DChWimf7.js'))
+  resolve(process.cwd(), '.official', 'releases', '26.721.81911', 'source');
+const describeQualified = existsSync(join(sourceRoot, '.vite', 'build', 'worker.js'))
   ? describe
   : describe.skip;
 const temporaryRoots: string[] = [];
