@@ -72,6 +72,11 @@ post-promotion verification.
 Interrupted copies cannot become current. User state is never stored below an
 application release and is not converted by rollback.
 
+The installer copies dependencies but excludes `.git`, `.official`, artifacts,
+coverage, generated reports, runtime state, and secrets. The qualified official
+package is selected through its separate immutable root; it must never be
+duplicated below the application release.
+
 The public ChatGPT Apps directory may reject datacenter egress even while normal
 Codex turns and installed Apps remain healthy. Codex stores that directory as
 official metadata under `cache/codex_app_directory`; it contains no login token.

@@ -43,7 +43,26 @@ cleanup() {
 trap cleanup EXIT
 
 mkdir "$incomplete"
-cp -a "$source_root/." "$incomplete/"
+if ! command -v rsync >/dev/null 2>&1; then
+  echo "rsync is required to prepare a release" >&2
+  exit 1
+fi
+rsync -a \
+  --exclude='/.git/' \
+  --exclude='/.official/' \
+  --exclude='/artifacts/' \
+  --exclude='/coverage/' \
+  --exclude='/reports/generated/' \
+  --exclude='/runtime/' \
+  --exclude='/secrets/' \
+  --exclude='/state/' \
+  "$source_root/" "$incomplete/"
+for forbidden_path in .git .official artifacts coverage runtime secrets state; do
+  if [[ -e "$incomplete/$forbidden_path" || -L "$incomplete/$forbidden_path" ]]; then
+    echo "forbidden build input entered the release: $forbidden_path" >&2
+    exit 1
+  fi
+done
 (
   cd "$incomplete"
   qualified_official_source_root="${QUALIFIED_OFFICIAL_SOURCE_ROOT:?QUALIFIED_OFFICIAL_SOURCE_ROOT is required}"
