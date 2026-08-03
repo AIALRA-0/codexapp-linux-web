@@ -242,6 +242,8 @@ ChatGPT 项目列表的真实登录态业务响应已经通过，不再依赖 WA
 - [实现与模块边界](./docs/IMPLEMENTATION.md)
 - [发布关卡](./docs/RELEASE-GATES.md)
 - [部署与回滚](./docs/DEPLOYMENT.md)
+- [Codex 统一工作区规则](./ops/workspace/README.md)
+- [MCP 迁移与重新连接](./docs/MCP-MIGRATION-2026-08-03.md)
 - [生产端到端验收记录](./docs/USER-JOURNEY-AUDIT-2026-07-29.md)
 - [2026-07-31 发布复验](./docs/VALIDATION-2026-07-31.md)
 - [2026-07-30 发布复验](./docs/VALIDATION-2026-07-30.md)

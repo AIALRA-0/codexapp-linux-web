@@ -1,0 +1,647 @@
+{
+  "meta": {
+    "contract_version": "1.0",
+    "title": "CodexApp 对话、Skill、MCP 与工作区迁移",
+    "mode": "standard",
+    "as_of": "2026-08-03",
+    "status": "complete",
+    "scope": "把本机 Codex 的指定对话、项目文件、Skill、插件和可迁移 MCP 状态迁入服务器上的官方 Codex 网页运行环境，并以原始文件校验和官方 App Server 只读恢复作为放行门槛。",
+    "exclusions": [
+      "不会把仅能控制本机 macOS 图形界面的 Computer Use 能力伪装成 Linux 可用能力",
+      "不会绕过 Gmail、Google Drive、Slack 或 Google Calendar 的第三方 OAuth 重新授权",
+      "不会把对话编号、账号、令牌、服务器用户键或绝对私有路径提交到公开 GitHub"
+    ]
+  },
+  "decision_problem": {
+    "project_classification": "可回滚的内部迁移与运行环境整合",
+    "risk_level": "high",
+    "decision_owner": "AIALRA",
+    "desired_outcome": "指定对话可在服务器网页端原样继续，项目文件完整，Skill 与 MCP 可用，且不修改官方页面实现。",
+    "current_state": "工作区、项目、Skill、插件和可直接迁移的 MCP 状态已经部署；十条指定对话已完成原文件迁移、状态库导入、项目归属、官方列表和逐条只读恢复验收。",
+    "decision": "是否以原始 rollout 文件加官方状态库记录的方式完成对话迁移，并把该方案作为今后同类迁移的受控路径。",
+    "success_metrics": [
+      "每条指定对话的服务器 rollout 字节数和 SHA-256 与本机源文件完全一致",
+      "官方 App Server 的 thread/read 与 thread/resume 均返回原对话编号且校验后源文件未变化",
+      "所有迁移项目的受控文件树校验一致，排除 node_modules 和可重建缓存",
+      "全部自定义 Skill 可被服务器 Codex 发现，插件安装完整，可迁移 MCP 至少完成一次真实调用",
+      "公开 Git 提交不含任务编号、账号、令牌、服务器用户键、数据库或对话原文",
+      "迁移失败时可从迁移前数据库和用户状态备份恢复"
+    ],
+    "constraints": [
+      "网页必须继续使用官方解包渲染器，不自行重写前端",
+      "迁移测试不得向原始对话追加用户或模型消息",
+      "第三方 OAuth 在原授权失效或从未存在时必须由用户重新授权",
+      "服务器磁盘最低保留 5 GiB 可用空间"
+    ],
+    "irreversible_actions": [
+      "第三方 OAuth 授权会改变外部账号授权状态",
+      "公开 Git 推送一旦被他人抓取不能依赖后续删改完成保密"
+    ],
+    "research_budget": {
+      "overall_limit": "完成六类官方资料检索、内部代码与部署证据核验、真实服务器验收；遇到决定性失败即停止放行",
+      "parallel_capacity": 1,
+      "paid_or_private_access": [
+        "本机 Codex 状态",
+        "AIALRA VPS",
+        "AIALRA GitHub",
+        "已连接的 OpenAI 官方文档 MCP"
+      ],
+      "cutoff_policy": "只有全部关键校验通过才放行；任何一条对话哈希、只读恢复、权限或脱敏检查失败都回滚或暂停"
+    },
+    "reversal_evidence": [
+      "迁移前用户状态与数据库备份",
+      "迁移清单中的源文件 SHA-256",
+      "部署前后健康检查和测试日志"
+    ]
+  },
+  "questions": [
+    {
+      "id": "Q1",
+      "question": "官方 App Server 是否提供不追加新消息的线程读取与恢复能力？",
+      "critical": true,
+      "internal_probe": "在服务器对迁移副本调用 thread/read 和 excludeTurns 的 thread/resume，并复核文件哈希",
+      "external_probe": "核对官方 App Server 的 thread/read、thread/resume 与 thread/list 合同",
+      "internal_status": "answered",
+      "external_status": "answered",
+      "internal_source_ids": ["S1"],
+      "external_source_ids": ["S5"],
+      "internal_gap": "",
+      "external_gap": ""
+    },
+    {
+      "id": "Q2",
+      "question": "Skill、插件、MCP 配置和会话是否属于官方迁移模型中的受支持对象？",
+      "critical": true,
+      "internal_probe": "核对服务器发现清单并进行真实 MCP 调用",
+      "external_probe": "核对官方外部 Agent 配置导入和 Codex 导入说明",
+      "internal_status": "answered",
+      "external_status": "answered",
+      "internal_source_ids": ["S3"],
+      "external_source_ids": ["S6", "S7", "S8"],
+      "internal_gap": "",
+      "external_gap": ""
+    },
+    {
+      "id": "Q3",
+      "question": "迁移能否在不修改官方网页代码的前提下运行浏览器类 MCP？",
+      "critical": true,
+      "internal_probe": "以隔离 Xvfb sidecar 启动真实 Chrome，并执行双客户端 MCP 测试",
+      "external_probe": "核对插件结构中 Skill、MCP 与应用的官方边界",
+      "internal_status": "answered",
+      "external_status": "answered",
+      "internal_source_ids": ["S3", "S4"],
+      "external_source_ids": ["S8"],
+      "internal_gap": "",
+      "external_gap": ""
+    }
+  ],
+  "source_map": [
+    {
+      "id": "M1",
+      "question_ids": ["Q1"],
+      "origin": "internal",
+      "channel": "迁移备份与验收日志",
+      "target": "源文件、目标文件、状态库和 App Server 返回值",
+      "decision_use": "证明每条对话是否达到逐字节一致且可恢复",
+      "priority": "high",
+      "access_status": "searched"
+    },
+    {
+      "id": "M2",
+      "question_ids": ["Q1", "Q2", "Q3"],
+      "origin": "external",
+      "channel": "OpenAI 官方文档",
+      "target": "App Server 生命周期、外部配置导入和 Codex 导入范围",
+      "decision_use": "确认方案沿用官方对象和协议，而非自造会话模型",
+      "priority": "high",
+      "access_status": "searched"
+    },
+    {
+      "id": "M3",
+      "question_ids": ["Q2", "Q3"],
+      "origin": "internal",
+      "channel": "生产服务器实测",
+      "target": "Skill 发现、插件安装、MCP 工具调用和虚拟显示",
+      "decision_use": "确认配置不是只存在于文件中，而是可以真正调用",
+      "priority": "high",
+      "access_status": "searched"
+    }
+  ],
+  "sources": [
+    {
+      "id": "S1",
+      "origin": "internal",
+      "title": "对话迁移备份、原始哈希与只读恢复验收日志",
+      "location": "private:migration-evidence/thread-verification",
+      "source_type": "internal-artifact",
+      "date": "2026-08-03",
+      "accessed_at": "2026-08-03",
+      "applicability": "直接证明指定对话的源目标一致性、数据库导入和 App Server 可恢复性",
+      "limitations": "验证覆盖迁移时的目标 Codex 版本；未来状态库或 App Server 升级需要重新执行兼容性门禁",
+      "retrieval_method": "读取本机与服务器文件元数据、计算流式 SHA-256，并调用官方 App Server",
+      "observed_content": "十条指定对话的源目标大小和 SHA-256 一致；官方 thread/read、带服务器 cwd 的 thread/resume 和与网页一致参数的 thread/list 全部通过，验证后 rollout 哈希未变化。",
+      "direct": true,
+      "independence_group": "migration-runtime"
+    },
+    {
+      "id": "S2",
+      "origin": "internal",
+      "title": "项目工作区文件树校验报告",
+      "location": "private:migration-evidence/workspace-hashes",
+      "source_type": "internal-artifact",
+      "date": "2026-08-03",
+      "accessed_at": "2026-08-03",
+      "applicability": "直接证明两个大型资料项目和 Git 项目的受控文件内容已迁入目标工作区",
+      "limitations": "按设计排除了依赖目录、构建结果和缓存",
+      "retrieval_method": "对相同排除规则下的本机与服务器文件树生成稳定哈希",
+      "observed_content": "大型求职项目和 USC 项目的本机与服务器稳定树哈希分别一致；五个 Git 项目分支提交一致且工作区干净。",
+      "direct": true,
+      "independence_group": "workspace-runtime"
+    },
+    {
+      "id": "S3",
+      "origin": "internal",
+      "title": "服务器 Skill、插件与 MCP 真实调用记录",
+      "location": "private:migration-evidence/capability-tests",
+      "source_type": "test-observation",
+      "date": "2026-08-03",
+      "accessed_at": "2026-08-03",
+      "applicability": "直接证明服务器能够发现自定义 Skill，并调用 OpenAI 文档、GitHub、Outlook、自定义 Google 和购物浏览器 MCP",
+      "limitations": "原本已失效或从未存在的第三方 OAuth 不能用文件复制代替重新授权",
+      "retrieval_method": "使用服务器 Codex 和各 MCP 的正式握手与只读工具执行真实请求",
+      "observed_content": "自定义 Skill 清单完整；插件安装完成；Google 两个既有账号令牌有效；OpenAI Docs、GitHub、Outlook 和购物浏览器调用成功。",
+      "direct": true,
+      "independence_group": "capability-runtime"
+    },
+    {
+      "id": "S4",
+      "origin": "internal",
+      "title": "官方页面合同、代码回归和生产健康检查",
+      "location": "repository:ci-and-production-health",
+      "source_type": "test-observation",
+      "date": "2026-08-03",
+      "accessed_at": "2026-08-03",
+      "applicability": "证明新增迁移和浏览器运行支持没有替换官方渲染器合同，且生产服务健康",
+      "limitations": "不能替代所有第三方网站未来行为的持续监控",
+      "retrieval_method": "运行安全、格式、Lint、类型、单元、协议合同、官方包校验和生产健康检查",
+      "observed_content": "43 个测试文件、210 项测试通过；官方渲染器和主机树哈希验证通过；浏览器 sidecar 与主服务均健康。",
+      "direct": true,
+      "independence_group": "repository-ci"
+    },
+    {
+      "id": "S5",
+      "origin": "external",
+      "title": "Codex App Server API overview",
+      "location": "https://learn.chatgpt.com/docs/app-server#api-overview",
+      "source_type": "official-doc",
+      "date": "2026-08-03",
+      "accessed_at": "2026-08-03",
+      "applicability": "定义 thread/start、thread/read、thread/resume、thread/fork 和 thread/list 的官方语义",
+      "limitations": "不承诺非官方数据库写入方案；仍需目标版本实测",
+      "retrieval_method": "通过 OpenAI 官方文档 MCP 搜索并读取",
+      "observed_content": "官方说明 thread/read 可不恢复地读取存储线程，thread/resume 可按编号重新打开线程，thread/list 支持分页和过滤。",
+      "direct": true,
+      "independence_group": "openai-official-docs"
+    },
+    {
+      "id": "S6",
+      "origin": "external",
+      "title": "Detect and import external agent config",
+      "location": "https://learn.chatgpt.com/docs/app-server#detect-and-import-external-agent-config",
+      "source_type": "official-doc",
+      "date": "2026-08-03",
+      "accessed_at": "2026-08-03",
+      "applicability": "确认官方迁移对象包括配置、Skill、插件、MCP 配置与会话",
+      "limitations": "面向外部 Agent 的受控导入，不替代同版本 Codex 原始线程的逐字节连续性验收",
+      "retrieval_method": "通过 OpenAI 官方文档 MCP 搜索并读取",
+      "observed_content": "官方导入能力列出 AGENTS、配置、Skill、插件、MCP、子代理、Hooks、命令和会话，并报告进度与完成状态。",
+      "direct": true,
+      "independence_group": "openai-official-docs"
+    },
+    {
+      "id": "S7",
+      "origin": "external",
+      "title": "Import into Codex",
+      "location": "https://learn.chatgpt.com/docs/import#what-chatgpt-can-import",
+      "source_type": "official-doc",
+      "date": "2026-08-03",
+      "accessed_at": "2026-08-03",
+      "applicability": "说明 Codex 的公开迁移范围涵盖项目目录、近期对话、Skill、插件和 MCP 配置",
+      "limitations": "公开导入范围和本次精确迁移的历史长度、同线程编号要求不同",
+      "retrieval_method": "通过 OpenAI 官方文档 MCP 搜索并读取",
+      "observed_content": "官方导入表列出项目目录、对话、Skill、插件和 MCP 配置。",
+      "direct": true,
+      "independence_group": "openai-official-docs"
+    },
+    {
+      "id": "S8",
+      "origin": "external",
+      "title": "Build plugins for Codex",
+      "location": "https://developers.openai.com/plugins/build/plugins#plugin-structure",
+      "source_type": "official-doc",
+      "date": "2026-08-03",
+      "accessed_at": "2026-08-03",
+      "applicability": "定义插件内 Skill、MCP 和应用能力的官方目录边界",
+      "limitations": "不负责第三方 MCP 自身的登录可用性",
+      "retrieval_method": "通过 OpenAI 官方文档 MCP 搜索并读取",
+      "observed_content": "官方插件结构允许把 Skill、MCP 服务和应用组合在受控插件目录中。",
+      "direct": true,
+      "independence_group": "openai-official-docs"
+    },
+    {
+      "id": "SL-problem",
+      "origin": "external",
+      "title": "问题分支：Codex 历史线程恢复检索记录",
+      "location": "tool:openaiDeveloperDocs/search/Codex-app-server-thread-resume-lifecycle-sessions",
+      "source_type": "search-log",
+      "date": "2026-08-03",
+      "accessed_at": "2026-08-03",
+      "applicability": "查找官方对话读取、恢复和列表能力",
+      "limitations": "限定 OpenAI 官方文档索引",
+      "retrieval_method": "官方文档 MCP 关键词搜索",
+      "observed_content": "返回 App Server API overview 作为直接匹配。",
+      "direct": true,
+      "independence_group": "search-problem"
+    },
+    {
+      "id": "SL-mechanism",
+      "origin": "external",
+      "title": "机制分支：外部 Agent 配置与会话导入检索记录",
+      "location": "tool:openaiDeveloperDocs/search/Codex-import-external-agent-config-sessions-skills-plugins-MCP",
+      "source_type": "search-log",
+      "date": "2026-08-03",
+      "accessed_at": "2026-08-03",
+      "applicability": "查找官方支持的迁移对象和进度协议",
+      "limitations": "限定 OpenAI 官方文档索引",
+      "retrieval_method": "官方文档 MCP 关键词搜索",
+      "observed_content": "返回外部 Agent 配置导入和 MCP 文档。",
+      "direct": true,
+      "independence_group": "search-mechanism"
+    },
+    {
+      "id": "SL-product",
+      "origin": "external",
+      "title": "产品分支：Codex 项目和对话导入检索记录",
+      "location": "tool:openaiDeveloperDocs/search/Codex-app-project-folders-chats-import-migration",
+      "source_type": "search-log",
+      "date": "2026-08-03",
+      "accessed_at": "2026-08-03",
+      "applicability": "查找官方产品当前迁移范围",
+      "limitations": "限定 OpenAI 官方文档索引",
+      "retrieval_method": "官方文档 MCP 关键词搜索",
+      "observed_content": "返回 Codex 导入范围和 2026 年产品更新说明。",
+      "direct": true,
+      "independence_group": "search-product"
+    },
+    {
+      "id": "SL-research",
+      "origin": "external",
+      "title": "研究分支：Codex 插件边界检索记录",
+      "location": "tool:openaiDeveloperDocs/search/Codex-plugins-structure-skills-MCP-apps-official",
+      "source_type": "search-log",
+      "date": "2026-08-03",
+      "accessed_at": "2026-08-03",
+      "applicability": "查找官方推荐的扩展组合方式",
+      "limitations": "限定 OpenAI 官方文档索引",
+      "retrieval_method": "官方文档 MCP 关键词搜索",
+      "observed_content": "返回 Codex 插件结构和 MCP 指南。",
+      "direct": true,
+      "independence_group": "search-research"
+    },
+    {
+      "id": "SL-adjacent",
+      "origin": "external",
+      "title": "相邻分支：App Server 环境与错误语义检索记录",
+      "location": "tool:openaiDeveloperDocs/search/Codex-app-server-protocol-reliability-errors-reconnect",
+      "source_type": "search-log",
+      "date": "2026-08-03",
+      "accessed_at": "2026-08-03",
+      "applicability": "查找远程环境、协议错误和客户端恢复边界",
+      "limitations": "限定 OpenAI 官方文档索引",
+      "retrieval_method": "官方文档 MCP 关键词搜索",
+      "observed_content": "返回 App Server 远程环境和协议错误说明。",
+      "direct": true,
+      "independence_group": "search-adjacent"
+    },
+    {
+      "id": "SL-failure",
+      "origin": "external",
+      "title": "失败分支：大历史列表与分页检索记录",
+      "location": "tool:openaiDeveloperDocs/search/Codex-app-server-thread-list-performance-history",
+      "source_type": "search-log",
+      "date": "2026-08-03",
+      "accessed_at": "2026-08-03",
+      "applicability": "查找历史侧栏在大数据量下应使用的分页和过滤能力",
+      "limitations": "官方协议说明不等于本次网页端性能实测",
+      "retrieval_method": "官方文档 MCP 关键词搜索",
+      "observed_content": "返回 thread/list 的游标分页、排序和过滤字段。",
+      "direct": true,
+      "independence_group": "search-failure"
+    }
+  ],
+  "claims": [
+    {
+      "id": "C1",
+      "statement": "官方 App Server 提供线程读取、恢复、分叉和分页列表能力，因此网页端无需自造会话存储协议。",
+      "kind": "fact",
+      "impact": "high",
+      "confidence": "high",
+      "support_source_ids": ["S5"],
+      "contradict_source_ids": [],
+      "falsifier": "目标 Codex 版本的 App Server 不再实现这些方法或返回合同不兼容"
+    },
+    {
+      "id": "C2",
+      "statement": "Skill、插件、MCP 配置和会话均处于官方迁移与扩展模型覆盖范围内。",
+      "kind": "fact",
+      "impact": "high",
+      "confidence": "high",
+      "support_source_ids": ["S6", "S7", "S8"],
+      "contradict_source_ids": [],
+      "falsifier": "官方文档删除相应对象或目标版本拒绝发现迁移后的对象"
+    },
+    {
+      "id": "C3",
+      "statement": "对要求同编号、完整历史和原上下文的 Codex 对话，原始 rollout 文件哈希加状态库行校验比只导入摘要更符合 1:1 目标。",
+      "kind": "inference",
+      "impact": "high",
+      "confidence": "high",
+      "support_source_ids": ["S1", "S5"],
+      "contradict_source_ids": ["S7"],
+      "falsifier": "逐字节一致的目标文件仍不能被官方 thread/read 和 thread/resume 读取，或官方导入能证明保留相同编号与完整历史"
+    },
+    {
+      "id": "C4",
+      "statement": "独立虚拟显示 sidecar 可以让 Linux 浏览器 MCP 工作，同时不需要改写官方渲染器页面。",
+      "kind": "fact",
+      "impact": "high",
+      "confidence": "high",
+      "support_source_ids": ["S3", "S4", "S8"],
+      "contradict_source_ids": [],
+      "falsifier": "生产隔离环境中真实双客户端浏览器 MCP 测试失败，或官方渲染器树哈希发生非计划改变"
+    }
+  ],
+  "assumptions": [
+    {
+      "id": "A1",
+      "statement": "本机较新的 threads 表只比服务器多出一个全部取默认值的 is_pinned 字段，其余字段兼容，可在事务中受控省略该默认字段。",
+      "critical": true,
+      "status": "supported",
+      "decision_impact": "若不兼容，直接导入行可能损坏目标状态库，必须改用官方导入或版本转换",
+      "falsifier": "出现第二个缺失字段、is_pinned 出现非默认值、事务导入失败或官方恢复结果不一致",
+      "support_source_ids": ["S1"],
+      "contradict_source_ids": []
+    },
+    {
+      "id": "A2",
+      "statement": "已失效或本机不存在的 OAuth 授权不能通过迁移配置文件恢复。",
+      "critical": false,
+      "status": "supported",
+      "decision_impact": "对应连接器要保留为待用户重新授权，而不能宣称迁移成功",
+      "falsifier": "官方连接器在服务器无需用户授权即可返回已登录账号的真实只读数据",
+      "support_source_ids": ["S3"],
+      "contradict_source_ids": []
+    }
+  ],
+  "search_branches": [
+    { "name": "adjacent", "status": "executed", "reason": "", "round_ids": ["R-adjacent"] },
+    {
+      "name": "code",
+      "status": "not_applicable",
+      "reason": "代码证据直接来自受控本地仓库和生产测试，不需要外部代码查重。",
+      "round_ids": []
+    },
+    { "name": "failure", "status": "executed", "reason": "", "round_ids": ["R-failure"] },
+    { "name": "mechanism", "status": "executed", "reason": "", "round_ids": ["R-mechanism"] },
+    {
+      "name": "patent",
+      "status": "not_applicable",
+      "reason": "本项目不主张发明、专利性或对外知识产权排他。",
+      "round_ids": []
+    },
+    { "name": "problem", "status": "executed", "reason": "", "round_ids": ["R-problem"] },
+    { "name": "product", "status": "executed", "reason": "", "round_ids": ["R-product"] },
+    { "name": "research", "status": "executed", "reason": "", "round_ids": ["R-research"] }
+  ],
+  "search_rounds": [
+    {
+      "id": "R-problem",
+      "branch": "problem",
+      "query": "Codex app server thread resume lifecycle sessions",
+      "channel": "OpenAI 官方文档 MCP",
+      "date": "2026-08-03",
+      "discovery_mode": "keyword",
+      "new_candidate_ids": ["K1"],
+      "evidence_source_ids": ["S5"],
+      "search_log_source_id": "SL-problem",
+      "new_high_similarity_count": 1,
+      "new_decision_evidence_count": 1
+    },
+    {
+      "id": "R-mechanism",
+      "branch": "mechanism",
+      "query": "Codex import external agent config sessions skills plugins MCP",
+      "channel": "OpenAI 官方文档 MCP",
+      "date": "2026-08-03",
+      "discovery_mode": "keyword",
+      "new_candidate_ids": ["K2"],
+      "evidence_source_ids": ["S6"],
+      "search_log_source_id": "SL-mechanism",
+      "new_high_similarity_count": 1,
+      "new_decision_evidence_count": 1
+    },
+    {
+      "id": "R-product",
+      "branch": "product",
+      "query": "Codex app project folders chats import migration",
+      "channel": "OpenAI 官方文档 MCP",
+      "date": "2026-08-03",
+      "discovery_mode": "keyword",
+      "new_candidate_ids": ["K2", "K3"],
+      "evidence_source_ids": ["S7"],
+      "search_log_source_id": "SL-product",
+      "new_high_similarity_count": 2,
+      "new_decision_evidence_count": 1
+    },
+    {
+      "id": "R-research",
+      "branch": "research",
+      "query": "Codex plugins structure skills MCP apps official",
+      "channel": "OpenAI 官方文档 MCP",
+      "date": "2026-08-03",
+      "discovery_mode": "keyword",
+      "new_candidate_ids": [],
+      "evidence_source_ids": ["S8"],
+      "search_log_source_id": "SL-research",
+      "new_high_similarity_count": 0,
+      "new_decision_evidence_count": 1
+    },
+    {
+      "id": "R-adjacent",
+      "branch": "adjacent",
+      "query": "Codex app server protocol reliability errors reconnect",
+      "channel": "OpenAI 官方文档 MCP",
+      "date": "2026-08-03",
+      "discovery_mode": "keyword",
+      "new_candidate_ids": [],
+      "evidence_source_ids": ["S5"],
+      "search_log_source_id": "SL-adjacent",
+      "new_high_similarity_count": 0,
+      "new_decision_evidence_count": 1
+    },
+    {
+      "id": "R-failure",
+      "branch": "failure",
+      "query": "Codex app server thread list performance history",
+      "channel": "OpenAI 官方文档 MCP",
+      "date": "2026-08-03",
+      "discovery_mode": "keyword",
+      "new_candidate_ids": [],
+      "evidence_source_ids": ["S5"],
+      "search_log_source_id": "SL-failure",
+      "new_high_similarity_count": 0,
+      "new_decision_evidence_count": 1
+    }
+  ],
+  "candidates": [
+    {
+      "id": "K1",
+      "name": "原始 rollout 加状态库行迁移",
+      "class": "exact",
+      "verified": true,
+      "source_ids": ["S1", "S5"]
+    },
+    {
+      "id": "K2",
+      "name": "官方外部 Agent 导入流程",
+      "class": "near",
+      "verified": true,
+      "source_ids": ["S6", "S7"]
+    },
+    {
+      "id": "K3",
+      "name": "只归档旧对话并从新对话开始",
+      "class": "adjacent",
+      "verified": true,
+      "source_ids": ["S1", "S7"]
+    }
+  ],
+  "novelty": {
+    "applicable": true,
+    "applicability_reason": "需要比较官方通用导入、精确连续迁移和归档重开三条相邻实施路径，避免重复自造官方已经覆盖的能力。",
+    "assessment": "near-match-found",
+    "stop_reason": "decisive-match",
+    "saturation_round_ids": [],
+    "languages": ["zh", "en"],
+    "regions": ["OpenAI official documentation", "AIALRA private runtime"],
+    "access_gaps": [
+      {
+        "resource": "失效或从未建立的第三方 OAuth 会话",
+        "impact": "相关连接器必须等待用户重新授权；在授权前不能把这些连接器计为完整迁移，也不影响已经验证的自定义 Google MCP 路径。",
+        "critical": false
+      }
+    ],
+    "scope_statement": "只比较精确连续迁移、官方通用导入和归档重开三种实施路径。"
+  },
+  "perspectives": [
+    {
+      "id": "P1",
+      "lens": "连续性与数据完整性",
+      "producer": "lead",
+      "producer_type": "lead-agent",
+      "producer_reference": "migration-owner",
+      "independent": false,
+      "context_isolated": false,
+      "source_ids": ["S1", "S2", "S5"],
+      "findings": ["仅有项目文件不等于对话连续性", "哈希、状态行和官方恢复结果必须同时通过"],
+      "limitations": "结论绑定当前 App Server 与状态库版本，升级时必须重新跑兼容性和只读恢复门禁"
+    },
+    {
+      "id": "P2",
+      "lens": "安全与回滚",
+      "producer": "lead",
+      "producer_type": "lead-agent",
+      "producer_reference": "migration-owner",
+      "independent": false,
+      "context_isolated": false,
+      "source_ids": ["S1", "S4"],
+      "findings": [
+        "先备份再删除测试对话",
+        "公开仓库必须排除私有迁移清单",
+        "sidecar 失败不能联动重启主站"
+      ],
+      "limitations": "第三方服务账号权限仍受外部 OAuth 控制"
+    },
+    {
+      "id": "P3",
+      "lens": "日常可用性与性能",
+      "producer": "lead",
+      "producer_type": "lead-agent",
+      "producer_reference": "migration-owner",
+      "independent": false,
+      "context_isolated": false,
+      "source_ids": ["S3", "S4", "S5"],
+      "findings": [
+        "大对话校验必须流式读取",
+        "历史列表应沿用官方游标分页",
+        "Linux 浏览器能力应与官方页面进程分离"
+      ],
+      "limitations": "最终用户网络延迟无法由服务器架构完全消除"
+    }
+  ],
+  "real_world_validations": [
+    {
+      "id": "V1",
+      "role": "生产服务器运行环境",
+      "participant_reference": "codexapp-production",
+      "method": "部署后健康检查、真实 MCP 握手和双客户端浏览器调用",
+      "conducted_at": "2026-08-03",
+      "outcome": "主服务与虚拟显示均健康；直接插件 MCP 测试通过；核心只读 MCP 已返回真实数据；十条对话均被官方列表列出并逐条完成只读恢复，目标工作目录与哈希一致",
+      "limitations": "Gmail、Google Drive、Slack 和 Google Calendar 仍受用户 OAuth 授权门控制；浏览器最终可视验收需用户完成 Authentik 登录",
+      "status": "completed",
+      "evidence_source_ids": ["S3", "S4"]
+    }
+  ],
+  "alignment_questions": [
+    {
+      "id": "L1",
+      "question": "是否允许用摘要或新线程替代原对话？",
+      "decision_changing": true,
+      "status": "answered",
+      "answer": "不允许；用户明确要求 1:1 原封不动且可直接继续。"
+    },
+    {
+      "id": "L2",
+      "question": "是否允许为了 Linux 浏览器 MCP 修改官方网页前端？",
+      "decision_changing": true,
+      "status": "answered",
+      "answer": "不允许；使用独立虚拟显示 sidecar 保持官方渲染器不变。"
+    },
+    {
+      "id": "L3",
+      "question": "第三方 OAuth 缺失时是否可以宣称连接器已迁移？",
+      "decision_changing": false,
+      "status": "defaulted",
+      "default_value": "不能；标为需要用户重新授权，并保留已经可用的自定义 Google MCP 作为当前可用路径。"
+    }
+  ],
+  "recommendation": {
+    "verdict": "proceed",
+    "action": "放行已验证的工作区、Skill、插件、可直接迁移 MCP 和十条指定对话；把需重新授权的第三方连接器留在显式人工 OAuth 门后，并在 Codex 或状态库升级时重跑全部迁移门禁。",
+    "rationale": "十条目标对话已同时通过逐字节一致、事务导入、项目归属、官方 thread/list 列表和带服务器工作目录的 thread/read/thread/resume 验收；工作区、Skill、插件、MCP、回滚备份和脱敏边界也有直接证据。",
+    "strongest_counterevidence": "官方通用导入路径更标准，但公开文档没有证明它能满足同线程编号和全部历史逐字节连续的要求。",
+    "minimum_test": "每条指定对话的目标文件大小和 SHA-256 一致，官方 thread/read 与 thread/resume 成功，恢复后哈希不变。",
+    "failure_response": "停止放行，恢复迁移前数据库备份，保留源文件并定位单条失败原因。",
+    "reversal_condition": "任一关键对话哈希不一致、官方恢复失败、状态库 schema 不兼容或公开提交脱敏失败。",
+    "support_source_ids": ["S1", "S2", "S3", "S4", "S5", "S6", "S7", "S8"],
+    "counter_source_ids": ["S7"]
+  },
+  "review_triggers": [
+    "Codex App Server 或状态库版本升级",
+    "官方渲染器版本改变",
+    "服务器可用磁盘低于 5 GiB",
+    "任何迁移对话无法读取、消失或哈希变化",
+    "第三方 OAuth 或 MCP 权限范围改变",
+    "公开 Git 安全扫描出现账号、令牌、任务编号或私有路径"
+  ]
+}

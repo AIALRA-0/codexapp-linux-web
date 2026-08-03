@@ -37,12 +37,23 @@ APPLICATION_ROOT=/srv/aialra/releases/codexapp-official-web-host/VERSION \
 install -o root -g root -m 0644 \
   /srv/aialra/releases/codexapp-official-web-host/VERSION/ops/systemd/codexapp-official-sandbox-policy.service \
   /etc/systemd/system/codexapp-official-sandbox-policy.service
+install -o root -g root -m 0644 \
+  /srv/aialra/releases/codexapp-official-web-host/VERSION/ops/systemd/codexapp-official-browser-display.service \
+  /etc/systemd/system/codexapp-official-browser-display.service
 ```
 
 The host unit deliberately allows only `AF_NETLINK` and the `@mount` syscall
 group in addition to its previous restrictions. They are required for
 `bwrap` to configure loopback and namespace-local mounts. The AppArmor child
 profile removes capabilities from programs running inside the sandbox.
+
+Linux browser-tool plugins use a separate Xvfb virtual display. Xvfb exposes
+its X11 transport only to localhost through the unit's systemd IP policy, while
+the host keeps `PrivateTmp=true` and connects through `DISPLAY=127.0.0.1:99`.
+This lets unmodified visible-Chrome plugins run on the server without disabling
+Chromium's sandbox or weakening the host's filesystem isolation. The display is
+a wanted sidecar rather than a required dependency, so a display failure cannot
+restart or take down the main web host.
 
 Do not use `chmod -R a-w` alone: extraction may preserve owner-only source
 manifest files and cause a production-only startup failure. Do not make the

@@ -1,8 +1,8 @@
 [Unit]
 Description=CodexApp official browser host
 Requires=codexapp-official-sandbox-policy.service
-After=network-online.target codexapp-official-sandbox-policy.service
-Wants=network-online.target
+After=network-online.target codexapp-official-browser-display.service codexapp-official-sandbox-policy.service
+Wants=network-online.target codexapp-official-browser-display.service
 
 [Service]
 Type=simple
@@ -10,6 +10,7 @@ User=codexappweb
 Group=codexappweb
 WorkingDirectory=/srv/aialra/apps/codexapp-official-web-host/current
 EnvironmentFile=/srv/aialra/config/secrets/codexapp-official-web-host.env
+Environment=DISPLAY=127.0.0.1:99
 ExecStart=/usr/bin/node /srv/aialra/apps/codexapp-official-web-host/current/apps/host/dist/main.js
 Restart=on-failure
 RestartSec=3
