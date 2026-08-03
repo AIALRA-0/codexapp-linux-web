@@ -9,6 +9,7 @@ import {
   readOfficialDesktopFile,
   readOfficialDesktopFileBinary,
   readOfficialDesktopFileMetadata,
+  readOfficialExistingPaths,
 } from './desktop-files.js';
 
 const roots: string[] = [];
@@ -71,6 +72,26 @@ describe('official desktop file requests', () => {
         path: 'https://example.invalid/image.png',
       }),
     ).resolves.toEqual({ contentsBase64: null });
+  });
+
+  it('returns only root-confined paths that currently exist', async () => {
+    const runtime = await createRuntime();
+    const existingPath = join(runtime.workspaceRoot, 'existing.txt');
+    const missingPath = join(runtime.workspaceRoot, 'missing.txt');
+    await writeFile(existingPath, 'exists');
+    const outsideRoot = await mkdtemp(join(tmpdir(), 'codexapp-paths-outside-'));
+    roots.push(outsideRoot);
+    const outsidePath = join(outsideRoot, 'outside.txt');
+    await writeFile(outsidePath, 'outside');
+    const outsideLink = join(runtime.workspaceRoot, 'outside-link.txt');
+    await symlink(outsidePath, outsideLink);
+
+    await expect(
+      readOfficialExistingPaths(runtime, {
+        hostId: 'local',
+        paths: [existingPath, missingPath, outsidePath, outsideLink],
+      }),
+    ).resolves.toEqual({ existingPaths: [existingPath] });
   });
 
   it('rejects other hosts, outside paths, and symlink escapes', async () => {

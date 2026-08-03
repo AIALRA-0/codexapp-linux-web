@@ -1,5 +1,5 @@
 import { execFile } from 'node:child_process';
-import { randomUUID } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
 import { EventEmitter } from 'node:events';
 import { mkdirSync } from 'node:fs';
 import { mkdir, readFile, writeFile } from 'node:fs/promises';
@@ -51,6 +51,7 @@ import {
   readOfficialDesktopFile,
   readOfficialDesktopFileBinary,
   readOfficialDesktopFileMetadata,
+  readOfficialExistingPaths,
 } from './desktop-files.js';
 import { TurnLatencyTracker } from './turn-latency.js';
 import { assertStorageAvailableForMethod } from './storage.js';
@@ -83,6 +84,8 @@ const INITIAL_SIDEBAR_GLOBAL_STATE_KEYS = [
 interface RendererRequestMetadata {
   method: string;
   prewarmThread?: boolean;
+  requestFingerprint?: string;
+  requestShape?: Record<string, unknown>;
   startedAtMs: number;
   trace?: unknown;
 }
@@ -106,6 +109,41 @@ export class CapabilityUnavailableError extends Error {
     this.name = 'CapabilityUnavailableError';
     this.capability = capability;
   }
+}
+
+export function rendererRequestFingerprint(params: unknown): string {
+  const canonical = canonicalizeRendererRequestValue(params);
+  return createHash('sha256').update(JSON.stringify(canonical)).digest('hex').slice(0, 12);
+}
+
+export function rendererRequestShape(
+  method: string,
+  params: unknown,
+): Record<string, unknown> | undefined {
+  if (method !== 'plugin/list') return undefined;
+  const record =
+    params !== null && typeof params === 'object' && !Array.isArray(params)
+      ? (params as Record<string, unknown>)
+      : {};
+  return {
+    cwdCount: Array.isArray(record.cwds) ? record.cwds.length : null,
+    cwdsProvided: Object.hasOwn(record, 'cwds'),
+    marketplaceKindCount: Array.isArray(record.marketplaceKinds)
+      ? record.marketplaceKinds.length
+      : null,
+    marketplaceKindsProvided: Object.hasOwn(record, 'marketplaceKinds'),
+  };
+}
+
+function canonicalizeRendererRequestValue(value: unknown): unknown {
+  if (Array.isArray(value)) return value.map(canonicalizeRendererRequestValue);
+  if (value === null || typeof value !== 'object') return value ?? null;
+  return Object.fromEntries(
+    Object.entries(value as Record<string, unknown>)
+      .filter(([, item]) => item !== undefined)
+      .sort(([left], [right]) => left.localeCompare(right))
+      .map(([key, item]) => [key, canonicalizeRendererRequestValue(item)]),
+  );
 }
 
 export class UserRuntime extends EventEmitter {
@@ -531,8 +569,11 @@ export class UserRuntime extends EventEmitter {
           });
           return undefined;
         }
+        const requestShape = rendererRequestShape(prepared.request.method, prepared.request.params);
         this.#rendererRequests.set(prepared.request.id, {
           method: prepared.request.method,
+          requestFingerprint: rendererRequestFingerprint(prepared.request.params),
+          ...(requestShape === undefined ? {} : { requestShape }),
           startedAtMs,
           ...(prepared.request.trace === undefined ? {} : { trace: prepared.request.trace }),
         });
@@ -572,9 +613,12 @@ export class UserRuntime extends EventEmitter {
           this.config.minimumFreeBytes,
           prepared.request.method,
         );
+        const requestShape = rendererRequestShape(prepared.request.method, prepared.request.params);
         this.#rendererRequests.set(prepared.request.id, {
           method: prepared.request.method,
           prewarmThread: true,
+          requestFingerprint: rendererRequestFingerprint(prepared.request.params),
+          ...(requestShape === undefined ? {} : { requestShape }),
           startedAtMs,
           ...(prepared.request.trace === undefined ? {} : { trace: prepared.request.trace }),
         });
@@ -880,6 +924,8 @@ export class UserRuntime extends EventEmitter {
           method: metadata.method,
           durationMs: receivedAtMs - metadata.startedAtMs,
           error: parsed.error !== undefined,
+          requestFingerprint: metadata.requestFingerprint,
+          requestShape: metadata.requestShape,
         });
       }
       if (metadata?.prewarmThread === true) {
@@ -1306,6 +1352,8 @@ export class UserRuntime extends EventEmitter {
         );
       case 'read-file-binary':
         return readOfficialDesktopFileBinary(this, params);
+      case 'paths-exist':
+        return readOfficialExistingPaths(this, params);
       case 'set-global-state':
         if (typeof params.key !== 'string') throw new Error('global state key is required');
         await this.#state.set('globalState', params.key, params.value);

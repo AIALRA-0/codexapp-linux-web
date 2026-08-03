@@ -5,7 +5,35 @@ import {
   initialRouteForAuthMethod,
   isExpectedAppServerResponseError,
   officialWebStaticDesktopResponse,
+  rendererRequestFingerprint,
+  rendererRequestShape,
 } from './runtime.js';
+
+describe('renderer request diagnostics', () => {
+  it('identifies equal parameter records without logging their values', () => {
+    const first = rendererRequestFingerprint({ cwds: ['/workspace'], marketplaceKinds: null });
+    const reordered = rendererRequestFingerprint({ marketplaceKinds: null, cwds: ['/workspace'] });
+    const different = rendererRequestFingerprint({ cwds: ['/other'], marketplaceKinds: null });
+    expect(first).toMatch(/^[a-f0-9]{12}$/u);
+    expect(reordered).toBe(first);
+    expect(different).not.toBe(first);
+  });
+
+  it('records only non-sensitive plugin request structure', () => {
+    expect(
+      rendererRequestShape('plugin/list', {
+        cwds: ['/private/workspace'],
+        marketplaceKinds: ['system'],
+      }),
+    ).toEqual({
+      cwdCount: 1,
+      cwdsProvided: true,
+      marketplaceKindCount: 1,
+      marketplaceKindsProvided: true,
+    });
+    expect(rendererRequestShape('thread/list', { cwd: '/private/workspace' })).toBeUndefined();
+  });
+});
 
 describe('official renderer initial route selection', () => {
   it('opens the official login route only when the app server has no auth method', () => {

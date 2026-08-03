@@ -6,6 +6,7 @@ import { resolveRuntimePath, type RuntimePathScope } from './runtime-path.js';
 
 const OFFICIAL_DESKTOP_FILE_MAX_BYTES = 256 * 1024 * 1024;
 const OFFICIAL_CONTENT_SAMPLE_MAX_BYTES = 1024 * 1024;
+const OFFICIAL_PATH_EXISTENCE_LIMIT = 10_000;
 
 interface DesktopFileScope extends RuntimePathScope {
   detectContentKind(sample: Uint8Array): Promise<unknown>;
@@ -81,6 +82,28 @@ export async function readOfficialDesktopFileBinary(
     contentsBase64: bytes.toString('base64'),
     ...(mimeType === null ? {} : { mimeType }),
   };
+}
+
+export async function readOfficialExistingPaths(
+  runtime: RuntimePathScope,
+  params: Record<string, unknown>,
+): Promise<{ existingPaths: string[] }> {
+  requireLocalHost(params.hostId);
+  if (!Array.isArray(params.paths) || params.paths.length > OFFICIAL_PATH_EXISTENCE_LIMIT) {
+    throw new TypeError('Desktop paths must be a bounded array');
+  }
+  const paths = params.paths.map((value) => requiredString(value, 'desktop path'));
+  const existing = await Promise.all(
+    paths.map(async (path) => {
+      try {
+        await resolveDesktopPath(runtime, path);
+        return path;
+      } catch {
+        return null;
+      }
+    }),
+  );
+  return { existingPaths: existing.filter((path): path is string => path !== null) };
 }
 
 async function resolveDesktopPath(runtime: RuntimePathScope, input: unknown): Promise<string> {

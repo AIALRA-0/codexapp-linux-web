@@ -153,6 +153,17 @@ try {
   ) {
     throw new Error('official desktop file metadata response changed');
   }
+  const existingPaths = await bridge.desktopFetch('paths-exist', {
+    hostId: 'local',
+    paths: [textPath, `${textPath}.missing`],
+  });
+  if (
+    !Array.isArray(existingPaths?.existingPaths) ||
+    existingPaths.existingPaths.length !== 1 ||
+    existingPaths.existingPaths[0] !== textPath
+  ) {
+    throw new Error('official desktop path existence response changed');
+  }
 
   const temporary = await services.workspaceFiles.createTemporaryFile({
     bytes: new TextEncoder().encode(textMarker),

@@ -436,6 +436,7 @@ export async function createGateway(config: GatewayConfig): Promise<FastifyInsta
             clearTimeout(helloTimer);
             helloReceived = true;
             entry = sessions.get(ticket.sessionId);
+            const resumedSession = entry !== undefined;
             if (entry === undefined) {
               if (missingBridgeSessionRequiresReload(frame.lastHostSequence)) {
                 app.log.info(
@@ -490,6 +491,17 @@ export async function createGateway(config: GatewayConfig): Promise<FastifyInsta
               delete entry.cleanupTimer;
             }
             entry.session.attach(socket, frame.lastHostSequence);
+            if (resumedSession) {
+              app.log.info(
+                {
+                  auditUserKey,
+                  lastHostSequence: frame.lastHostSequence,
+                  pendingHostFrames: entry.session.pendingHostFrames,
+                  sessionId: entry.session.id,
+                },
+                'bridge session resumed',
+              );
+            }
             return;
           }
           if (frame.type === 'hello' || entry === undefined) {
