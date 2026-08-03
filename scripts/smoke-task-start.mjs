@@ -57,6 +57,13 @@ try {
   if (modelProviderCapabilities?.namespaceTools !== true) {
     throw new Error('App-server namespace tools are unavailable');
   }
+  const rendererModelProviderCapabilities = await bridge.desktopFetch(
+    'read-model-provider-capabilities-for-host',
+    { hostId: 'local' },
+  );
+  if (rendererModelProviderCapabilities?.namespaceTools !== true) {
+    throw new Error('Renderer host did not expose namespace tool support');
+  }
 
   const started = await bridge.prewarmThreadStart({
     cwd: workspaceRoot,
@@ -130,6 +137,7 @@ try {
         'mcp-codex-config',
         'developer-instructions',
         'modelProvider/capabilities/read cache',
+        'read-model-provider-capabilities-for-host',
       ],
       appServer: ['thread-prewarm-start', 'turn/start', 'thread/read', 'thread/delete'],
       gitOriginCount: gitOrigins.origins.length,

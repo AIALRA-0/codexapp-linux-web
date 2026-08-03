@@ -12,7 +12,7 @@ import {
   stat,
   writeFile,
 } from 'node:fs/promises';
-import { basename, dirname, extname, isAbsolute, join, relative, resolve, sep } from 'node:path';
+import { basename, dirname, extname, isAbsolute, join, relative, sep } from 'node:path';
 
 import { RpcSession, RpcTarget, type RpcTransport } from 'capnweb';
 import { ArtifactDocumentsService } from './artifact-documents.js';
@@ -37,6 +37,7 @@ import type { UserRuntime } from './runtime.js';
 import type { BrowserSession } from './session.js';
 import type { TerminalEvent } from './terminal.js';
 import { parseReadOnlyAppToolAllowlist } from './thread-metadata-generation.js';
+import { resolveRuntimePath } from './runtime-path.js';
 
 export { ChatGptProjectFilesService } from './chatgpt-project-files.js';
 export { ArtifactDocumentsService } from './artifact-documents.js';
@@ -1673,40 +1674,6 @@ async function createDefaultProjectRoot(runtime: UserRuntime, name: string): Pro
     } catch (error) {
       if (errorCode(error) !== 'EEXIST') throw error;
     }
-  }
-}
-
-async function resolveRuntimePath(
-  runtime: UserRuntime,
-  input: string,
-  forWrite: boolean,
-): Promise<string> {
-  const root = await realpath(runtime.root);
-  const unresolvedRoot = resolve(runtime.root);
-  const candidate = resolve(isAbsolute(input) ? input : join(runtime.workspaceRoot, input));
-  if (!isPathWithin(unresolvedRoot, candidate) && !isPathWithin(root, candidate)) {
-    throw new Error('Workspace file path is outside the user root');
-  }
-  if (!forWrite) {
-    const canonical = await realpath(candidate);
-    if (!isPathWithin(root, canonical)) {
-      throw new Error('Workspace file path resolves outside the user root');
-    }
-    return canonical;
-  }
-  try {
-    const canonical = await realpath(candidate);
-    if (!isPathWithin(root, canonical)) {
-      throw new Error('Workspace file path resolves outside the user root');
-    }
-    return canonical;
-  } catch (error) {
-    if (errorCode(error) !== 'ENOENT') throw error;
-    const parent = await realpath(dirname(candidate));
-    if (!isPathWithin(root, parent)) {
-      throw new Error('Workspace file parent resolves outside the user root', { cause: error });
-    }
-    return join(parent, basename(candidate));
   }
 }
 

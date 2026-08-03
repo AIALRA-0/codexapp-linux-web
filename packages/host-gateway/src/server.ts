@@ -89,6 +89,15 @@ const SECURITY_HEADERS: Record<string, string> = {
   'x-frame-options': 'DENY',
 };
 
+const WEBSOCKET_HEARTBEAT_INTERVAL_MS = 25_000;
+
+interface WebSocketHeartbeatTarget {
+  readyState: number;
+  off(event: 'close', listener: () => void): unknown;
+  once(event: 'close', listener: () => void): unknown;
+  ping(): unknown;
+}
+
 const CSP = [
   "default-src 'none'",
   "base-uri 'self'",
@@ -379,6 +388,7 @@ export async function createGateway(config: GatewayConfig): Promise<FastifyInsta
       socket.close(4403, 'origin rejected');
       return;
     }
+    installWebSocketHeartbeat(socket);
     let entry: SessionEntry | undefined;
     let helloReceived = false;
     let frameQueue = Promise.resolve();
@@ -547,11 +557,19 @@ export async function createGateway(config: GatewayConfig): Promise<FastifyInsta
           socket.close(4500, 'host command failed');
         });
     });
-    socket.on('close', () => {
+    socket.on('close', (code, reason) => {
       clearTimeout(helloTimer);
       if (entry === undefined) return;
       if (!entry.session.detach(socket)) return;
-      app.log.info({ auditUserKey, sessionId: entry.session.id }, 'bridge connection closed');
+      app.log.info(
+        {
+          auditUserKey,
+          closeCode: code,
+          closeReason: reason.toString().slice(0, 160),
+          sessionId: entry.session.id,
+        },
+        'bridge connection closed',
+      );
       if (entry.cleanupTimer === undefined) {
         entry.cleanupTimer = setTimeout(() => {
           if (entry === undefined) return;
@@ -587,6 +605,7 @@ export async function createGateway(config: GatewayConfig): Promise<FastifyInsta
       socket.close(4403, 'origin rejected');
       return;
     }
+    installWebSocketHeartbeat(socket);
     const { browserSessionId, browserTabId, conversationId } = request.query;
     if (
       typeof browserSessionId !== 'string' ||
@@ -760,6 +779,22 @@ export function shouldServeRendererIndex(
 
 export function terminateWebsocketClients(clients: Iterable<{ terminate: () => void }>): void {
   for (const client of clients) client.terminate();
+}
+
+export function installWebSocketHeartbeat(
+  socket: WebSocketHeartbeatTarget,
+  intervalMs = WEBSOCKET_HEARTBEAT_INTERVAL_MS,
+): () => void {
+  const timer = setInterval(() => {
+    if (socket.readyState === 1) socket.ping();
+  }, intervalMs);
+  timer.unref();
+  const stop = (): void => {
+    clearInterval(timer);
+    socket.off('close', stop);
+  };
+  socket.once('close', stop);
+  return stop;
 }
 
 function requestHasInitialRoute(request: FastifyRequest, publicOrigin: string): boolean {

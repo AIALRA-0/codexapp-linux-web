@@ -47,6 +47,11 @@ import { OfficialPrewarmedThreads } from './prewarmed-threads.js';
 import { RequestUserInputAutoResolution } from './request-user-input-auto-resolution.js';
 import { ensureRuntimeDirectory, resolveRuntimeDirectory } from './runtime-directory.js';
 import { DurableStateStore } from './state.js';
+import {
+  readOfficialDesktopFile,
+  readOfficialDesktopFileBinary,
+  readOfficialDesktopFileMetadata,
+} from './desktop-files.js';
 import { TurnLatencyTracker } from './turn-latency.js';
 import { assertStorageAvailableForMethod } from './storage.js';
 import { TerminalManager } from './terminal.js';
@@ -1276,6 +1281,31 @@ export class UserRuntime extends EventEmitter {
           value:
             typeof params.key === 'string' ? this.#state.get('globalState', params.key) : undefined,
         };
+      case 'read-model-provider-capabilities-for-host':
+        if (params.hostId !== undefined && params.hostId !== 'local') {
+          throw new Error('Only the local execution host is available');
+        }
+        if (this.#modelProviderCapabilities === undefined) {
+          await this.#refreshModelProviderCapabilities(this.#requireAppServer());
+        }
+        if (this.#modelProviderCapabilities === undefined) {
+          throw new Error('Model provider capabilities are unavailable');
+        }
+        return this.#modelProviderCapabilities;
+      case 'read-file':
+        return readOfficialDesktopFile(this, params);
+      case 'read-file-metadata':
+        return readOfficialDesktopFileMetadata(
+          {
+            root: this.root,
+            workspaceRoot: this.workspaceRoot,
+            detectContentKind: (sample) =>
+              this.officialDesktopState.request('file.detect-kind', { bytes: sample }),
+          },
+          params,
+        );
+      case 'read-file-binary':
+        return readOfficialDesktopFileBinary(this, params);
       case 'set-global-state':
         if (typeof params.key !== 'string') throw new Error('global state key is required');
         await this.#state.set('globalState', params.key, params.value);

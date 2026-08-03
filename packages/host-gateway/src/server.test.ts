@@ -1,4 +1,6 @@
-import { describe, expect, it } from 'vitest';
+import { EventEmitter } from 'node:events';
+
+import { describe, expect, it, vi } from 'vitest';
 import { mkdir, mkdtemp, rm, symlink, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -7,6 +9,7 @@ import {
   countIdentitySessions,
   countReconnectableIdentitySessions,
   findMissingBrowserBridgeImports,
+  installWebSocketHeartbeat,
   isConcurrentBridgeInvocation,
   missingBridgeSessionRequiresReload,
   officialInitialRouteLocation,
@@ -106,6 +109,30 @@ describe('official renderer navigation fallback', () => {
       { terminate: () => terminations.push('second') },
     ]);
     expect(terminations).toEqual(['first', 'second']);
+  });
+
+  it('keeps idle proxy connections alive with protocol pings and stops after close', () => {
+    vi.useFakeTimers();
+    try {
+      const events = new EventEmitter();
+      let pings = 0;
+      const socket = {
+        readyState: 1,
+        ping: () => {
+          pings += 1;
+        },
+        once: events.once.bind(events),
+        off: events.off.bind(events),
+      };
+      installWebSocketHeartbeat(socket, 25_000);
+      vi.advanceTimersByTime(75_000);
+      expect(pings).toBe(3);
+      events.emit('close');
+      vi.advanceTimersByTime(75_000);
+      expect(pings).toBe(3);
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it('requests a renderer reload only when reconnecting session state was lost', () => {
