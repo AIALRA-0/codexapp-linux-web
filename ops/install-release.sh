@@ -57,6 +57,10 @@ rsync -a \
   --exclude='/secrets/' \
   --exclude='/state/' \
   "$source_root/" "$incomplete/"
+# rsync preserves the source directory mode on the destination root. Sources
+# prepared with mktemp are intentionally private, so normalize only the release
+# root before making the completed tree immutable.
+chmod 0755 "$incomplete"
 for forbidden_path in .git .official artifacts coverage runtime secrets state; do
   if [[ -e "$incomplete/$forbidden_path" || -L "$incomplete/$forbidden_path" ]]; then
     echo "forbidden build input entered the release: $forbidden_path" >&2

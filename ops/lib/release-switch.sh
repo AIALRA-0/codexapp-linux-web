@@ -6,6 +6,7 @@ codexapp_official_release_root="/srv/aialra/codexapp-official/releases"
 codexapp_official_application_root="/srv/aialra/codexapp-official"
 codexapp_environment_file="/srv/aialra/config/secrets/codexapp-official-web-host.env"
 codexapp_service_name="codexapp-official-web-host.service"
+codexapp_service_user="codexappweb"
 codexapp_health_url="http://127.0.0.1:13014/readyz"
 
 codexapp_verify_release_pair() {
@@ -20,6 +21,11 @@ codexapp_verify_release_pair() {
   release_id="$(basename -- "$target")"
   if [[ ! -d "$target" || -L "$target" || ! -s "$target/RELEASE-SHA256SUMS" ]]; then
     echo "application release is missing or unverified" >&2
+    return 1
+  fi
+  if ! runuser -u "$codexapp_service_user" -- test -x "$target" ||
+    ! runuser -u "$codexapp_service_user" -- test -r "$target/apps/host/dist/main.js"; then
+    echo "application release is inaccessible to the service account" >&2
     return 1
   fi
   (
@@ -138,10 +144,22 @@ codexapp_set_expected_official_version() {
 
 codexapp_wait_for_health() {
   local attempts="${1:-45}"
+  local required_consecutive="${2:-5}"
   local attempt
+  local consecutive=0
+  local main_pid
   for attempt in $(seq 1 "$attempts"); do
-    if curl -fs "$codexapp_health_url" >/dev/null 2>&1; then
-      return 0
+    main_pid="$(systemctl show --property=MainPID --value "$codexapp_service_name" 2>/dev/null || true)"
+    if systemctl is-active --quiet "$codexapp_service_name" &&
+      [[ "$main_pid" =~ ^[1-9][0-9]*$ ]] &&
+      kill -0 "$main_pid" 2>/dev/null &&
+      curl -fs "$codexapp_health_url" >/dev/null 2>&1; then
+      consecutive=$((consecutive + 1))
+      if (( consecutive >= required_consecutive )); then
+        return 0
+      fi
+    else
+      consecutive=0
     fi
     sleep 1
   done
