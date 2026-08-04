@@ -1,11 +1,15 @@
 import { createHash } from 'node:crypto';
-import { CodexAppServerClient } from '../packages/app-server-client/dist/index.js';
+
+const { CodexAppServerClient } = await import(
+  process.env.VERIFY_CLIENT_MODULE ?? '../packages/app-server-client/dist/index.js'
+);
 
 const codexBin = requiredEnvironment('VERIFY_CODEX_BIN');
 const codexHome = requiredEnvironment('VERIFY_CODEX_HOME');
 const workspace = requiredEnvironment('VERIFY_WORKSPACE');
 const rendererVersion = process.env.VERIFY_RENDERER_VERSION ?? '26.727.51351';
 const configuredGoogleAccounts = csvEnvironment('VERIFY_GOOGLE_ACCOUNTS');
+const refreshGoogleAccounts = process.env.VERIFY_REFRESH_GOOGLE_ACCOUNTS === '1';
 const cases = [
   smokeCase('openaiDeveloperDocs', 'list_openai_docs', {}),
   smokeCase('aialra_google_email', 'manage_accounts', { operation: 'list' }),
@@ -53,6 +57,7 @@ try {
   }
   const discoveredGoogleAccounts = await discoverGoogleAccounts(client, threadId);
   const googleAccounts = unique([...configuredGoogleAccounts, ...discoveredGoogleAccounts]);
+  const repairs = [];
   if (googleAccounts.length === 0) {
     results.push({
       label: 'aialra_google_email/account-discovery',
@@ -66,6 +71,9 @@ try {
     });
   }
   for (const account of googleAccounts) {
+    if (refreshGoogleAccounts) {
+      repairs.push(await refreshGoogleAccount(client, threadId, account));
+    }
     results.push(
       await runCase(
         client,
@@ -90,6 +98,7 @@ try {
       rendererVersion,
       tested: results.length,
       results,
+      repairs,
       failures: failures.map((result) => result.label),
     })}\n`,
   );
@@ -160,6 +169,8 @@ async function runCase(appServer, threadId, status, testCase) {
       expectedMatched: expected,
       authProblem,
       explicitError,
+      diagnostic:
+        explicitError || authProblem || !expected ? sanitizeDiagnostic(serialized) : undefined,
       milliseconds: Math.round(performance.now() - startedAt),
     };
   } catch (error) {
@@ -183,6 +194,17 @@ function containsExplicitError(value) {
   return Object.values(value).some(containsExplicitError);
 }
 
+function sanitizeDiagnostic(value) {
+  return value
+    .replace(/[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}/giu, '[email-redacted]')
+    .replace(/(?:bearer\s+)?[A-Za-z0-9_-]{32,}\.[A-Za-z0-9._-]{16,}/giu, '[token-redacted]')
+    .replace(
+      /((?:access|refresh|id)[_-]?token["']?\s*[:=]\s*)["'][^"']+["']/giu,
+      '$1"[token-redacted]"',
+    )
+    .slice(0, 800);
+}
+
 async function discoverGoogleAccounts(appServer, threadId) {
   const response = await appServer.request('mcpServer/tool/call', {
     threadId,
@@ -197,6 +219,58 @@ async function discoverGoogleAccounts(appServer, threadId) {
       .match(/[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}/giu)
       ?.map((email) => email.toLowerCase()) ?? [],
   );
+}
+
+async function refreshGoogleAccount(appServer, threadId, account) {
+  const startedAt = performance.now();
+  const label = `google-account:${hashIdentifier(account)}`;
+  try {
+    const status = await appServer.request('mcpServer/tool/call', {
+      threadId,
+      server: 'aialra_google_email',
+      tool: 'manage_accounts',
+      arguments: { operation: 'status', email: account },
+    });
+    const statusSerialized = JSON.stringify(status);
+    if (/(?:tokenValid["']?\s*:\s*true|\[x\]\s*Token valid)/iu.test(statusSerialized)) {
+      return {
+        label,
+        attempted: false,
+        ok: true,
+        reason: 'already-valid',
+        milliseconds: Math.round(performance.now() - startedAt),
+      };
+    }
+    const response = await appServer.request('mcpServer/tool/call', {
+      threadId,
+      server: 'aialra_google_email',
+      tool: 'manage_accounts',
+      arguments: { operation: 'refresh', email: account },
+    });
+    const serialized = JSON.stringify(response);
+    const explicitError = containsExplicitError(response);
+    const authProblem =
+      /(?:not authenticated|authentication required|login required|unauthorized|token invalid|no refresh token)/iu.test(
+        serialized,
+      );
+    return {
+      label,
+      attempted: true,
+      ok: !explicitError && !authProblem,
+      explicitError,
+      authProblem,
+      diagnostic: explicitError || authProblem ? sanitizeDiagnostic(serialized) : undefined,
+      milliseconds: Math.round(performance.now() - startedAt),
+    };
+  } catch (error) {
+    return {
+      label,
+      attempted: true,
+      ok: false,
+      reason: error instanceof Error ? error.message : String(error),
+      milliseconds: Math.round(performance.now() - startedAt),
+    };
+  }
 }
 
 function hashIdentifier(value) {
