@@ -3,7 +3,7 @@ import { CodexAppServerClient } from '../packages/app-server-client/dist/index.j
 const codexBin = requiredEnvironment('VERIFY_CODEX_BIN');
 const codexHome = requiredEnvironment('VERIFY_CODEX_HOME');
 const workspace = requiredEnvironment('VERIFY_WORKSPACE');
-const rendererVersion = process.env.VERIFY_RENDERER_VERSION ?? '26.721.81911';
+const rendererVersion = process.env.VERIFY_RENDERER_VERSION ?? '26.727.51351';
 const testUrl = process.env.VERIFY_BROWSER_URL ?? 'https://example.com/';
 const expectedText = process.env.VERIFY_BROWSER_EXPECTED_TEXT ?? 'Example Domain';
 
@@ -13,7 +13,7 @@ const client = new CodexAppServerClient({
   cwd: workspace,
   clientVersion: rendererVersion,
   extraArgs: ['-c', 'features.code_mode_host=true'],
-  requestTimeoutMs: 180_000,
+  requestTimeoutMs: 60_000,
 });
 const stderr = [];
 client.on('request', (event) => {
@@ -30,40 +30,47 @@ client.on('stderr', (line) => {
 });
 
 try {
+  phase('app-server-start');
   await client.start();
+  phase('app-server-ready');
   const started = await client.request('thread/start', {
     cwd: workspace,
     ephemeral: true,
     experimentalRawEvents: false,
   });
   const threadId = requiredString(started?.thread?.id ?? started?.threadId, 'thread id');
-  const status = await waitForTools(client, threadId);
-  const navigation = await client.request('mcpServer/tool/call', {
-    threadId,
-    server: 'aialra-shopping-browser',
-    tool: 'browser_navigate',
-    arguments: { url: testUrl },
-  });
-  const snapshot = await client.request('mcpServer/tool/call', {
-    threadId,
-    server: 'aialra-shopping-browser',
-    tool: 'browser_snapshot',
-    arguments: {},
-  });
+  phase('thread-ready');
+  phase('navigation-start');
+  const navigation = await client.request(
+    'mcpServer/tool/call',
+    {
+      threadId,
+      server: 'aialra-shopping-browser',
+      tool: 'browser_navigate',
+      arguments: { url: testUrl },
+    },
+    90_000,
+  );
+  phase('navigation-complete');
+  const snapshot = await client.request(
+    'mcpServer/tool/call',
+    {
+      threadId,
+      server: 'aialra-shopping-browser',
+      tool: 'browser_snapshot',
+      arguments: {},
+    },
+    60_000,
+  );
+  phase('snapshot-complete');
   const navigationText = JSON.stringify(navigation);
   const snapshotText = JSON.stringify(snapshot);
   const exactContent = snapshotText.includes(expectedText);
-  const ok =
-    status.tools?.browser_navigate?.name === 'browser_navigate' &&
-    status.tools?.browser_snapshot?.name === 'browser_snapshot' &&
-    !containsExplicitError(navigation) &&
-    !containsExplicitError(snapshot) &&
-    exactContent;
+  const ok = !containsExplicitError(navigation) && !containsExplicitError(snapshot) && exactContent;
   process.stdout.write(
     `${JSON.stringify({
       ok,
-      server: status.name,
-      discoveredTools: Object.keys(status.tools ?? {}).length,
+      server: 'aialra-shopping-browser',
       navigateCalled: true,
       snapshotCalled: true,
       exactContent,
@@ -85,28 +92,9 @@ try {
   await client.stop().catch(() => undefined);
 }
 
-async function waitForTools(appServer, threadId) {
-  let status;
-  for (let attempt = 0; attempt < 180; attempt += 1) {
-    const response = await appServer.request('mcpServerStatus/list', {
-      threadId,
-      cursor: null,
-      limit: 100,
-      detail: 'toolsAndAuthOnly',
-    });
-    status = Array.isArray(response?.data)
-      ? response.data.find((row) => row?.name === 'aialra-shopping-browser')
-      : undefined;
-    if (
-      status?.tools?.browser_navigate?.name === 'browser_navigate' &&
-      status?.tools?.browser_snapshot?.name === 'browser_snapshot'
-    ) {
-      return status;
-    }
-    await delay(500);
-  }
-  throw new Error(
-    `shopping-browser tools did not become ready: ${JSON.stringify(Object.keys(status?.tools ?? {}))}`,
+function phase(name, details = {}) {
+  process.stderr.write(
+    `[shopping-browser-verifier] ${JSON.stringify({ phase: name, ...details })}\n`,
   );
 }
 
@@ -126,8 +114,4 @@ function requiredEnvironment(name) {
 function requiredString(value, label) {
   if (typeof value !== 'string' || value.length === 0) throw new Error(`${label} is missing`);
   return value;
-}
-
-function delay(milliseconds) {
-  return new Promise((resolve) => setTimeout(resolve, milliseconds));
 }

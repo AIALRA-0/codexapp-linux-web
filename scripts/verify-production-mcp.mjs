@@ -1,10 +1,19 @@
+import { createHash } from 'node:crypto';
 import { CodexAppServerClient } from '../packages/app-server-client/dist/index.js';
 
 const codexBin = requiredEnvironment('VERIFY_CODEX_BIN');
 const codexHome = requiredEnvironment('VERIFY_CODEX_HOME');
 const workspace = requiredEnvironment('VERIFY_WORKSPACE');
-const rendererVersion = process.env.VERIFY_RENDERER_VERSION ?? '26.721.81911';
-const googleAccounts = csvEnvironment('VERIFY_GOOGLE_ACCOUNTS');
+const rendererVersion = process.env.VERIFY_RENDERER_VERSION ?? '26.727.51351';
+const configuredGoogleAccounts = csvEnvironment('VERIFY_GOOGLE_ACCOUNTS');
+const cases = [
+  smokeCase('openaiDeveloperDocs', 'list_openai_docs', {}),
+  smokeCase('aialra_google_email', 'manage_accounts', { operation: 'list' }),
+  smokeCase('codex_apps', 'github.get_profile', {}),
+  smokeCase('codex_apps', 'gmail.get_profile', {}),
+  smokeCase('codex_apps', 'google_drive.get_profile', {}),
+  smokeCase('codex_apps', 'microsoft_outlook_email.get_profile', {}),
+];
 
 const client = new CodexAppServerClient({
   codexBin,
@@ -36,33 +45,43 @@ try {
     experimentalRawEvents: false,
   });
   const threadId = requiredString(started?.thread?.id ?? started?.threadId, 'thread id');
-  const status = await waitForMcpStatus(client, threadId);
-  const cases = [
-    smokeCase('openaiDeveloperDocs', 'list_openai_docs', {}),
-    smokeCase('aialra_google_email', 'manage_accounts', { operation: 'list' }),
-    smokeCase('aialra_microsoft_email', 'list-accounts', {}, { authRequired: false }),
-    smokeCase('codex_apps', 'github.get_profile', {}),
-    smokeCase('codex_apps', 'gmail.get_profile', {}),
-    smokeCase('codex_apps', 'google_drive.get_profile', {}),
-    smokeCase('codex_apps', 'microsoft_outlook_email.get_profile', {}),
-  ];
-  for (const account of googleAccounts) {
-    cases.push(
-      smokeCase(
-        'aialra_google_email',
-        'manage_accounts',
-        { operation: 'status', email: account },
-        {
-          label: `google-account:${account}`,
-          expected: /(?:tokenValid["']?\s*:\s*true|\[x\]\s*Token valid)/i,
-        },
-      ),
-    );
-  }
+  const status = await waitForMcpStatus(client, threadId, cases);
 
   const results = [];
   for (const testCase of cases) {
     results.push(await runCase(client, threadId, status, testCase));
+  }
+  const discoveredGoogleAccounts = await discoverGoogleAccounts(client, threadId);
+  const googleAccounts = unique([...configuredGoogleAccounts, ...discoveredGoogleAccounts]);
+  if (googleAccounts.length === 0) {
+    results.push({
+      label: 'aialra_google_email/account-discovery',
+      server: 'aialra_google_email',
+      tool: 'manage_accounts',
+      ok: false,
+      discovered: true,
+      called: true,
+      reason: 'no-configured-accounts',
+      milliseconds: 0,
+    });
+  }
+  for (const account of googleAccounts) {
+    results.push(
+      await runCase(
+        client,
+        threadId,
+        status,
+        smokeCase(
+          'aialra_google_email',
+          'manage_accounts',
+          { operation: 'status', email: account },
+          {
+            label: `google-account:${hashIdentifier(account)}`,
+            expected: /(?:tokenValid["']?\s*:\s*true|\[x\]\s*Token valid)/i,
+          },
+        ),
+      ),
+    );
   }
   const failures = results.filter((result) => !result.ok);
   process.stdout.write(
@@ -100,6 +119,7 @@ function smokeCase(server, tool, args, options = {}) {
 }
 
 async function runCase(appServer, threadId, status, testCase) {
+  const startedAt = performance.now();
   const serverStatus = status.find((row) => row?.name === testCase.server);
   const discovered = serverStatus?.tools?.[testCase.tool]?.name === testCase.tool;
   if (!discovered) {
@@ -111,6 +131,7 @@ async function runCase(appServer, threadId, status, testCase) {
       discovered: false,
       called: false,
       reason: 'tool-not-discovered',
+      milliseconds: Math.round(performance.now() - startedAt),
     };
   }
   try {
@@ -139,6 +160,7 @@ async function runCase(appServer, threadId, status, testCase) {
       expectedMatched: expected,
       authProblem,
       explicitError,
+      milliseconds: Math.round(performance.now() - startedAt),
     };
   } catch (error) {
     return {
@@ -149,6 +171,7 @@ async function runCase(appServer, threadId, status, testCase) {
       discovered: true,
       called: false,
       reason: error instanceof Error ? error.message : String(error),
+      milliseconds: Math.round(performance.now() - startedAt),
     };
   }
 }
@@ -160,7 +183,31 @@ function containsExplicitError(value) {
   return Object.values(value).some(containsExplicitError);
 }
 
-async function waitForMcpStatus(appServer, threadId) {
+async function discoverGoogleAccounts(appServer, threadId) {
+  const response = await appServer.request('mcpServer/tool/call', {
+    threadId,
+    server: 'aialra_google_email',
+    tool: 'manage_accounts',
+    arguments: { operation: 'list' },
+  });
+  if (containsExplicitError(response)) return [];
+  const serialized = JSON.stringify(response);
+  return unique(
+    serialized
+      .match(/[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}/giu)
+      ?.map((email) => email.toLowerCase()) ?? [],
+  );
+}
+
+function hashIdentifier(value) {
+  return createHash('sha256').update(value).digest('hex').slice(0, 12);
+}
+
+function unique(values) {
+  return [...new Set(values)];
+}
+
+async function waitForMcpStatus(appServer, threadId, requiredCases) {
   let lastStatus;
   for (let attempt = 0; attempt < 120; attempt += 1) {
     const response = await appServer.request('mcpServerStatus/list', {
@@ -172,19 +219,24 @@ async function waitForMcpStatus(appServer, threadId) {
     const rows = response?.data;
     if (!Array.isArray(rows)) throw new Error('MCP status did not return a data array');
     lastStatus = rows;
-    const names = new Set(rows.map((row) => row?.name));
-    if (
-      names.has('openaiDeveloperDocs') &&
-      names.has('aialra_google_email') &&
-      names.has('aialra_microsoft_email') &&
-      names.has('codex_apps')
-    ) {
+    const allToolsReady = requiredCases.every((testCase) =>
+      rows.some(
+        (row) =>
+          row?.name === testCase.server && row?.tools?.[testCase.tool]?.name === testCase.tool,
+      ),
+    );
+    if (allToolsReady) {
       return rows;
     }
     await delay(500);
   }
   throw new Error(
-    `required MCP servers did not become ready: ${JSON.stringify(lastStatus?.map((row) => row?.name))}`,
+    `required MCP tools did not become ready: ${JSON.stringify(
+      lastStatus?.map((row) => ({
+        name: row?.name,
+        tools: Object.keys(row?.tools ?? {}).sort(),
+      })),
+    )}`,
   );
 }
 

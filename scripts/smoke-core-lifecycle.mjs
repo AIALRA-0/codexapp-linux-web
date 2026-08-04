@@ -9,7 +9,7 @@ import { CodexAppServerClient } from '../packages/app-server-client/dist/index.j
 const codexBin = process.env.SMOKE_CODEX_BIN;
 if (codexBin === undefined) throw new Error('SMOKE_CODEX_BIN is required');
 
-const rendererVersion = process.env.SMOKE_RENDERER_VERSION ?? '26.721.81911';
+const rendererVersion = process.env.SMOKE_RENDERER_VERSION ?? '26.727.51351';
 const root = await mkdtemp(join(tmpdir(), 'codex-core-lifecycle-'));
 const codexHome = join(root, 'codex-home');
 const workspace = join(root, 'workspace');
@@ -52,6 +52,30 @@ function listedThreadIds(value) {
   return rows.map((row) => row?.id ?? row?.threadId).filter((id) => typeof id === 'string');
 }
 
+async function readPaginatedThread(client, threadId) {
+  const metadata = await client.request('thread/read', { threadId, includeTurns: false });
+  const resumed = await client.request('thread/resume', {
+    threadId,
+    excludeTurns: true,
+  });
+  const cursor = resumed?.turnsBackwardsCursor;
+  if (typeof cursor !== 'string' || cursor.length === 0) {
+    throw new Error('paginated thread resume did not return a turns cursor');
+  }
+  const page = await client.request('thread/turns/list', {
+    threadId,
+    cursor,
+    limit: 5,
+    itemsView: 'notLoaded',
+    sortDirection: 'desc',
+  });
+  const turns = page?.data ?? page?.turns;
+  if (!Array.isArray(turns) || turns.length === 0) {
+    throw new Error('paginated thread did not return its first turn');
+  }
+  return metadata;
+}
+
 async function waitForListedThread(client, threadId, { archived, expected = true, searchTerm }) {
   let lastIds = [];
   for (let attempt = 0; attempt < 50; attempt += 1) {
@@ -84,10 +108,14 @@ try {
   const started = await firstClient.request('thread/start', {
     cwd: workspace,
     ephemeral: false,
+    historyMode: 'paginated',
     experimentalRawEvents: false,
   });
   const startMs = performance.now() - startAt;
   const threadId = threadIdFrom(started);
+  if (started?.thread?.historyMode !== 'paginated') {
+    throw new Error('new durable thread did not use official paginated history');
+  }
 
   let turnStartOutcome = 'accepted';
   try {
@@ -110,7 +138,7 @@ try {
   let lastReadError;
   for (let attempt = 0; attempt < 50; attempt += 1) {
     try {
-      read = await firstClient.request('thread/read', { threadId, includeTurns: true });
+      read = await readPaginatedThread(firstClient, threadId);
       break;
     } catch (error) {
       lastReadError = error;
@@ -144,15 +172,22 @@ try {
   const restartAt = performance.now();
   await secondClient.start();
   const restartMs = performance.now() - restartAt;
-  const recovered = await secondClient.request('thread/read', { threadId, includeTurns: true });
+  const recovered = await secondClient.request('thread/read', {
+    threadId,
+    includeTurns: false,
+  });
   if ((recovered?.thread?.id ?? recovered?.id) !== threadId) {
     throw new Error('thread did not survive an app-server restart');
+  }
+  if (recovered?.thread?.historyMode !== 'paginated') {
+    throw new Error('paginated history mode did not survive an app-server restart');
   }
   await secondClient.request('thread/unarchive', { threadId });
   const restoredList = await waitForListedThread(secondClient, threadId, { archived: false });
   if (!listedThreadIds(restoredList).includes(threadId)) {
     throw new Error('unarchived thread did not return to the active list');
   }
+  await readPaginatedThread(secondClient, threadId);
   const searchMarker = `CodexApp lifecycle ${randomUUID()}`;
   await secondClient.request('thread/name/set', { threadId, name: searchMarker });
   const searchAt = performance.now();
@@ -178,13 +213,27 @@ try {
   if (forkedThreadId === threadId) {
     throw new Error('thread/fork returned the source thread id');
   }
-  const forkedRead = await secondClient.request('thread/read', {
-    threadId: forkedThreadId,
-    includeTurns: true,
-  });
+  const forkedRead = await readPaginatedThread(secondClient, forkedThreadId);
   if ((forkedRead?.thread?.id ?? forkedRead?.id) !== forkedThreadId) {
     throw new Error('forked thread could not be read back');
   }
+  if (forkedRead?.thread?.historyMode !== 'paginated') {
+    throw new Error('forked thread did not preserve official paginated history');
+  }
+  await secondClient.request('turn/start', {
+    threadId: forkedThreadId,
+    input: [
+      {
+        type: 'text',
+        text: 'CodexApp official host paginated fork smoke.',
+        text_elements: [],
+      },
+    ],
+  });
+  await secondClient.request('thread/name/set', {
+    threadId: forkedThreadId,
+    name: `${searchMarker} fork`,
+  });
   await waitForListedThread(secondClient, forkedThreadId, { archived: false });
   await secondClient.request('thread/delete', { threadId: forkedThreadId });
   await waitForListedThread(secondClient, forkedThreadId, {
@@ -235,6 +284,7 @@ try {
         'delete',
       ],
       turnStartOutcome,
+      historyMode: 'paginated',
       milliseconds: Object.fromEntries(
         Object.entries(observed).map(([key, value]) => [key, Math.round(value)]),
       ),

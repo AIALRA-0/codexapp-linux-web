@@ -10,7 +10,7 @@ import { OfficialDesktopState } from './official-desktop-state.js';
 
 const sourceRoot =
   process.env.OFFICIAL_TEST_SOURCE_ROOT ??
-  resolve(process.cwd(), '.official', 'releases', '26.721.81911', 'source');
+  resolve(process.cwd(), '.official', 'releases', '26.727.51351', 'source');
 const describeQualified = existsSync(join(sourceRoot, '.vite', 'build', 'worker.js'))
   ? describe
   : describe.skip;

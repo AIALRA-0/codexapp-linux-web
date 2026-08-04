@@ -18,6 +18,7 @@ function entry(threadId: string, sourceUpdatedAt: number, cwd = '/workspace'): T
     displayTitle: `Thread ${threadId}`,
     sourceCreatedAt: sourceUpdatedAt - 10,
     sourceUpdatedAt,
+    sourceRecencyAt: sourceUpdatedAt,
     cwd,
     sourceKind: 'cli',
     sourceDetail: null,
@@ -135,7 +136,7 @@ describe('OfficialThreadCatalog', () => {
     };
     const catalog = createCatalog({
       persisted: {
-        formatVersion: 1,
+        formatVersion: 2,
         revision: snapshot.revision,
         isComplete: snapshot.isComplete,
         entries: snapshot.entries,
@@ -182,7 +183,7 @@ describe('OfficialThreadCatalog', () => {
     );
     const catalog = createCatalog({
       persisted: {
-        formatVersion: 1,
+        formatVersion: 2,
         revision: 1,
         isComplete: true,
         entries,

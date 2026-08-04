@@ -8,3 +8,9 @@ include <tunables/global>
 profile codexapp_electron_network /srv/aialra/codexapp-official/electron-runtime/43.2.0/node_modules/electron/dist/electron flags=(unconfined) {
   userns,
 }
+
+# Keep the immediately previous production runtime available for rollback until
+# the new release has completed its observation window.
+profile codexapp_electron_network_rollback /srv/aialra/codexapp-official/electron-runtime/42.3.0/node_modules/electron/dist/electron flags=(unconfined) {
+  userns,
+}

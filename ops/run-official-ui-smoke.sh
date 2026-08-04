@@ -9,7 +9,7 @@ if [[ "$(id -u)" -ne 0 ]]; then
 fi
 
 application_root="${APPLICATION_ROOT:-/srv/aialra/apps/codexapp-official-web-host/current}"
-environment_file="/srv/aialra/config/secrets/codexapp-official-web-host.env"
+environment_file="${ENVIRONMENT_FILE:-/srv/aialra/config/secrets/codexapp-official-web-host.env}"
 runtime_parent="/srv/aialra/state"
 runtime_root="$(mktemp -d "$runtime_parent/codexapp-official-ui-smoke.XXXXXXXX")"
 nginx_source="$application_root/ops/nginx/codexapp-official-loopback-smoke.conf"
@@ -114,6 +114,7 @@ systemd-run \
   -- \
   /usr/bin/env \
   "${CODEXAPP_PINNED_OFFICIAL_ENV[@]}" \
+  "${CODEXAPP_HOST_SERVICE_ENV[@]}" \
   "PORT=$app_port" \
   "PUBLIC_ORIGIN=http://127.0.0.1:$proxy_port" \
   "RUNTIME_ROOT=$runtime_root" \

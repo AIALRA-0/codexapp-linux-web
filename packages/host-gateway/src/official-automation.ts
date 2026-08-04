@@ -739,11 +739,11 @@ export function loadQualifiedAutomationTemplates(sourceRoot: string): {
     throw new Error('qualified official main process module changed');
   }
   const source = readFileSync(resolve(buildRoot, candidates[0] as string), 'utf8');
-  const automationInstructions = extractTemplateLiteral(
+  const automationInstructions = extractTemplateLiteralContaining(
     source,
-    'var gi=`Response MUST end with a remark-directive block.',
+    'Response MUST end with a remark-directive block.',
   );
-  const heartbeatPromptTemplate = extractTemplateLiteral(source, '_i=`<heartbeat>');
+  const heartbeatPromptTemplate = extractTemplateLiteralContaining(source, '<heartbeat>');
   if (
     !automationInstructions.includes('::inbox-item{title=') ||
     !automationInstructions.includes('$CODEX_HOME/automations/<automation_id>/memory.md') ||
@@ -755,12 +755,12 @@ export function loadQualifiedAutomationTemplates(sourceRoot: string): {
   return { automationInstructions, heartbeatPromptTemplate };
 }
 
-function extractTemplateLiteral(source: string, marker: string): string {
+function extractTemplateLiteralContaining(source: string, marker: string): string {
   const markerIndex = source.indexOf(marker);
   if (markerIndex < 0 || source.indexOf(marker, markerIndex + marker.length) >= 0) {
     throw new Error(`qualified official template marker changed: ${marker.slice(0, 32)}`);
   }
-  const start = source.indexOf('`', markerIndex);
+  const start = source.lastIndexOf('`', markerIndex);
   if (start < 0) throw new Error('qualified official template start is missing');
   let output = '';
   let escaped = false;
@@ -776,7 +776,10 @@ function extractTemplateLiteral(source: string, marker: string): string {
       escaped = true;
       continue;
     }
-    if (character === '`') return output;
+    if (character === '`') {
+      if (start < markerIndex && markerIndex < index) return output;
+      throw new Error('qualified official template marker is outside the template');
+    }
     output += character;
     if (output.length > 100_000) throw new Error('qualified official template is too large');
   }

@@ -1,5 +1,5 @@
-import { open, readFile, stat } from 'node:fs/promises';
-import { extname } from 'node:path';
+import { open, readFile, readdir, realpath, stat } from 'node:fs/promises';
+import { extname, isAbsolute, join, relative, sep } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 import { resolveRuntimePath, type RuntimePathScope } from './runtime-path.js';
@@ -106,6 +106,76 @@ export async function readOfficialExistingPaths(
   return { existingPaths: existing.filter((path): path is string => path !== null) };
 }
 
+export async function readOfficialWorkspaceDirectoryEntries(
+  runtime: RuntimePathScope,
+  params: Record<string, unknown>,
+): Promise<{
+  workspaceRoot: string;
+  directoryPath: string;
+  parentPath: string | null;
+  entries: Array<{ isSymlink: boolean; name: string; path: string; type: 'directory' | 'file' }>;
+}> {
+  requireLocalHost(params.hostId);
+  const workspaceRootInput = requiredString(params.workspaceRoot, 'workspace root');
+  const canonicalWorkspaceRoot = await resolveRuntimePath(runtime, workspaceRootInput, false);
+  if (!(await stat(canonicalWorkspaceRoot)).isDirectory()) {
+    throw new Error('Workspace root must be a directory');
+  }
+  const directoryPath = normalizeWorkspaceRelativePath(params.directoryPath);
+  const requestedDirectory = join(canonicalWorkspaceRoot, directoryPath);
+  const canonicalDirectory = await resolveRuntimePath(runtime, requestedDirectory, false);
+  if (!isPathWithin(canonicalWorkspaceRoot, canonicalDirectory)) {
+    throw new Error('Workspace directory must stay within workspace root');
+  }
+  if (!(await stat(canonicalDirectory)).isDirectory()) {
+    throw new Error('Workspace directory path must be a directory');
+  }
+  const directoriesOnly = optionalBoolean(params.directoriesOnly, 'directories only') ?? false;
+  const includeHidden = optionalBoolean(params.includeHidden, 'include hidden') ?? false;
+  const entries = (
+    await Promise.all(
+      (await readdir(canonicalDirectory, { withFileTypes: true })).map(async (entry) => {
+        if (!includeHidden && entry.name.startsWith('.')) return null;
+        const entryPath = join(canonicalDirectory, entry.name);
+        const isSymlink = entry.isSymbolicLink();
+        let type: 'directory' | 'file' = entry.isDirectory() ? 'directory' : 'file';
+        if (isSymlink) {
+          try {
+            if ((await stat(entryPath)).isDirectory()) {
+              const canonicalTarget = await realpath(entryPath);
+              if (!isPathWithin(canonicalWorkspaceRoot, canonicalTarget)) return null;
+              type = 'directory';
+            }
+          } catch {
+            return null;
+          }
+        }
+        if (directoriesOnly && type !== 'directory') return null;
+        return {
+          isSymlink,
+          name: entry.name,
+          path: toWorkspaceRelativePath(relative(canonicalWorkspaceRoot, entryPath)),
+          type,
+        };
+      }),
+    )
+  )
+    .filter((entry): entry is NonNullable<typeof entry> => entry !== null)
+    .sort((left, right) =>
+      left.type === right.type
+        ? left.name.localeCompare(right.name)
+        : left.type === 'directory'
+          ? -1
+          : 1,
+    );
+  return {
+    workspaceRoot: workspaceRootInput,
+    directoryPath,
+    parentPath: parentWorkspaceRelativePath(directoryPath),
+    entries,
+  };
+}
+
 async function resolveDesktopPath(runtime: RuntimePathScope, input: unknown): Promise<string> {
   const value = requiredString(input, 'desktop file path');
   let path = value;
@@ -155,6 +225,39 @@ function optionalByteLimit(value: unknown, label: string): number | null {
     throw new TypeError(`${label} must be a non-negative integer`);
   }
   return value as number;
+}
+
+function optionalBoolean(value: unknown, label: string): boolean | null {
+  if (value === undefined || value === null) return null;
+  if (typeof value !== 'boolean') throw new TypeError(`${label} must be a boolean`);
+  return value;
+}
+
+function normalizeWorkspaceRelativePath(value: unknown): string {
+  if (value === undefined || value === null || value === '' || value === '.') return '';
+  const input = requiredString(value, 'workspace directory path').replaceAll('\\', '/');
+  if (isAbsolute(input) || input.split('/').some((segment) => segment === '..')) {
+    throw new Error('Workspace directory path must be relative');
+  }
+  return toWorkspaceRelativePath(input);
+}
+
+function toWorkspaceRelativePath(value: string): string {
+  return value.replaceAll('\\', '/').replace(/^\.\/+|\/+$/gu, '');
+}
+
+function parentWorkspaceRelativePath(value: string): string | null {
+  if (value.length === 0) return null;
+  const segments = value.split('/').filter(Boolean);
+  return segments.length === 1 ? '' : segments.slice(0, -1).join('/');
+}
+
+function isPathWithin(root: string, candidate: string): boolean {
+  const difference = relative(root, candidate);
+  return (
+    difference === '' ||
+    (difference !== '..' && !difference.startsWith(`..${sep}`) && !isAbsolute(difference))
+  );
 }
 
 function detectMimeType(bytes: Uint8Array, path: string): string | null {

@@ -95,6 +95,14 @@ describe('official web-only desktop fallbacks', () => {
       estimatedSavedMs: 0,
       rolloutCountWithCompletedTurns: 0,
     });
+    expect(officialWebStaticDesktopResponse('native-desktop-apps')).toEqual({ apps: [] });
+    expect(officialWebStaticDesktopResponse('native-desktop-app-by-bundle-id')).toEqual({
+      app: null,
+    });
+    expect(officialWebStaticDesktopResponse('native-desktop-app-icon')).toEqual({
+      iconSmall: null,
+    });
+    expect(officialWebStaticDesktopResponse('computer-use-frontmost-window')).toBeNull();
     expect(officialWebStaticDesktopResponse('unknown-method')).toBeUndefined();
   });
 });

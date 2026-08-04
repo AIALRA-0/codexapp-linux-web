@@ -12,24 +12,31 @@ application_root="${APPLICATION_ROOT:-/srv/aialra/apps/codexapp-official-web-hos
 source_profile="$application_root/ops/apparmor/codexapp-electron-network"
 target_profile="/etc/apparmor.d/codexapp-electron-network"
 electron_bin="/srv/aialra/codexapp-official/electron-runtime/43.2.0/node_modules/electron/dist/electron"
+rollback_electron_bin="/srv/aialra/codexapp-official/electron-runtime/42.3.0/node_modules/electron/dist/electron"
 service_user="${CODEXAPP_SERVICE_USER:-codexappweb}"
+
+validate_electron_bin() {
+  local candidate="$1"
+  if [[ ! -x "$candidate" || -L "$candidate" ]]; then
+    echo "pinned Electron network runtime is missing or symbolic: $candidate" >&2
+    exit 1
+  fi
+  if [[ "$(stat -c '%U:%G' "$candidate")" != "root:root" ]]; then
+    echo "pinned Electron network runtime is not root-owned: $candidate" >&2
+    exit 1
+  fi
+  if find "$(dirname "$candidate")" -maxdepth 1 -perm /022 -print -quit | grep -q .; then
+    echo "pinned Electron network runtime directory is writable by group or other: $candidate" >&2
+    exit 1
+  fi
+}
 
 if [[ ! -f "$source_profile" || -L "$source_profile" ]]; then
   echo "managed Electron network AppArmor profile is missing or symbolic" >&2
   exit 1
 fi
-if [[ ! -x "$electron_bin" || -L "$electron_bin" ]]; then
-  echo "pinned Electron network runtime is missing or symbolic" >&2
-  exit 1
-fi
-if [[ "$(stat -c '%U:%G' "$electron_bin")" != "root:root" ]]; then
-  echo "pinned Electron network runtime is not root-owned" >&2
-  exit 1
-fi
-if find "$(dirname "$electron_bin")" -maxdepth 1 -perm /022 -print -quit | grep -q .; then
-  echo "pinned Electron network runtime directory is writable by group or other" >&2
-  exit 1
-fi
+validate_electron_bin "$electron_bin"
+validate_electron_bin "$rollback_electron_bin"
 if [[ -e "$target_profile" || -L "$target_profile" ]]; then
   if [[ ! -f "$target_profile" || -L "$target_profile" ]]; then
     echo "existing Electron network AppArmor profile is not a regular file" >&2

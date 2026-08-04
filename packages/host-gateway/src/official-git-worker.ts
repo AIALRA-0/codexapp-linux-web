@@ -17,6 +17,10 @@ import { Readable, Writable } from 'node:stream';
 import { pipeline } from 'node:stream/promises';
 import { MessageChannel, Worker, type MessagePort } from 'node:worker_threads';
 
+import {
+  officialGitExportNames,
+  readQualifiedOfficialVersion,
+} from './official-export-contract.js';
 import { resolveOfficialSharedModulePath } from './official-shared-module.js';
 
 interface OfficialRpcSession {
@@ -89,8 +93,7 @@ export class OfficialGithubService {
   readonly #service: OfficialGithubServiceTarget;
 
   constructor(options: OfficialGitWorkerOptions) {
-    const sharedPath = resolveOfficialSharedModulePath(options.sourceRoot);
-    const shared = require(sharedPath) as Partial<OfficialSharedModule>;
+    const shared = loadOfficialGitModule(options.sourceRoot);
     if (typeof shared.D !== 'function' || typeof shared.F !== 'function') {
       throw new Error('qualified official GitHub service exports changed');
     }
@@ -258,9 +261,8 @@ export class OfficialGitWorker extends EventEmitter {
       mkdir(join(this.options.userRoot, 'home'), { recursive: true, mode: 0o700 }),
       mkdir(join(this.options.userRoot, 'tmp'), { recursive: true, mode: 0o700 }),
     ]);
-    const sharedPath = resolveOfficialSharedModulePath(this.options.sourceRoot);
     const workerPath = join(this.options.sourceRoot, '.vite', 'build', 'worker.js');
-    const shared = require(sharedPath) as Partial<OfficialSharedModule>;
+    const shared = loadOfficialGitModule(this.options.sourceRoot);
     if (typeof shared.At !== 'function' || typeof shared.I !== 'function') {
       throw new Error('qualified official worker RPC exports changed');
     }
@@ -370,6 +372,18 @@ export class OfficialGitWorker extends EventEmitter {
       pending.signal.removeEventListener('abort', pending.abortListener);
     }
   }
+}
+
+function loadOfficialGitModule(sourceRoot: string): Partial<OfficialSharedModule> {
+  const sharedPath = resolveOfficialSharedModulePath(sourceRoot);
+  const raw = require(sharedPath) as Record<string, unknown>;
+  const names = officialGitExportNames(readQualifiedOfficialVersion(sourceRoot));
+  return {
+    At: raw[names.attachRpc] as OfficialSharedModule['At'],
+    D: raw[names.githubService] as OfficialSharedModule['D'],
+    F: raw[names.gitManager] as OfficialSharedModule['F'],
+    I: raw[names.localExecutionHostRpc] as OfficialSharedModule['I'],
+  };
 }
 
 class LocalGithubAppServerClient {

@@ -1,6 +1,7 @@
 import { createHash } from 'node:crypto';
 import { createReadStream } from 'node:fs';
-import { readFile, stat } from 'node:fs/promises';
+import { readFile, readdir, stat } from 'node:fs/promises';
+import { isAbsolute, join, relative, resolve, sep } from 'node:path';
 import { performance } from 'node:perf_hooks';
 
 import { CodexAppServerClient } from '../packages/app-server-client/dist/index.js';
@@ -9,9 +10,17 @@ const codexBin = requiredEnvironment('VERIFY_CODEX_BIN');
 const codexHome = requiredEnvironment('VERIFY_CODEX_HOME');
 const recordsPath = requiredEnvironment('VERIFY_RECORDS');
 const workspace = requiredEnvironment('VERIFY_WORKSPACE');
-const rendererVersion = process.env.VERIFY_RENDERER_VERSION ?? '26.721.81911';
+const rendererVersion = process.env.VERIFY_RENDERER_VERSION ?? '26.727.51351';
 const migration = JSON.parse(await readFile(recordsPath, 'utf8'));
-if (!Array.isArray(migration?.records)) throw new Error('migration records are missing');
+const records = Array.isArray(migration?.threads) ? migration.threads : migration?.records;
+if (migration?.schemaVersion !== 1 || !Array.isArray(records)) {
+  throw new Error('migration thread manifest is invalid');
+}
+const workspaceProjectsRoot = resolveWorkspaceProjectsRoot(
+  workspace,
+  migration.workspaceRelativeRoot,
+  migration.targetWorkspace,
+);
 
 const client = new CodexAppServerClient({
   codexBin,
@@ -38,16 +47,22 @@ client.on('stderr', (line) => {
 const results = [];
 try {
   await client.start();
-  for (const record of migration.records) {
+  for (const record of records) {
     const startedAt = performance.now();
+    const targetCwd = resolveRecordWorkspace(workspaceProjectsRoot, record);
+    const targetRollout = await findRollout(codexHome, record.threadId);
+    const before = await fileDigest(targetRollout);
+    if (before.sha256 !== record.rolloutSha256) {
+      throw new Error(`stored rollout digest differs for ${record.label}`);
+    }
     const metadata = await client.request('thread/read', {
       threadId: record.threadId,
       includeTurns: false,
     });
     const resumed = await client.request('thread/resume', {
       threadId: record.threadId,
-      path: record.targetRollout,
-      cwd: record.targetCwd,
+      path: targetRollout,
+      cwd: targetCwd,
       excludeTurns: true,
       initialTurnsPage: {
         limit: 1,
@@ -61,23 +76,17 @@ try {
       throw new Error(`app-server returned the wrong thread for ${record.threadId}`);
     }
     const resumedCwd = resumed?.cwd ?? resumedThread?.cwd;
-    if (resumedCwd !== record.targetCwd) {
-      throw new Error(
-        `app-server resumed ${record.threadId} in ${String(resumedCwd)} instead of ${record.targetCwd}`,
-      );
+    if (resumedCwd !== targetCwd) {
+      throw new Error(`app-server resumed ${record.label} in the wrong workspace`);
     }
-    const digest = await fileDigest(record.targetRollout);
-    if (digest.sha256 !== record.rolloutSha256 || digest.bytes !== record.rolloutBytes) {
-      throw new Error(`read-only resume changed the rollout for ${record.threadId}`);
+    const after = await fileDigest(targetRollout);
+    if (after.sha256 !== before.sha256 || after.bytes !== before.bytes) {
+      throw new Error(`read-only resume changed the rollout for ${record.label}`);
     }
     results.push({
       label: record.label,
-      threadId: record.threadId,
-      sourceMetadataCwd: metadataThread?.cwd,
-      resumedCwd,
       historyMode: metadataThread?.historyMode ?? resumedThread?.historyMode,
-      rolloutBytes: digest.bytes,
-      rolloutSha256: digest.sha256,
+      rolloutBytes: after.bytes,
       readAndResumeMs: Math.round(performance.now() - startedAt),
     });
   }
@@ -115,4 +124,100 @@ async function fileDigest(path) {
     stream.on('error', rejectDigest);
   });
   return { bytes: metadata.size, sha256: hash.digest('hex') };
+}
+
+function resolveWorkspaceProjectsRoot(workspaceRoot, relativeRoot, storedAbsoluteRoot) {
+  if (typeof relativeRoot === 'string' && relativeRoot.length > 0 && !isAbsolute(relativeRoot)) {
+    const segments = relativeRoot.split(/[\\/]+/u).filter(Boolean);
+    if (segments[0] === 'workspace') segments.shift();
+    return resolveInside(workspaceRoot, segments.join(sep), 'workspace project root');
+  }
+  if (typeof storedAbsoluteRoot === 'string' && isAbsolute(storedAbsoluteRoot)) {
+    return resolveAbsoluteInside(
+      workspaceRoot,
+      storedAbsoluteRoot,
+      'stored workspace project root',
+    );
+  }
+  throw new Error('migration workspace project root is missing or invalid');
+}
+
+function resolveRecordWorkspace(workspaceProjectsRoot, record) {
+  if (typeof record?.workspace === 'string' && record.workspace.length > 0) {
+    return resolveInside(workspaceProjectsRoot, record.workspace, 'thread workspace');
+  }
+  if (typeof record?.targetCwd === 'string' && isAbsolute(record.targetCwd)) {
+    return resolveAbsoluteInside(
+      workspaceProjectsRoot,
+      record.targetCwd,
+      'stored thread workspace',
+    );
+  }
+  throw new Error(
+    `thread workspace is missing for ${String(record?.label ?? 'unlabelled record')}`,
+  );
+}
+
+function resolveInside(parent, child, label) {
+  if (typeof child !== 'string' || child.length === 0 || isAbsolute(child)) {
+    throw new Error(`${label} must be a non-empty relative path`);
+  }
+  const parentPath = resolve(parent);
+  const childPath = resolve(parentPath, child);
+  const childRelative = relative(parentPath, childPath);
+  if (
+    childRelative === '' ||
+    childRelative.startsWith(`..${sep}`) ||
+    childRelative === '..' ||
+    isAbsolute(childRelative)
+  ) {
+    throw new Error(`${label} escapes its allowed root`);
+  }
+  return childPath;
+}
+
+function resolveAbsoluteInside(parent, child, label) {
+  if (typeof child !== 'string' || !isAbsolute(child)) {
+    throw new Error(`${label} must be an absolute path`);
+  }
+  const parentPath = resolve(parent);
+  const childPath = resolve(child);
+  const childRelative = relative(parentPath, childPath);
+  if (
+    childRelative === '' ||
+    childRelative.startsWith(`..${sep}`) ||
+    childRelative === '..' ||
+    isAbsolute(childRelative)
+  ) {
+    throw new Error(`${label} escapes its allowed root`);
+  }
+  return childPath;
+}
+
+async function findRollout(home, threadId) {
+  if (typeof threadId !== 'string' || !/^[0-9a-f-]{36}$/iu.test(threadId)) {
+    throw new Error('migration thread id is invalid');
+  }
+  const sessionsRoot = join(resolve(home), 'sessions');
+  const suffix = `-${threadId}.jsonl`;
+  const matches = [];
+  await walk(sessionsRoot, async (path, entry) => {
+    if (entry.isFile() && entry.name.endsWith(suffix)) matches.push(path);
+  });
+  if (matches.length !== 1) {
+    throw new Error(
+      `expected one stored rollout for a migrated thread, found ${String(matches.length)}`,
+    );
+  }
+  return matches[0];
+}
+
+async function walk(directory, visit) {
+  const entries = await readdir(directory, { withFileTypes: true });
+  for (const entry of entries) {
+    if (entry.isSymbolicLink()) continue;
+    const path = join(directory, entry.name);
+    if (entry.isDirectory()) await walk(path, visit);
+    else await visit(path, entry);
+  }
 }

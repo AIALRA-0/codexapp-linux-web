@@ -1,5 +1,9 @@
 import { createRequire } from 'node:module';
 
+import {
+  officialDeveloperInstructionsExportName,
+  readQualifiedOfficialVersion,
+} from './official-export-contract.js';
 import { resolveOfficialSharedModulePath } from './official-shared-module.js';
 
 export interface OfficialDeveloperInstructionsInput {
@@ -17,9 +21,8 @@ export interface OfficialDeveloperInstructionsInput {
   threadId: string | null;
 }
 
-interface OfficialDesktopRuntimeModule {
-  an?: (input: OfficialDeveloperInstructionsInput) => unknown;
-}
+type OfficialDesktopRuntimeModule = Record<string, unknown>;
+type OfficialDeveloperInstructionsBuilder = (input: OfficialDeveloperInstructionsInput) => unknown;
 
 const require = createRequire(import.meta.url);
 const modules = new Map<string, OfficialDesktopRuntimeModule>();
@@ -34,10 +37,13 @@ export function buildOfficialDeveloperInstructions(
     officialModule = require(modulePath) as OfficialDesktopRuntimeModule;
     modules.set(modulePath, officialModule);
   }
-  if (typeof officialModule.an !== 'function') {
+  const version = readQualifiedOfficialVersion(officialSourceRoot);
+  const exportName = officialDeveloperInstructionsExportName(version);
+  const builder = officialModule[exportName];
+  if (typeof builder !== 'function') {
     throw new Error('qualified official developer-instructions builder is missing');
   }
-  const instructions = officialModule.an(input);
+  const instructions = (builder as OfficialDeveloperInstructionsBuilder)(input);
   if (typeof instructions !== 'string') {
     throw new Error('qualified official developer-instructions builder returned invalid output');
   }

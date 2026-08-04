@@ -1,15 +1,14 @@
-import { createRequire } from 'node:module';
 import { readFile } from 'node:fs/promises';
 import { performance } from 'node:perf_hooks';
 
 import { CodexAppServerClient } from '../packages/app-server-client/dist/index.js';
-import { resolveOfficialSharedModulePath } from '../packages/host-gateway/dist/official-shared-module.js';
+import { loadQualifiedThreadCatalogContract } from '../packages/host-gateway/dist/official-thread-catalog-contract.js';
 
 const codexBin = requiredEnvironment('VERIFY_CODEX_BIN');
 const codexHome = requiredEnvironment('VERIFY_CODEX_HOME');
 const workspace = requiredEnvironment('VERIFY_WORKSPACE');
 const officialSourceRoot = requiredEnvironment('VERIFY_OFFICIAL_SOURCE_ROOT');
-const rendererVersion = process.env.VERIFY_RENDERER_VERSION ?? '26.721.81911';
+const rendererVersion = process.env.VERIFY_RENDERER_VERSION ?? '26.727.51351';
 const recordPaths = requiredEnvironment('VERIFY_RECORDS')
   .split(',')
   .map((value) => value.trim())
@@ -19,9 +18,9 @@ if (recordPaths.length === 0) throw new Error('VERIFY_RECORDS must contain at le
 const expected = new Map();
 for (const recordPath of recordPaths) {
   const migration = JSON.parse(await readFile(recordPath, 'utf8'));
-  if (!Array.isArray(migration?.records))
-    throw new Error(`migration records are missing: ${recordPath}`);
-  for (const record of migration.records) {
+  const records = migration?.threads ?? migration?.records;
+  if (!Array.isArray(records)) throw new Error(`migration threads are missing: ${recordPath}`);
+  for (const record of records) {
     const threadId = requiredString(record?.threadId, 'migration thread id');
     const label = requiredString(record?.label, 'migration thread label');
     if (expected.has(threadId)) throw new Error(`duplicate migration thread: ${label}`);
@@ -29,9 +28,10 @@ for (const recordPath of recordPaths) {
   }
 }
 
-const require = createRequire(import.meta.url);
-const shared = require(resolveOfficialSharedModulePath(officialSourceRoot));
-if (!Array.isArray(shared?.Fi)) throw new Error('official thread source filters are unavailable');
+const officialContract = loadQualifiedThreadCatalogContract(officialSourceRoot);
+if (!Array.isArray(officialContract.sourceKinds)) {
+  throw new Error('official thread source filters are unavailable');
+}
 
 const client = new CodexAppServerClient({
   codexBin,
@@ -64,7 +64,7 @@ try {
       parentThreadId: null,
       sortKey: 'updated_at',
       sortDirection: 'desc',
-      sourceKinds: shared.Fi,
+      sourceKinds: officialContract.sourceKinds,
       useStateDbOnly: true,
     });
     const rows = response?.data ?? response?.threads;
@@ -97,7 +97,7 @@ try {
       rendererVersion,
       expected: expected.size,
       listed: listed.size,
-      officialSourceFilters: shared.Fi.length,
+      officialSourceFilters: officialContract.sourceKinds.length,
       elapsedMs: Math.round(performance.now() - startedAt),
     })}\n`,
   );

@@ -55,6 +55,83 @@ Chromium's sandbox or weakening the host's filesystem isolation. The display is
 a wanted sidecar rather than a required dependency, so a display failure cannot
 restart or take down the main web host.
 
+Create the two owner-only shopping-browser directories under the runtime root
+and set all five `AIALRA_SHOPPING_BROWSER_*` values from the environment example.
+The plugin manifest imports those values by name; copying the plugin without
+them makes the server appear in the MCP list but leaves its tools unavailable.
+Keep the plugin cache byte-for-byte unchanged, then add the server-only display,
+proxy environment names, and startup window to each user's Codex config with:
+
+```sh
+node ops/configure-shopping-browser-mcp.mjs \
+  --codex-home /srv/aialra/state/codexapp-official/users/USER_KEY/codex-home \
+  --plugin-root /srv/aialra/state/codexapp-official/users/USER_KEY/codex-home/plugins/cache/personal/aialra-shopping-browser/VERSION
+```
+
+The migrated GitHub, Gmail, Google Drive, and Outlook skill packages remain
+official plugin bytes in the user's cache. Enable them through the user config
+without modifying the packages themselves:
+
+```sh
+node ops/enable-migrated-skill-plugins.mjs \
+  --codex-home /srv/aialra/state/codexapp-official/users/USER_KEY/codex-home
+```
+
+Both config helpers create one owner-only backup, replace only the tables they
+manage, write atomically, and are safe to run again after an upgrade.
+
+The migrated local Google MCP launcher is pinned to the user's server workspace.
+Keep Google account metadata and refresh credentials outside that workspace and
+outside Git, then configure the server with:
+
+```sh
+node ops/configure-migrated-local-mcp.mjs \
+  --codex-home /srv/aialra/state/codexapp-official/users/USER_KEY/codex-home \
+  --project-root /srv/aialra/state/codexapp-official/users/USER_KEY/workspace/projects/aialra-email \
+  --private-root /srv/aialra/state/codexapp-official/users/USER_KEY/private/mcp
+```
+
+The helper also removes the retired `aialra_microsoft_email` table. Its source
+RPI Microsoft 365 account is no longer active, so that local connection must not
+remain visible or block deployment. This does not disable the official Outlook
+plugin or a separately connected active Outlook account.
+
+The pre-promotion capability gate uses
+`manifests/server-capabilities-26.727.51351.json`. It fails if any of the 51
+migrated Skills, four MCP servers, or required representative tools are absent:
+
+```sh
+VERIFY_CAPABILITIES_MANIFEST="$APPLICATION_ROOT/manifests/server-capabilities-26.727.51351.json" \
+  node "$APPLICATION_ROOT/scripts/verify-codex-capabilities.mjs"
+```
+
+The official Codex app-server also opens the ChatGPT Apps MCP and OpenAI
+Developer Docs MCP itself. Datacenter egress can reject or stall those requests
+before local MCP tools finish loading. Production uses the Ubuntu `privoxy`
+package as a loopback HTTP CONNECT bridge on port 40001 and Cloudflare WARP in
+local SOCKS proxy mode on port 40000. Privoxy forwards only `.chatgpt.com` and
+`.openai.com` into WARP; every other hostname remains direct. Set `HTTPS_PROXY`
+and `NO_PROXY` as shown in the environment example. This changes no official
+Codex endpoint, request, token, or MCP protocol.
+
+After accepting the WARP terms and configuring proxy mode, install the checked-in
+bridge with:
+
+```sh
+apt-get install privoxy
+APPLICATION_ROOT=/srv/aialra/releases/codexapp-official-web-host/VERSION \
+  /srv/aialra/releases/codexapp-official-web-host/VERSION/ops/install-openai-egress-proxy.sh
+```
+
+Install the host unit before promotion. This also creates the stable owner-only
+service home used by Chrome and other desktop-compatible tools. It deliberately
+does not restart the active host; the guarded promotion performs that step:
+
+```sh
+APPLICATION_ROOT=/srv/aialra/releases/codexapp-official-web-host/VERSION \
+  /srv/aialra/releases/codexapp-official-web-host/VERSION/ops/install-host-service.sh
+```
+
 Do not use `chmod -R a-w` alone: extraction may preserve owner-only source
 manifest files and cause a production-only startup failure. Do not make the
 qualification manifest world-readable merely to avoid that failure.
@@ -144,9 +221,11 @@ only method, route family, query-key names, status, response type, and duration;
 they never record query values, bodies, tokens, or resource identifiers.
 
 `OPENAI_EGRESS_PROXY_URL` remains an optional loopback-only fallback in the
-configuration schema, but it is not configured in production. Cloudflare WARP
-was removed from the service dependency after the authenticated Electron route
-returned HTTP 200 with valid JSON before and after promotion.
+configuration schema, but it is not configured in production. The Projects
+route therefore does not use Cloudflare WARP. This is separate from the scoped
+`HTTPS_PROXY` loopback bridge above: the official Apps and Developer Docs MCP
+still use that bridge for OpenAI-owned hosts, while Projects and all unrelated
+VPS traffic remain outside it.
 
 The service readiness endpoint becomes unhealthy below 5 GiB free, while
 history reads stay available and new conversation-growing operations are

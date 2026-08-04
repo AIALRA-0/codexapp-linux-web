@@ -10,6 +10,7 @@ import {
   readOfficialDesktopFileBinary,
   readOfficialDesktopFileMetadata,
   readOfficialExistingPaths,
+  readOfficialWorkspaceDirectoryEntries,
 } from './desktop-files.js';
 
 const roots: string[] = [];
@@ -112,6 +113,43 @@ describe('official desktop file requests', () => {
     await expect(
       readOfficialDesktopFileBinary(runtime, { hostId: 'local', path: linkPath }),
     ).rejects.toThrow('resolves outside the user root');
+  });
+
+  it('lists the official workspace browser shape without hidden files or symlink escapes', async () => {
+    const runtime = await createRuntime();
+    const project = join(runtime.workspaceRoot, 'project');
+    const folder = join(project, 'folder');
+    await mkdir(folder, { recursive: true });
+    await Promise.all([
+      writeFile(join(project, 'visible.txt'), 'visible'),
+      writeFile(join(project, '.hidden.txt'), 'hidden'),
+    ]);
+    const outsideRoot = await mkdtemp(join(tmpdir(), 'codexapp-directory-outside-'));
+    roots.push(outsideRoot);
+    await symlink(outsideRoot, join(project, 'outside-folder'));
+
+    await expect(
+      readOfficialWorkspaceDirectoryEntries(runtime, {
+        hostId: 'local',
+        workspaceRoot: project,
+        directoryPath: '',
+      }),
+    ).resolves.toEqual({
+      workspaceRoot: project,
+      directoryPath: '',
+      parentPath: null,
+      entries: [
+        { isSymlink: false, name: 'folder', path: 'folder', type: 'directory' },
+        { isSymlink: false, name: 'visible.txt', path: 'visible.txt', type: 'file' },
+      ],
+    });
+    await expect(
+      readOfficialWorkspaceDirectoryEntries(runtime, {
+        hostId: 'local',
+        workspaceRoot: project,
+        directoryPath: '../',
+      }),
+    ).rejects.toThrow('must be relative');
   });
 });
 

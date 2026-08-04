@@ -52,6 +52,7 @@ import {
   readOfficialDesktopFileBinary,
   readOfficialDesktopFileMetadata,
   readOfficialExistingPaths,
+  readOfficialWorkspaceDirectoryEntries,
 } from './desktop-files.js';
 import { TurnLatencyTracker } from './turn-latency.js';
 import { assertStorageAvailableForMethod } from './storage.js';
@@ -60,7 +61,7 @@ import { OfficialThreadCatalog } from './thread-catalog.js';
 import { ThreadMetadataGenerator } from './thread-metadata-generation.js';
 
 const execFileAsync = promisify(execFile);
-const THREAD_CATALOG_STATE_KEY = '__browser-host-official-thread-catalog-v1';
+const THREAD_CATALOG_STATE_KEY = '__browser-host-official-thread-catalog-v2';
 const PINNED_THREAD_IDS_KEY = 'pinned-thread-ids';
 const INITIAL_SIDEBAR_GLOBAL_STATE_KEYS = [
   'desktop-first-seen-at-ms',
@@ -1354,6 +1355,18 @@ export class UserRuntime extends EventEmitter {
         return readOfficialDesktopFileBinary(this, params);
       case 'paths-exist':
         return readOfficialExistingPaths(this, params);
+      case 'workspace-directory-entries':
+        return readOfficialWorkspaceDirectoryEntries(this, params);
+      case 'remote-workspace-directory-entries':
+        throw new Error('Remote execution hosts are not configured');
+      case 'auto-deny-some-permissions':
+        if (params.hostId !== undefined && params.hostId !== 'local') {
+          throw new Error('Only the local execution host is available');
+        }
+        return this.officialDesktopState.request('permissions.auto-deny', {
+          permissions: params.permissions,
+          threadDetailLevel: params.threadDetailLevel,
+        });
       case 'set-global-state':
         if (typeof params.key !== 'string') throw new Error('global state key is required');
         await this.#state.set('globalState', params.key, params.value);
@@ -1993,7 +2006,7 @@ export function initialRouteForAuthMethod(authMethod: unknown): '/' | '/login' {
 
 export function officialWebStaticDesktopResponse(
   method: string,
-): Record<string, unknown> | undefined {
+): Record<string, unknown> | null | undefined {
   switch (method) {
     case 'recommended-skills':
       return { skills: [] };
@@ -2013,6 +2026,16 @@ export function officialWebStaticDesktopResponse(
         estimatedSavedMs: 0,
         rolloutCountWithCompletedTurns: 0,
       };
+    case 'native-desktop-apps':
+      return { apps: [] };
+    case 'native-desktop-app-by-bundle-id':
+      return { app: null };
+    case 'native-desktop-app-icon':
+    case 'computer-use-native-desktop-app-icon':
+      return { iconSmall: null };
+    case 'computer-use-frontmost-window':
+    case 'computer-use-start-capture':
+      return null;
     default:
       return undefined;
   }

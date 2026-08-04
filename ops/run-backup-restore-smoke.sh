@@ -9,7 +9,7 @@ if [[ "$(id -u)" -ne 0 ]]; then
 fi
 
 application_root="${APPLICATION_ROOT:-/srv/aialra/apps/codexapp-official-web-host/current}"
-environment_file="/srv/aialra/config/secrets/codexapp-official-web-host.env"
+environment_file="${ENVIRONMENT_FILE:-/srv/aialra/config/secrets/codexapp-official-web-host.env}"
 runtime_parent="/srv/aialra/state"
 runtime_root="$(mktemp -d "$runtime_parent/codexapp-backup-restore-smoke.XXXXXXXX")"
 state_file="/tmp/codexapp-backup-restore-smoke-$$.json"
@@ -101,6 +101,7 @@ start_isolated_host() {
     -- \
     /usr/bin/env \
     "${CODEXAPP_PINNED_OFFICIAL_ENV[@]}" \
+    "${CODEXAPP_HOST_SERVICE_ENV[@]}" \
     "PORT=$app_port" \
     "PUBLIC_ORIGIN=$public_origin" \
     "RUNTIME_ROOT=$runtime_root" \

@@ -6,7 +6,7 @@
 
 [![CI](https://github.com/AIALRA-0/codexapp-linux-web/actions/workflows/ci.yml/badge.svg)](https://github.com/AIALRA-0/codexapp-linux-web/actions/workflows/ci.yml)
 [![Node.js 24](https://img.shields.io/badge/Node.js-24-339933?logo=nodedotjs&logoColor=white)](https://nodejs.org/)
-[![Official renderer](https://img.shields.io/badge/renderer-26.721.81911-111111)](./manifests/official-26.721.81911.json)
+[![Official renderer](https://img.shields.io/badge/renderer-26.727.51351-111111)](./manifests/official-26.727.51351.json)
 [![License: MIT](https://img.shields.io/badge/code-MIT-blue.svg)](./LICENSE)
 
 [它解决什么](#它解决什么) · [真实界面](#真实界面) · [实现方式](#实现方式) · [验证结果](#验证结果) · [部署与升级](#部署与升级) · [数据边界](#数据边界)
@@ -70,7 +70,7 @@ flowchart TD
 | 页面     | 新任务、拉取请求、站点、已安排、插件和全部设置页面                   |
 | 运维     | 备份、恢复、不可变发布、健康检查和失败自动回滚                       |
 
-自动化仓库检查当前覆盖 44 个测试文件和 218 个测试
+自动化仓库检查当前覆盖 45 个测试文件和 222 个测试
 
 真实运行环境还会执行官方窗口、任务生命周期、MCP、权限、文件、终端、Git、浏览器、备份恢复和持久化烟雾测试
 
@@ -119,20 +119,22 @@ VPS 使用普通服务器网络请求访问 ChatGPT 项目列表时会收到 Clo
 
 - 只允许官方 `chatgpt.com` 主机和 `/backend-api/` 路径，拒绝自定义端口、Cookie 和跳转到其他主机
 - 按官方请求保留 `GET`、`POST`、`PUT`、`PATCH`、`DELETE`、`HEAD` 和 `OPTIONS`，并支持流式响应
-- 使用 Electron 43.2.0 和 Chromium 150.0.7871.129，与官方客户端的 Chromium 150 主版本一致
+- 使用独立、锁定版本的 Electron 43.2.0 和 Chromium 150.0.7871.129；它只负责项目列表网络请求，不渲染界面，也不读写对话
 - 进程长期复用，避免每次点击都重新启动浏览器内核
 - 不继承宿主服务的账号和服务器密钥，OpenAI 访问令牌只通过父子进程管道传递
 - 不保存或携带浏览器 Cookie，不复用账号相关响应缓存
 - 保留 Chromium 用户命名空间沙箱，不使用 `--no-sandbox`
 - Ubuntu 只对这个不可变、由 root 管理的可执行文件开放用户命名空间，系统全局限制保持开启
 
-版本对应关系来自 [Electron 43.2.0 官方发布记录](https://releases.electronjs.org/release/v43.2.0)，Ubuntu 的按文件开放方式来自 [Chromium 官方 AppArmor 说明](https://chromium.googlesource.com/chromium/src/+/main/docs/security/apparmor-userns-restrictions.md)
+官方 macOS 包声明 Electron 42.3.0 / Chromium 150.0.7871.182，但公开 Linux Electron 42.3.0 实际携带的是 Chromium 148，不能冒充官方包的组合。Linux 网络进程因此使用已经真实验证、同为 Chromium 150 的 [Electron 43.2.0](https://releases.electronjs.org/release/v43.2.0)；Ubuntu 的按文件开放方式来自 [Chromium 官方 AppArmor 说明](https://chromium.googlesource.com/chromium/src/+/main/docs/security/apparmor-userns-restrictions.md)
 
 真实登录态下，普通请求返回 403；同一账号通过生产 renderer 路由返回 200 和有效 JSON
 
 `.08` 发布后的真实复验中，冷启动约 1.36 秒，复用连接约 1.04 秒，完整宿主路由约 0.89 秒
 
-Cloudflare WARP 已从生产依赖中移除并停用
+ChatGPT Projects 不依赖 Cloudflare WARP，而是通过上面的受控 Chromium
+通道访问官方接口。官方 Apps 和开发者文档仍通过只监听本机的窄范围
+WARP 转发访问 OpenAI 域名，其他网站和 VPS 流量不经过该代理
 
 ## 验证结果
 
@@ -247,6 +249,7 @@ ChatGPT 项目列表的真实登录态业务响应已经通过，不再依赖 WA
 - [Codex 统一工作区规则](./ops/workspace/README.md)
 - [MCP 迁移与重新连接](./docs/MCP-MIGRATION-2026-08-03.md)
 - [生产端到端验收记录](./docs/USER-JOURNEY-AUDIT-2026-07-29.md)
+- [2026-08-04 官方 26.727.51351 发布复验](./docs/VALIDATION-2026-08-04.md)
 - [2026-08-03 发布复验](./docs/VALIDATION-2026-08-03.md)
 - [2026-07-31 发布复验](./docs/VALIDATION-2026-07-31.md)
 - [2026-07-30 发布复验](./docs/VALIDATION-2026-07-30.md)
@@ -254,9 +257,9 @@ ChatGPT 项目列表的真实登录态业务响应已经通过，不再依赖 WA
 
 ## 已锁定上游版本
 
-- ChatGPT / Codex renderer：`26.721.81911`
-- 官方构建号：`5973`
-- Codex app-server：`0.146.0-alpha.3.1`
+- ChatGPT / Codex renderer：`26.727.51351`
+- 官方构建号：`6119`
+- Codex app-server：`0.146.0-alpha.9.2`
 - preload 契约：19 个方法
 - 项目列表网络进程：Electron `43.2.0`、Chromium `150.0.7871.129`
 

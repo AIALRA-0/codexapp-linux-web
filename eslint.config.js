@@ -10,6 +10,7 @@ export default tseslint.config(
       '.official/**',
       'artifacts/**',
       'eslint.config.js',
+      'ops/*.mjs',
       'scripts/*.cjs',
       'scripts/**/*.mjs',
       'vitest.config.ts',

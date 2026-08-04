@@ -8,7 +8,7 @@ import { CodexAppServerClient } from '../packages/app-server-client/dist/index.j
 const codexBin = requiredEnvironment('SMOKE_CODEX_BIN');
 const codexHome = requiredEnvironment('SMOKE_CODEX_HOME');
 const workspace = process.env.SMOKE_WORKSPACE ?? process.cwd();
-const rendererVersion = process.env.SMOKE_RENDERER_VERSION ?? '26.721.81911';
+const rendererVersion = process.env.SMOKE_RENDERER_VERSION ?? '26.727.51351';
 const proxyUrl =
   process.env.SMOKE_EGRESS_PROXY_URL === undefined
     ? null
@@ -16,6 +16,8 @@ const proxyUrl =
 const electronBin = process.env.SMOKE_ELECTRON_BIN;
 const electronWorker = process.env.SMOKE_ELECTRON_WORKER;
 const xvfbRun = process.env.SMOKE_XVFB_RUN;
+const expectedElectronVersion = process.env.SMOKE_ELECTRON_VERSION ?? '43.2.0';
+const expectedChromiumVersion = process.env.SMOKE_CHROMIUM_VERSION ?? '150.0.7871.129';
 const projectsUrl = new URL(
   'https://chatgpt.com/backend-api/gizmos/snorlax/sidebar' +
     '?conversations_per_gizmo=0&limit=20&owned_only=true',
@@ -88,6 +90,8 @@ try {
           baseHeaders,
           electronBin,
           electronWorker,
+          expectedChromiumVersion,
+          expectedElectronVersion,
           rendererVersion,
           token,
         });
@@ -114,6 +118,8 @@ async function persistentElectronRequestSummary({
   baseHeaders,
   electronBin,
   electronWorker,
+  expectedChromiumVersion,
+  expectedElectronVersion,
   rendererVersion,
   token,
 }) {
@@ -124,8 +130,8 @@ async function persistentElectronRequestSummary({
     electronBin,
     workerPath: electronWorker,
     userDataDir: requiredEnvironment('SMOKE_ELECTRON_USER_DATA_DIR'),
-    expectedElectronVersion: '43.2.0',
-    expectedChromiumVersion: '150.0.7871.129',
+    expectedElectronVersion,
+    expectedChromiumVersion,
   });
   try {
     const coldStartedAt = performance.now();

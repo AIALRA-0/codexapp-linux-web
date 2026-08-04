@@ -32,6 +32,10 @@ const COMMENT_PRELOAD_ELECTRON_SHIM = String.raw`
     send(channel, message) {
       void binding(channel, message);
     },
+    sendSync(channel) {
+      if (channel === "codex_desktop:get-browser-webmcp-enabled") return false;
+      throw new Error("Unsupported synchronous official preload channel: " + String(channel));
+    },
     on(channel, listener) {
       let channelListeners = listeners.get(channel);
       if (channelListeners === undefined) {
@@ -949,6 +953,13 @@ export class OfficialBrowserRuntime {
     });
     page.on('download', (download) => {
       void this.#handleDownload(tab, download);
+    });
+    page.on('pageerror', (error) => {
+      this.#report(asError(error), {
+        operation: 'browser-page-runtime',
+        browserTabId: tab.browserTabId,
+        conversationId: tab.conversationId,
+      });
     });
     page.on('close', () => {
       if (tab.page !== page) return;

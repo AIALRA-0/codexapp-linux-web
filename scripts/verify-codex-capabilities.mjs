@@ -1,12 +1,24 @@
+import { readFileSync } from 'node:fs';
 import { CodexAppServerClient } from '../packages/app-server-client/dist/index.js';
 
 const codexBin = requiredEnvironment('VERIFY_CODEX_BIN');
 const codexHome = requiredEnvironment('VERIFY_CODEX_HOME');
 const workspace = requiredEnvironment('VERIFY_WORKSPACE');
-const rendererVersion = process.env.VERIFY_RENDERER_VERSION ?? '26.721.81911';
-const requiredSkills = csvEnvironment('VERIFY_REQUIRED_SKILLS');
-const requiredMcpServers = csvEnvironment('VERIFY_REQUIRED_MCP_SERVERS');
-const requiredMcpTools = csvEnvironment('VERIFY_REQUIRED_MCP_TOOLS').map(parseRequiredMcpTool);
+const rendererVersion = process.env.VERIFY_RENDERER_VERSION ?? '26.727.51351';
+const manifest = readCapabilitiesManifest(process.env.VERIFY_CAPABILITIES_MANIFEST);
+const minimumSkillCount = manifest.minimumSkillCount ?? 0;
+const requiredSkills = unique([
+  ...manifest.requiredSkills,
+  ...csvEnvironment('VERIFY_REQUIRED_SKILLS'),
+]);
+const requiredMcpServers = unique([
+  ...manifest.requiredMcpServers,
+  ...csvEnvironment('VERIFY_REQUIRED_MCP_SERVERS'),
+]);
+const requiredMcpTools = unique([
+  ...manifest.requiredMcpTools,
+  ...csvEnvironment('VERIFY_REQUIRED_MCP_TOOLS'),
+]).map(parseRequiredMcpTool);
 
 const client = new CodexAppServerClient({
   codexBin,
@@ -49,7 +61,10 @@ try {
   const mcpServers = Array.isArray(mcpResponse?.data)
     ? mcpResponse.data.map((row) => ({
         name: row?.name,
+        fields: row !== null && typeof row === 'object' ? Object.keys(row).sort() : [],
+        status: row?.status ?? null,
         authStatus: row?.authStatus,
+        errorPresent: row?.error !== null && row?.error !== undefined,
         toolNames: Object.keys(row?.tools ?? {}).sort(),
       }))
     : [];
@@ -61,12 +76,18 @@ try {
         !mcpServers.some((row) => row.name === server && row.toolNames.includes(tool)),
     )
     .map(({ server, tool }) => `${server}/${tool}`);
+  const skillCountSatisfied = skillNames.length >= minimumSkillCount;
   const ok =
-    missingSkills.length === 0 && missingMcpServers.length === 0 && missingMcpTools.length === 0;
+    skillCountSatisfied &&
+    missingSkills.length === 0 &&
+    missingMcpServers.length === 0 &&
+    missingMcpTools.length === 0;
   const result = {
     ok,
     rendererVersion,
     skillCount: skillNames.length,
+    minimumSkillCount,
+    skillCountSatisfied,
     skillNames,
     missingSkills,
     mcpServers,
@@ -134,6 +155,45 @@ function csvEnvironment(name) {
     .split(',')
     .map((item) => item.trim())
     .filter((item) => item.length > 0);
+}
+
+function readCapabilitiesManifest(path) {
+  if (typeof path !== 'string' || path.length === 0) {
+    return {
+      minimumSkillCount: 0,
+      requiredSkills: [],
+      requiredMcpServers: [],
+      requiredMcpTools: [],
+    };
+  }
+  const parsed = JSON.parse(readFileSync(path, 'utf8'));
+  if (parsed === null || typeof parsed !== 'object' || Array.isArray(parsed)) {
+    throw new Error('capabilities manifest must be a JSON object');
+  }
+  const minimumSkillCount = parsed.minimumSkillCount ?? 0;
+  if (!Number.isSafeInteger(minimumSkillCount) || minimumSkillCount < 0) {
+    throw new Error('capabilities manifest minimumSkillCount must be a non-negative integer');
+  }
+  return {
+    minimumSkillCount,
+    requiredSkills: stringArray(parsed.requiredSkills, 'requiredSkills'),
+    requiredMcpServers: stringArray(parsed.requiredMcpServers, 'requiredMcpServers'),
+    requiredMcpTools: stringArray(parsed.requiredMcpTools, 'requiredMcpTools'),
+  };
+}
+
+function stringArray(value, label) {
+  if (
+    !Array.isArray(value) ||
+    value.some((item) => typeof item !== 'string' || item.length === 0)
+  ) {
+    throw new Error(`capabilities manifest ${label} must be an array of non-empty strings`);
+  }
+  return value;
+}
+
+function unique(values) {
+  return [...new Set(values)];
 }
 
 function requiredEnvironment(name) {

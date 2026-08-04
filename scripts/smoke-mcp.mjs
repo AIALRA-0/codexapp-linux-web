@@ -9,7 +9,7 @@ import { CodexAppServerClient } from '../packages/app-server-client/dist/index.j
 const codexBin = process.env.SMOKE_CODEX_BIN;
 if (codexBin === undefined) throw new Error('SMOKE_CODEX_BIN is required');
 
-const rendererVersion = process.env.SMOKE_RENDERER_VERSION ?? '26.721.81911';
+const rendererVersion = process.env.SMOKE_RENDERER_VERSION ?? '26.727.51351';
 const root = await mkdtemp(join(tmpdir(), 'codex-mcp-smoke-'));
 const codexHome = join(root, 'codex-home');
 const workspace = join(root, 'workspace');
