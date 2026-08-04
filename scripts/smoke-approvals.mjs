@@ -6,11 +6,14 @@ const baseUrl = process.env.SMOKE_BASE_URL;
 const publicOrigin = process.env.SMOKE_PUBLIC_ORIGIN;
 const proxySecret = process.env.SMOKE_PROXY_SECRET;
 const fixtureUrl = process.env.APPROVAL_FIXTURE_URL;
+const backgroundRetentionMs = Number(process.env.SMOKE_BACKGROUND_RETENTION_MS ?? '0');
 if (
   baseUrl === undefined ||
   publicOrigin === undefined ||
   proxySecret === undefined ||
-  fixtureUrl === undefined
+  fixtureUrl === undefined ||
+  !Number.isInteger(backgroundRetentionMs) ||
+  backgroundRetentionMs < 0
 ) {
   throw new Error(
     'SMOKE_BASE_URL, SMOKE_PUBLIC_ORIGIN, SMOKE_PROXY_SECRET, and APPROVAL_FIXTURE_URL are required',
@@ -23,7 +26,7 @@ const identityHeaders = createIdentityHeaders({
   subject: 'approval-smoke-subject',
   username: 'approval-smoke',
 });
-const bridge = await connectOfficialBridge({
+let bridge = await connectOfficialBridge({
   baseUrl,
   identityHeaders,
   publicOrigin,
@@ -51,12 +54,37 @@ try {
   });
   const threadId = requiredString(started?.thread?.id ?? started?.threadId, 'thread id');
 
-  const accepted = await runApprovalTurn({
+  const acceptedRequest = await startApprovalTurn({
     bridge,
-    decision: 'accept',
     expectedItemId: 'approval-accept-command',
     prompt: 'Run the first qualification command.',
     threadId,
+  });
+  let backgroundRetentionVerified = false;
+  if (backgroundRetentionMs > 0) {
+    await requireBackgroundWork(baseUrl, true);
+    appHostConnection.close();
+    appHostConnection = undefined;
+    bridge.close();
+    await delay(backgroundRetentionMs);
+    await requireBackgroundWork(baseUrl, true);
+    bridge = await connectOfficialBridge({ baseUrl, identityHeaders, publicOrigin });
+    const replayedRequest = await bridge.waitForViewMessage(
+      (message) =>
+        message?.type === 'mcp-request' &&
+        message.request?.method === 'item/commandExecution/requestApproval' &&
+        message.request?.params?.itemId === 'approval-accept-command',
+    );
+    if (replayedRequest.request?.id !== acceptedRequest.request?.id) {
+      throw new Error('pending approval request was not replayed with its original id');
+    }
+    backgroundRetentionVerified = true;
+  }
+  const accepted = await finishApprovalTurn({
+    approvalMessage: acceptedRequest,
+    bridge,
+    decision: 'accept',
+    expectedItemId: 'approval-accept-command',
   });
   if ((await readFile(acceptedPath, 'utf8')) !== 'accepted\n') {
     throw new Error('approved command did not write the exact marker');
@@ -97,6 +125,7 @@ try {
       rendererVersion: bridge.bootstrap.rendererVersion,
       approvalRequests: ['accept', 'decline'],
       serverRequestResolved: accepted.resolved && declined.resolved,
+      backgroundRetentionVerified,
       approvedCommandExecuted: true,
       declinedCommandBlocked: true,
       turnCompleted: accepted.turnCompleted && declined.turnCompleted,
@@ -108,7 +137,7 @@ try {
   bridge.close();
 }
 
-async function runApprovalTurn({ bridge, decision, expectedItemId, prompt, threadId }) {
+async function startApprovalTurn({ bridge, expectedItemId, prompt, threadId }) {
   const approvalRequestPromise = bridge.waitForViewMessage(
     (message) =>
       message?.type === 'mcp-request' &&
@@ -124,6 +153,10 @@ async function runApprovalTurn({ bridge, decision, expectedItemId, prompt, threa
     threadId,
   });
   const approvalMessage = await approvalRequestPromise;
+  return approvalMessage;
+}
+
+async function finishApprovalTurn({ approvalMessage, bridge, decision, expectedItemId }) {
   const requestId = approvalMessage.request?.id;
   if (requestId === undefined || requestId === null) {
     throw new Error('approval request id is missing');
@@ -162,6 +195,27 @@ async function runApprovalTurn({ bridge, decision, expectedItemId, prompt, threa
     resolved: resolvedMessage !== undefined,
     turnCompleted: turnCompleted !== undefined,
   };
+}
+
+async function runApprovalTurn({ bridge, decision, expectedItemId, prompt, threadId }) {
+  const approvalMessage = await startApprovalTurn({ bridge, expectedItemId, prompt, threadId });
+  return finishApprovalTurn({ approvalMessage, bridge, decision, expectedItemId });
+}
+
+async function requireBackgroundWork(baseUrl, expectedActive) {
+  const response = await fetch(`${baseUrl}/ops/background-work`);
+  if (!response.ok) {
+    throw new Error(`background work status failed: ${String(response.status)}`);
+  }
+  const snapshot = await response.json();
+  if (snapshot.active !== expectedActive || snapshot.activeTurnCount < 1) {
+    throw new Error(`background work state changed: ${JSON.stringify(snapshot)}`);
+  }
+  return snapshot;
+}
+
+function delay(milliseconds) {
+  return new Promise((resolve) => setTimeout(resolve, milliseconds));
 }
 
 async function expectMissing(path) {

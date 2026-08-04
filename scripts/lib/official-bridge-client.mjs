@@ -30,6 +30,7 @@ export async function connectOfficialBridge({ baseUrl, identityHeaders, publicOr
   const portTransports = new Map();
   const workerResults = new Map();
   const viewMessageWaiters = new Set();
+  const recentViewMessages = [];
   const ready = deferred();
 
   const send = (frame) => {
@@ -78,6 +79,8 @@ export async function connectOfficialBridge({ baseUrl, identityHeaders, publicOr
     }
     if (frame.type !== 'view-message') return;
     const message = frame.message;
+    recentViewMessages.push(message);
+    if (recentViewMessages.length > 1_000) recentViewMessages.shift();
     for (const waiter of [...viewMessageWaiters]) {
       if (!waiter.predicate(message)) continue;
       viewMessageWaiters.delete(waiter);
@@ -259,6 +262,8 @@ export async function connectOfficialBridge({ baseUrl, identityHeaders, publicOr
   };
 
   const waitForViewMessage = (predicate, timeoutMs = 30_000) => {
+    const recent = recentViewMessages.findLast(predicate);
+    if (recent !== undefined) return Promise.resolve(recent);
     const pending = deferred();
     const waiter = {
       predicate,

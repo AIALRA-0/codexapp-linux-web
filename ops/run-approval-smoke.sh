@@ -162,6 +162,8 @@ systemd-run \
   "PORT=$host_port" \
   "PUBLIC_ORIGIN=$public_origin" \
   "RUNTIME_ROOT=$runtime_root" \
+  "BRIDGE_RECONNECT_SECONDS=1" \
+  "IDLE_RUNTIME_SECONDS=60" \
   "BROWSER_BRIDGE_SCRIPT=$application_root/packages/browser-bridge/dist/index.js" \
   "ELECTRON_NET_WORKER=$application_root/scripts/electron-net-worker.cjs" \
   "ELECTRON_NET_USER_DATA_DIR=$runtime_root/electron-network" \
@@ -186,6 +188,7 @@ done
     SMOKE_PUBLIC_ORIGIN="$public_origin" \
     SMOKE_PROXY_SECRET="$proxy_secret" \
     APPROVAL_FIXTURE_URL="$fixture_url" \
+    SMOKE_BACKGROUND_RETENTION_MS=65000 \
     npm run smoke:approvals
 )
 

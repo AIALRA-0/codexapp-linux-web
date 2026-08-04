@@ -12,6 +12,7 @@ import {
   jsonRpcResponseSchema,
   type AuthentikIdentity,
   type JsonRpcId,
+  type JsonRpcRequest,
 } from '@codexapp/contracts';
 
 import {
@@ -21,6 +22,7 @@ import {
 import { CodexAppServerClient, type ServerRequestEvent } from '@codexapp/app-server-client';
 
 import { deleteAllArchivedThreads, deleteArchivedThread } from './archived-thread-operations.js';
+import { BackgroundWorkTracker, type BackgroundWorkSnapshot } from './background-work.js';
 import {
   readBrowserPermissionSnapshot,
   writeBrowserApprovalMode,
@@ -181,6 +183,8 @@ export class UserRuntime extends EventEmitter {
   #fetchControllers = new Map<string, AbortController>();
   #initialAppServerMessages: unknown[] = [];
   #browserDownloads = new Map<string, BrowserDownload & { expiresAt: number }>();
+  #backgroundWork: BackgroundWorkTracker;
+  #pendingAppServerRequests = new Map<JsonRpcId, JsonRpcRequest>();
 
   constructor(
     identity: AuthentikIdentity,
@@ -202,6 +206,9 @@ export class UserRuntime extends EventEmitter {
       username: identity.username,
     });
     this.#state = new DurableStateStore(join(this.root, 'host-state.json'));
+    this.#backgroundWork = new BackgroundWorkTracker((snapshot) => {
+      this.emit('background-work-changed', snapshot);
+    });
     this.#appDirectoryCache = new OfficialAppDirectoryCache(this.codexHome);
     this.#prewarmedThreads = new OfficialPrewarmedThreads({
       deleteExpiredThread: (threadId) => {
@@ -257,12 +264,18 @@ export class UserRuntime extends EventEmitter {
       onAutoResolve: (response) => {
         const appServer = this.#appServer;
         if (appServer === undefined) return;
-        void appServer.forwardResponse(response).catch((error: unknown) => {
-          this.emit('capability-error', {
-            requestType: 'request-user-input-auto-resolution',
-            error: error instanceof Error ? error.message : 'automatic response failed',
+        void appServer
+          .forwardResponse(response)
+          .then(() => {
+            this.#pendingAppServerRequests.delete(response.id);
+            this.#backgroundWork.observeClientResponse(response);
+          })
+          .catch((error: unknown) => {
+            this.emit('capability-error', {
+              requestType: 'request-user-input-auto-resolution',
+              error: error instanceof Error ? error.message : 'automatic response failed',
+            });
           });
-        });
       },
       onStateChanged: (change) => {
         this.emit('view-message', {
@@ -351,6 +364,14 @@ export class UserRuntime extends EventEmitter {
 
   get sharedObjectSnapshot(): Record<string, unknown> {
     return this.#state.snapshot('sharedObjects');
+  }
+
+  get hasBackgroundWork(): boolean {
+    return this.#backgroundWork.active;
+  }
+
+  get backgroundWorkSnapshot(): BackgroundWorkSnapshot {
+    return this.#backgroundWork.snapshot;
   }
 
   get initialSidebarBootstrap(): Record<string, unknown> {
@@ -479,6 +500,8 @@ export class UserRuntime extends EventEmitter {
     this.#fetchControllers.clear();
     this.#browserDownloads.clear();
     this.requestUserInputAutoResolution.clearPendingRequests();
+    this.#backgroundWork.clear();
+    this.#pendingAppServerRequests.clear();
     await this.#gitWorker?.stop();
     this.#gitWorker = undefined;
     this.#pendingGitRequests.clear();
@@ -632,9 +655,12 @@ export class UserRuntime extends EventEmitter {
         );
         return undefined;
       case 'mcp-response':
-        await this.#requireAppServer().forwardResponse(
-          jsonRpcResponseSchema.parse(message.response),
-        );
+        {
+          const response = jsonRpcResponseSchema.parse(message.response);
+          await this.#requireAppServer().forwardResponse(response);
+          this.#pendingAppServerRequests.delete(response.id);
+          this.#backgroundWork.observeClientResponse(response);
+        }
         return undefined;
       case 'mcp-request-abandon':
         await this.#requireAppServer().notify('$/cancelRequest', { id: message.requestId });
@@ -673,6 +699,9 @@ export class UserRuntime extends EventEmitter {
       case 'ready':
         for (const initialMessage of this.#initialAppServerMessages) {
           this.emit('view-message', initialMessage);
+        }
+        for (const pendingRequest of this.#pendingAppServerRequests.values()) {
+          this.emit('view-message', toOfficialRendererRequest(pendingRequest));
         }
         this.emit('view-message', {
           type: 'request-user-input-auto-resolution-snapshot',
@@ -961,6 +990,8 @@ export class UserRuntime extends EventEmitter {
       this.#deliverAppServerNotification(parsedNotification);
     });
     client.on('request', (event: ServerRequestEvent) => {
+      this.#pendingAppServerRequests.set(event.request.id, event.request);
+      this.#backgroundWork.observeServerRequest(event.request);
       this.requestUserInputAutoResolution.observeServerRequest(event.request);
       this.emit('view-message', toOfficialRendererRequest(event.request));
     });
@@ -971,6 +1002,8 @@ export class UserRuntime extends EventEmitter {
       if (this.#appServer !== client || this.#stopping) return;
       const error = new Error('official app-server exited unexpectedly');
       this.#failRendererRequests(error);
+      this.#backgroundWork.clear();
+      this.#pendingAppServerRequests.clear();
       this.#scheduleAppServerRestart();
     });
     this.#appServer = client;
@@ -1061,6 +1094,8 @@ export class UserRuntime extends EventEmitter {
     suppressPrewarmedThread = true,
   ): void {
     this.#turnLatency.observeNotification(parsedNotification);
+    this.#backgroundWork.observeNotification(parsedNotification);
+    this.#observePendingRequestNotification(parsedNotification);
     if (parsedNotification.method === 'thread/deleted') {
       const params =
         parsedNotification.params !== null &&
@@ -1094,6 +1129,48 @@ export class UserRuntime extends EventEmitter {
       this.#initialAppServerMessages.push(message);
     }
     this.emit('view-message', message);
+  }
+
+  #observePendingRequestNotification(notification: { method: string; params?: unknown }): void {
+    const params =
+      notification.params !== null &&
+      typeof notification.params === 'object' &&
+      !Array.isArray(notification.params)
+        ? (notification.params as Record<string, unknown>)
+        : {};
+    if (notification.method === 'serverRequest/resolved') {
+      const requestId = params.requestId;
+      if (
+        typeof requestId === 'string' ||
+        (typeof requestId === 'number' && Number.isInteger(requestId))
+      ) {
+        this.#pendingAppServerRequests.delete(requestId);
+      }
+      return;
+    }
+    if (notification.method !== 'turn/completed' && notification.method !== 'thread/deleted') {
+      return;
+    }
+    const turn =
+      params.turn !== null && typeof params.turn === 'object' && !Array.isArray(params.turn)
+        ? (params.turn as Record<string, unknown>)
+        : {};
+    const threadId = typeof params.threadId === 'string' ? params.threadId : null;
+    const turnId = typeof turn.id === 'string' ? turn.id : null;
+    for (const [requestId, request] of this.#pendingAppServerRequests) {
+      const requestParams =
+        request.params !== null &&
+        typeof request.params === 'object' &&
+        !Array.isArray(request.params)
+          ? (request.params as Record<string, unknown>)
+          : {};
+      if (
+        (threadId !== null && requestParams.threadId === threadId) ||
+        (turnId !== null && requestParams.turnId === turnId)
+      ) {
+        this.#pendingAppServerRequests.delete(requestId);
+      }
+    }
   }
 
   #requireGitWorker(): OfficialGitWorker {
@@ -2079,16 +2156,39 @@ function stringValue(value: Record<string, unknown> | null, key: string): string
 interface RuntimeEntry {
   runtime: UserRuntime;
   references: number;
+  backgroundWorkListener: () => void;
   stopTimer?: NodeJS.Timeout;
+}
+
+export interface RuntimeRegistryBackgroundWorkSnapshot {
+  active: boolean;
+  runtimeCount: number;
+  activeRuntimeCount: number;
+  activeTurnCount: number;
+  pendingServerRequestCount: number;
+  oldestStartedAtMs: number | null;
+}
+
+export interface RuntimeRegistryOptions {
+  createRuntime?: (
+    identity: AuthentikIdentity,
+    config: GatewayConfig,
+    electronNetwork: OfficialElectronNetwork | undefined,
+  ) => UserRuntime;
 }
 
 export class RuntimeRegistry {
   readonly config: GatewayConfig;
   #entries = new Map<string, RuntimeEntry>();
   #electronNetwork: OfficialElectronNetwork | undefined;
+  #createRuntime: NonNullable<RuntimeRegistryOptions['createRuntime']>;
 
-  constructor(config: GatewayConfig) {
+  constructor(config: GatewayConfig, options: RuntimeRegistryOptions = {}) {
     this.config = config;
+    this.#createRuntime =
+      options.createRuntime ??
+      ((identity, runtimeConfig, electronNetwork) =>
+        new UserRuntime(identity, runtimeConfig, electronNetwork));
     if (config.electronNetBin !== undefined) {
       this.#electronNetwork = new OfficialElectronNetwork({
         electronBin: config.electronNetBin,
@@ -2104,10 +2204,13 @@ export class RuntimeRegistry {
     const key = userKeyForIdentity(identity);
     let entry = this.#entries.get(key);
     if (entry === undefined) {
+      const runtime = this.#createRuntime(identity, this.config, this.#electronNetwork);
       entry = {
-        runtime: new UserRuntime(identity, this.config, this.#electronNetwork),
+        runtime,
         references: 0,
+        backgroundWorkListener: () => this.#reconcileIdleStop(runtime),
       };
+      runtime.on('background-work-changed', entry.backgroundWorkListener);
       this.#entries.set(key, entry);
     }
     if (!identitiesMatch(entry.runtime.identity, identity)) {
@@ -2126,13 +2229,34 @@ export class RuntimeRegistry {
     const entry = this.#entries.get(runtime.userKey);
     if (entry === undefined || entry.runtime !== runtime) return;
     entry.references = Math.max(0, entry.references - 1);
-    if (entry.references !== 0 || entry.stopTimer !== undefined) return;
-    entry.stopTimer = setTimeout(() => {
-      void entry?.runtime.stop().finally(() => {
-        if (entry?.references === 0) this.#entries.delete(runtime.userKey);
-      });
-    }, this.config.idleRuntimeSeconds * 1_000);
-    entry.stopTimer.unref();
+    this.#reconcileIdleStop(runtime);
+  }
+
+  get backgroundWorkSnapshot(): RuntimeRegistryBackgroundWorkSnapshot {
+    let activeRuntimeCount = 0;
+    let activeTurnCount = 0;
+    let pendingServerRequestCount = 0;
+    let oldestStartedAtMs: number | null = null;
+    for (const entry of this.#entries.values()) {
+      const snapshot = entry.runtime.backgroundWorkSnapshot;
+      if (snapshot.active) activeRuntimeCount += 1;
+      activeTurnCount += snapshot.activeTurnCount;
+      pendingServerRequestCount += snapshot.pendingServerRequestCount;
+      if (
+        snapshot.oldestStartedAtMs !== null &&
+        (oldestStartedAtMs === null || snapshot.oldestStartedAtMs < oldestStartedAtMs)
+      ) {
+        oldestStartedAtMs = snapshot.oldestStartedAtMs;
+      }
+    }
+    return {
+      active: activeRuntimeCount > 0,
+      runtimeCount: this.#entries.size,
+      activeRuntimeCount,
+      activeTurnCount,
+      pendingServerRequestCount,
+      oldestStartedAtMs,
+    };
   }
 
   async stopAll(): Promise<void> {
@@ -2140,8 +2264,31 @@ export class RuntimeRegistry {
     this.#entries.clear();
     for (const entry of entries) {
       if (entry.stopTimer !== undefined) clearTimeout(entry.stopTimer);
+      entry.runtime.off('background-work-changed', entry.backgroundWorkListener);
       await entry.runtime.stop();
     }
     await this.#electronNetwork?.stop();
+  }
+
+  #reconcileIdleStop(runtime: UserRuntime): void {
+    const entry = this.#entries.get(runtime.userKey);
+    if (entry === undefined || entry.runtime !== runtime) return;
+    if (entry.references > 0 || runtime.hasBackgroundWork) {
+      if (entry.stopTimer !== undefined) {
+        clearTimeout(entry.stopTimer);
+        delete entry.stopTimer;
+      }
+      return;
+    }
+    if (entry.stopTimer !== undefined) return;
+    entry.stopTimer = setTimeout(() => {
+      delete entry?.stopTimer;
+      if (entry === undefined || entry.references > 0 || runtime.hasBackgroundWork) return;
+      if (this.#entries.get(runtime.userKey) !== entry) return;
+      this.#entries.delete(runtime.userKey);
+      runtime.off('background-work-changed', entry.backgroundWorkListener);
+      void runtime.stop();
+    }, this.config.idleRuntimeSeconds * 1_000);
+    entry.stopTimer.unref();
   }
 }

@@ -9,6 +9,7 @@
 | Core           | New/open/list/search/archive/resume threads and streamed turns pass                                                                                                                                                             |
 | Task start     | Browser bridge performs workspace, directory, Git, MCP, developer-instruction, thread-start, turn-start, and thread-read chain                                                                                                  |
 | Persistence    | `ops/run-host-persistence-smoke.sh` proves a committed turn survives browser disconnect and full host-service restart                                                                                                           |
+| Background     | Active turns and unresolved server requests hold a runtime lease after browser loss; the isolated approval smoke exceeds reconnect plus idle expiry, reconnects, replays the exact approval, and completes the same turn        |
 | History        | 10k-thread synthetic list is paginated and bounded; no eager full-history load                                                                                                                                                  |
 | Reconnect      | Sequence/ack/replay produces no duplicates or gaps                                                                                                                                                                              |
 | Isolation      | Cross-user filesystem, process, token, socket, and thread access tests fail closed                                                                                                                                              |
@@ -22,6 +23,7 @@
 | Security       | CSP, origin, CSRF, websocket ticket, rate, audit, and dependency checks pass                                                                                                                                                    |
 | Recovery       | Isolated clean-shutdown archive/erase/restore recovers an exact committed turn; app-server crash, disk pressure, interrupted upgrade pass                                                                                       |
 | Rollback       | previous version restores within the runbook target without state conversion loss                                                                                                                                               |
+| Safe promotion | `/ops/background-work` reports no active turn or pending request before promotion; otherwise promotion fails closed without stopping the current service                                                                        |
 | Visible UI     | real Chrome renders nonblank official pixels and receives bridge-ready through the same proxy boundary used by production                                                                                                       |
 
 Production promotion requires all mandatory gates. Unsupported native-only features

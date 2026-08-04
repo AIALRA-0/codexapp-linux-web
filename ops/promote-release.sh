@@ -14,6 +14,7 @@ fi
 
 target="$codexapp_release_root/$release_id"
 codexapp_verify_release_pair "$target"
+codexapp_assert_no_background_work
 next_official_version="$CODEXAPP_PAIR_OFFICIAL_VERSION"
 next_build_number="$CODEXAPP_PAIR_BUILD_NUMBER"
 next_official_target="$CODEXAPP_PAIR_OFFICIAL_TARGET"

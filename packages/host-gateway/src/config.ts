@@ -67,6 +67,7 @@ const configSchema = z.object({
     .positive()
     .default(100 * 1024 * 1024),
   sessionTtlSeconds: z.coerce.number().int().min(300).max(86_400).default(43_200),
+  bridgeReconnectSeconds: z.coerce.number().int().min(1).max(3_600).default(600),
   idleRuntimeSeconds: z.coerce.number().int().min(60).default(900),
   maxSessions: z.coerce.number().int().min(10).max(10_000).default(1_000),
   maxSessionsPerUser: z.coerce.number().int().min(2).max(100).default(20),
@@ -120,6 +121,7 @@ export function loadConfig(environment: NodeJS.ProcessEnv = process.env): Gatewa
     authProxySecretFile: environment.AUTH_PROXY_SECRET_FILE,
     maxUploadBytes: environment.MAX_UPLOAD_BYTES,
     sessionTtlSeconds: environment.SESSION_TTL_SECONDS,
+    bridgeReconnectSeconds: environment.BRIDGE_RECONNECT_SECONDS,
     idleRuntimeSeconds: environment.IDLE_RUNTIME_SECONDS,
     maxSessions: environment.MAX_SESSIONS,
     maxSessionsPerUser: environment.MAX_SESSIONS_PER_USER,

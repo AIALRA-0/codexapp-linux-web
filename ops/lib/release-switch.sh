@@ -8,6 +8,29 @@ codexapp_environment_file="/srv/aialra/config/secrets/codexapp-official-web-host
 codexapp_service_name="codexapp-official-web-host.service"
 codexapp_service_user="codexappweb"
 codexapp_health_url="http://127.0.0.1:13014/readyz"
+codexapp_background_work_url="http://127.0.0.1:13014/ops/background-work"
+
+codexapp_assert_no_background_work() {
+  local snapshot
+  if ! systemctl is-active --quiet "$codexapp_service_name"; then
+    return 0
+  fi
+  if ! snapshot="$(curl -fsS --max-time 5 "$codexapp_background_work_url")"; then
+    if [[ "${CODEXAPP_CONFIRMED_LEGACY_IDLE:-0}" == "1" ]]; then
+      echo "warning: legacy host has no background-work endpoint; operator confirmed it is idle" >&2
+      return 0
+    fi
+    echo "cannot verify whether the active host has background work; promotion refused" >&2
+    return 75
+  fi
+  if ! jq -e '.ok == true and .active == false' <<<"$snapshot" >/dev/null; then
+    jq -c \
+      '{active,activeRuntimeCount,activeTurnCount,pendingServerRequestCount,oldestStartedAtMs}' \
+      <<<"$snapshot" >&2 || true
+    echo "active Codex work exists; promotion refused so no task is interrupted" >&2
+    return 75
+  fi
+}
 
 codexapp_verify_release_pair() {
   local target="$1"

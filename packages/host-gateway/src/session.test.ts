@@ -103,4 +103,17 @@ describe('browser session reconnect protocol', () => {
     expect(replay?.sequence).toBeGreaterThan(original.sequence);
     session.dispose();
   });
+
+  it('bounds disconnected replay memory without throwing into an active task', () => {
+    const session = createSession();
+    for (let index = 0; index < 10_001; index += 1) {
+      expect(() => session.send({ type: 'view-message', message: { index } })).not.toThrow();
+    }
+    expect(session.pendingHostFrames).toBe(0);
+
+    const socket = new SocketHarness();
+    expect(session.attach(socket as unknown as WebSocket, 0)).toBe(false);
+    expect(socket.closes).toEqual([{ code: 4410, reason: 'browser session replay unavailable' }]);
+    session.dispose();
+  });
 });

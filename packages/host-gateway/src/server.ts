@@ -216,6 +216,9 @@ export async function createGateway(config: GatewayConfig): Promise<FastifyInsta
         app.log.debug({ details: record }, 'renderer request latency');
       }
     });
+    runtime.on('background-work-changed', (details: unknown) => {
+      app.log.info({ auditUserKey: runtime.userKey, details }, 'background work state changed');
+    });
   };
 
   await app.register(websocket, {
@@ -247,6 +250,14 @@ export async function createGateway(config: GatewayConfig): Promise<FastifyInsta
       rendererTreeSha256: qualification.renderer.treeSha256,
       storage,
     };
+  });
+  app.get('/ops/background-work', (_request, reply) => {
+    const snapshot = runtimes.backgroundWorkSnapshot;
+    return reply.header('cache-control', 'no-store').send({
+      ok: true,
+      ...snapshot,
+      observedAtMs: Date.now(),
+    });
   });
 
   app.get<{ Params: { filename: string } }>(
@@ -490,7 +501,13 @@ export async function createGateway(config: GatewayConfig): Promise<FastifyInsta
               clearTimeout(entry.cleanupTimer);
               delete entry.cleanupTimer;
             }
-            entry.session.attach(socket, frame.lastHostSequence);
+            if (!entry.session.attach(socket, frame.lastHostSequence)) {
+              entry.session.dispose();
+              sessions.delete(entry.session.id);
+              runtimes.release(entry.runtime);
+              entry = undefined;
+              return;
+            }
             if (resumedSession) {
               app.log.info(
                 {
@@ -597,7 +614,7 @@ export async function createGateway(config: GatewayConfig): Promise<FastifyInsta
             'bridge reconnect window expired',
           );
           runtimes.release(entry.runtime);
-        }, 10 * 60_000);
+        }, config.bridgeReconnectSeconds * 1_000);
         entry.cleanupTimer.unref();
       }
     });

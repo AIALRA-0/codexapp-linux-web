@@ -11,6 +11,34 @@ again, updates `current`, restarts the service, checks readiness for 30 seconds,
 and restores the previous link on failure. `ops/rollback-release.sh RELEASE`
 performs the same guarded operation for an explicit previous release.
 
+Promotion also reads `/ops/background-work` from the active loopback service.
+If any official turn or server request is still active, promotion exits with
+code 75 before stopping the service. The one-time upgrade from a legacy release
+that lacks this endpoint requires the operator to verify that release is idle
+and set `CODEXAPP_CONFIRMED_LEGACY_IDLE=1`; later releases fail closed without an
+override.
+
+## Browser loss and background turns
+
+The browser connection is not the lifetime owner of an official Codex turn.
+`turn/started` acquires a runtime lease, and only `turn/completed` releases it.
+An unresolved approval, dynamic tool call, MCP elicitation, or user-input
+request also holds the lease. Closing the tab, putting a laptop to sleep, or
+losing the network therefore cannot trigger the ordinary idle runtime stop.
+
+The bridge still keeps a bounded reconnect buffer. If that buffer expires or
+overflows, the browser reloads from the official persisted thread state instead
+of retaining unlimited memory. Unresolved app-server requests are separately
+retained and replayed with the original JSON-RPC id, so a returning browser can
+answer the same approval rather than stranding the turn. After the turn and all
+requests finish, the normal `IDLE_RUNTIME_SECONDS` countdown resumes.
+
+This protects tasks from application idle collection and normal guarded
+deployments. It does not claim that an in-flight upstream model stream can
+survive a kernel crash, VPS power loss, process OOM kill, or forced
+administrator kill; completed conversation state remains covered by the
+backup/restart recovery gates.
+
 Prepared official-package and runtime-tool snapshots must remain root-owned,
 readable and executable by the service, and unwritable by every service account.
 The official source tree may be world-readable, but the qualification directory
@@ -256,7 +284,10 @@ Before public cutover, all of the following are mandatory:
 7. `ops/run-approval-smoke.sh` uses the real version-locked app-server, a
    deterministic isolated Responses endpoint, and the production browser bridge
    to prove accept executes the exact command, decline does not execute it,
-   both decisions return to the model, and both turns complete.
+   both decisions return to the model, and both turns complete. Its accepted
+   turn disconnects before approval, waits longer than the isolated reconnect
+   and idle windows, reconnects, receives the same pending approval id, and
+   completes the original turn.
 8. The hardened in-app browser smoke passes under the production system-call,
    filesystem, device, and privilege restrictions.
 9. Anonymous, forged, missing-proof, and cross-subject authentication attempts
@@ -271,3 +302,5 @@ Before public cutover, all of the following are mandatory:
     stopped. OpenCodexApp paths remain excluded.
 14. `smoke:core-lifecycle` creates a real `thread/fork`, reads and lists the
     fork, then deletes both the fork and source thread.
+15. `/ops/background-work` is inactive before every production promotion; an
+    active-turn fixture proves the promotion guard refuses to stop the service.

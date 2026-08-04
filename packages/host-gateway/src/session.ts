@@ -16,6 +16,7 @@ export class BrowserSession {
   #commandResults = new Map<string, HostFrame>();
   #appHostConnections = new Map<string, AppHostConnection>();
   #pendingAppHostMessages = new PendingPortMessages();
+  #requiresReload = false;
   #viewListener: (message: unknown) => void;
   #workerListener: (event: { worker: string; message: unknown }) => void;
 
@@ -37,7 +38,11 @@ export class BrowserSession {
     return this.#outbox.size;
   }
 
-  attach(socket: WebSocket, lastHostSequence: number): void {
+  attach(socket: WebSocket, lastHostSequence: number): boolean {
+    if (this.#requiresReload) {
+      socket.close(4410, 'browser session replay unavailable');
+      return false;
+    }
     this.#socket?.close(4001, 'replaced by reconnect');
     this.#socket = socket;
     for (const [sequence, frame] of this.#outbox) {
@@ -49,6 +54,7 @@ export class BrowserSession {
       rendererVersion: this.runtime.config.expectedRendererVersion,
       replayedThrough: this.#nextHostSequence - 1,
     });
+    return true;
   }
 
   detach(socket: WebSocket): boolean {
@@ -137,10 +143,14 @@ export class BrowserSession {
       contractVersion: CONTRACT_VERSION,
       sequence: this.#nextHostSequence++,
     } as HostFrame;
+    if (this.#requiresReload) return frame;
     this.#outbox.set(frame.sequence, frame);
     if (this.#outbox.size > 10_000) {
+      this.#requiresReload = true;
+      this.#outbox.clear();
+      this.#commandResults.clear();
       this.#socket?.close(4009, 'unacknowledged host frame limit exceeded');
-      throw new Error('browser session exceeded unacknowledged host frame limit');
+      return frame;
     }
     this.#write(frame);
     return frame;
