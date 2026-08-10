@@ -4,7 +4,7 @@ import { CodexAppServerClient } from '../packages/app-server-client/dist/index.j
 const codexBin = requiredEnvironment('VERIFY_CODEX_BIN');
 const codexHome = requiredEnvironment('VERIFY_CODEX_HOME');
 const workspace = requiredEnvironment('VERIFY_WORKSPACE');
-const rendererVersion = process.env.VERIFY_RENDERER_VERSION ?? '26.727.51351';
+const rendererVersion = process.env.VERIFY_RENDERER_VERSION ?? '26.730.61639';
 const manifest = readCapabilitiesManifest(process.env.VERIFY_CAPABILITIES_MANIFEST);
 const minimumSkillCount = manifest.minimumSkillCount ?? 0;
 const requiredSkills = unique([

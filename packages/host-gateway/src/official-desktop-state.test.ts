@@ -46,7 +46,7 @@ describeQualified('OfficialDesktopState', () => {
     await expect(client.request('keymap.reset')).resolves.toMatchObject({
       bindings: [],
     });
-  });
+  }, 30_000);
 
   it('uses the official automation and inbox SQLite schema without fake empty results', async () => {
     const codexHome = await createCodexHome();
@@ -164,7 +164,7 @@ describeQualified('OfficialDesktopState', () => {
       status: 'deleted',
     });
     await expect(client.request('automations.list')).resolves.toEqual({ items: [] });
-  });
+  }, 30_000);
 
   it('uses the official custom avatar parser inside the isolated worker', async () => {
     const codexHome = await createCodexHome();
@@ -206,7 +206,7 @@ describeQualified('OfficialDesktopState', () => {
       id: 'custom:owl',
       displayName: 'Owl',
     });
-  });
+  }, 30_000);
 
   it('uses the official plugin scheduled-task parser and recurrence conversion', async () => {
     const codexHome = await createCodexHome();
@@ -263,7 +263,7 @@ describeQualified('OfficialDesktopState', () => {
         },
       ],
     });
-  });
+  }, 30_000);
 });
 
 async function createCodexHome(): Promise<string> {

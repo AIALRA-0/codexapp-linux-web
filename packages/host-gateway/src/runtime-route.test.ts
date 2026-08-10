@@ -7,6 +7,7 @@ import {
   officialWebStaticDesktopResponse,
   rendererRequestFingerprint,
   rendererRequestShape,
+  rendererResponseCacheTtlMs,
 } from './runtime.js';
 
 describe('renderer request diagnostics', () => {
@@ -32,6 +33,13 @@ describe('renderer request diagnostics', () => {
       marketplaceKindsProvided: true,
     });
     expect(rendererRequestShape('thread/list', { cwd: '/private/workspace' })).toBeUndefined();
+  });
+
+  it('caches only slow read-only plugin and MCP status requests for bounded periods', () => {
+    expect(rendererResponseCacheTtlMs('plugin/list')).toBe(2_000);
+    expect(rendererResponseCacheTtlMs('mcpServerStatus/list')).toBe(2_000);
+    expect(rendererResponseCacheTtlMs('thread/list')).toBeNull();
+    expect(rendererResponseCacheTtlMs('turn/start')).toBeNull();
   });
 });
 

@@ -8,7 +8,7 @@ import { CodexAppServerClient } from '../packages/app-server-client/dist/index.j
 const codexBin = requiredEnvironment('SMOKE_CODEX_BIN');
 const codexHome = requiredEnvironment('SMOKE_CODEX_HOME');
 const workspace = process.env.SMOKE_WORKSPACE ?? process.cwd();
-const rendererVersion = process.env.SMOKE_RENDERER_VERSION ?? '26.727.51351';
+const rendererVersion = process.env.SMOKE_RENDERER_VERSION ?? '26.730.61639';
 const proxyUrl =
   process.env.SMOKE_EGRESS_PROXY_URL === undefined
     ? null

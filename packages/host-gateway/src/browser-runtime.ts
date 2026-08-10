@@ -18,7 +18,7 @@ const BROWSER_PLUGIN_ID = 'browser@openai-bundled' as const;
 const COMMENT_RUNTIME_VIEW_CHANNEL = 'codex_desktop:message-for-view';
 const COMMENT_RUNTIME_HOST_CHANNEL = 'codex_desktop:browser-sidebar-runtime-message';
 const COMMENT_RUNTIME_PAGE_EVENT_CHANNEL = 'codex_desktop:browser-page-event';
-const COMMENT_PRELOAD_ELECTRON_SHIM = String.raw`
+export const QUALIFIED_COMMENT_PRELOAD_ELECTRON_SHIM = String.raw`
 (() => {
   const listeners = new Map();
   const binding = globalThis.__codexOfficialCommentRuntimeHost;
@@ -63,11 +63,33 @@ const COMMENT_PRELOAD_ELECTRON_SHIM = String.raw`
       return func(...args);
     },
   };
+  const webFrame = Object.freeze({
+    setVisualZoomLevelLimits() {
+      // Chromium already owns the zoom boundary in the hosted page.
+    },
+  });
+  // Electron preload scripts receive a narrow process object even with
+  // context isolation enabled. The official comment preload reads argv to
+  // select its runtime mode and emits a preload error event. Reproduce only
+  // those two observed capabilities instead of exposing Node.js to web pages.
+  if (typeof globalThis.process === "undefined") {
+    Object.defineProperty(globalThis, "process", {
+      configurable: true,
+      enumerable: false,
+      value: Object.freeze({
+        argv: Object.freeze([]),
+        emit() {
+          return false;
+        },
+      }),
+      writable: false,
+    });
+  }
   Object.defineProperty(globalThis, "require", {
     configurable: true,
     enumerable: false,
     value(name) {
-      if (name === "electron") return { contextBridge, ipcRenderer };
+      if (name === "electron") return { contextBridge, ipcRenderer, webFrame };
       throw new Error("Unsupported module requested by official preload: " + String(name));
     },
     writable: false,
@@ -1041,7 +1063,7 @@ export class OfficialBrowserRuntime {
             this.#handleCommentRuntimeBridgeMessage(page, channel, message),
         );
         await context.addInitScript({
-          content: `${COMMENT_PRELOAD_ELECTRON_SHIM}\n${commentPreloadSource}`,
+          content: `${QUALIFIED_COMMENT_PRELOAD_ELECTRON_SHIM}\n${commentPreloadSource}`,
         });
       }
       for (const page of context.pages()) {

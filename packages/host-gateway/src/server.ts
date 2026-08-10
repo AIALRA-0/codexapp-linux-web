@@ -277,7 +277,7 @@ export async function createGateway(config: GatewayConfig): Promise<FastifyInsta
 
   app.get('/__codex/bootstrap.js', async (request, reply) => {
     const identity = requireIdentity(request, config);
-    const runtime = await runtimes.acquire(identity);
+    const runtime = await runtimes.acquireBootstrap(identity);
     try {
       const sessionId = randomUUID();
       const ticket = issueTicket(identity, sessionId, config);
@@ -303,6 +303,12 @@ export async function createGateway(config: GatewayConfig): Promise<FastifyInsta
         systemThemeVariant: 'light',
         usesOwlAppShell: false,
         uploadPathPrefix: runtime.uploadPathPrefix,
+      });
+      // The persisted catalog is enough for the official renderer to paint its
+      // shell and sidebar. Start Codex, MCP, plugins, and browser services in
+      // parallel instead of holding the bootstrap response behind them.
+      void runtime.start().catch((error: unknown) => {
+        app.log.error({ err: error, auditUserKey: runtime.userKey }, 'runtime warmup failed');
       });
       const source = `window.__CODEX_BROWSER_BOOTSTRAP__=${escapeScriptJson(bootstrap)};\n`;
       return reply
@@ -460,6 +466,23 @@ export async function createGateway(config: GatewayConfig): Promise<FastifyInsta
                 );
                 socket.close(4410, 'browser session state unavailable');
                 return;
+              }
+              // A full page reload creates a new official app session id. Any
+              // older disconnected session for the same immutable identity can
+              // no longer be the authoritative renderer, so discard its replay
+              // buffer before it accumulates live notifications for ten minutes.
+              for (const [staleSessionId, staleEntry] of reconnectableIdentityEntries(
+                sessions,
+                identity,
+              )) {
+                clearTimeout(staleEntry.cleanupTimer);
+                staleEntry.session.dispose();
+                sessions.delete(staleSessionId);
+                runtimes.release(staleEntry.runtime);
+                app.log.info(
+                  { auditUserKey, sessionId: staleSessionId },
+                  'superseded disconnected bridge session discarded',
+                );
               }
               if (
                 sessions.size >= config.maxSessions ||
@@ -716,10 +739,12 @@ export async function createGateway(config: GatewayConfig): Promise<FastifyInsta
     const identity = requireIdentity(request, config);
     const requested = request.params['*'];
     if (requested === '' && !requestHasInitialRoute(request, config.publicOrigin)) {
-      const runtime = await runtimes.acquire(identity);
+      const runtime = await runtimes.acquireBootstrap(identity);
       try {
-        const initialRoute = await runtime.readInitialRoute();
-        const location = officialInitialRouteLocation(initialRoute);
+        const location =
+          runtime.cachedInitialRoute === null
+            ? '/'
+            : officialInitialRouteLocation(runtime.cachedInitialRoute);
         if (location !== '/') return reply.redirect(location);
       } finally {
         runtimes.release(runtime);
@@ -776,6 +801,14 @@ export function countReconnectableIdentitySessions(
     if (entry.cleanupTimer !== undefined && identitiesMatch(entry.identity, identity)) count += 1;
   }
   return count;
+}
+
+export function reconnectableIdentityEntries<
+  T extends { identity: AuthentikIdentity; cleanupTimer?: NodeJS.Timeout },
+>(entries: Iterable<[string, T]>, identity: AuthentikIdentity): Array<[string, T]> {
+  return [...entries].filter(
+    ([, entry]) => entry.cleanupTimer !== undefined && identitiesMatch(entry.identity, identity),
+  );
 }
 
 export function officialInitialRouteLocation(initialRoute: '/' | '/login'): string {

@@ -507,12 +507,11 @@ export function resolveRendererFetchUrl(value: string, chatGptApiBase: string): 
     throw new RendererFetchError('data URL fetches are not proxied by the browser host', 400);
   }
   const base = new URL(chatGptApiBase);
-  const basePath = base.pathname.replace(/\/+$/u, '');
-  const relativePath = value.replace(/^\/+/u, '');
-  base.pathname = `${basePath}/${relativePath}`;
-  base.search = '';
-  base.hash = '';
-  return base;
+  if (!base.pathname.endsWith('/')) base.pathname = `${base.pathname}/`;
+  // The renderer sends backend paths such as `/conversations?limit=20`. URL
+  // resolution must parse the query separately; assigning that whole value to
+  // `pathname` percent-encodes `?` as `%3F` and changes the upstream endpoint.
+  return new URL(value.replace(/^\/+/u, ''), base);
 }
 
 export function assertAllowedRendererFetchUrl(url: URL): void {

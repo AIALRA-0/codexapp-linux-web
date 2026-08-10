@@ -18,6 +18,8 @@ codexapp_assert_no_background_work
 next_official_version="$CODEXAPP_PAIR_OFFICIAL_VERSION"
 next_build_number="$CODEXAPP_PAIR_BUILD_NUMBER"
 next_official_target="$CODEXAPP_PAIR_OFFICIAL_TARGET"
+next_codex_cli_version="$CODEXAPP_PAIR_CODEX_CLI_VERSION"
+next_codex_bin="$CODEXAPP_PAIR_CODEX_BIN"
 
 current_link="$codexapp_application_root/current"
 official_current_link="$codexapp_official_application_root/current"
@@ -46,7 +48,7 @@ rollback() {
     fi
     cp -a -- "$environment_backup" "$codexapp_environment_file"
     systemctl start "$codexapp_service_name" || true
-    codexapp_wait_for_health 45 || true
+    codexapp_wait_for_health 90 || true
   fi
   rm -f -- "$environment_backup"
   exit "$exit_code"
@@ -57,9 +59,13 @@ systemctl stop "$codexapp_service_name"
 switched=1
 codexapp_switch_link "$official_current_link" "$next_official_target" "official-current"
 codexapp_switch_link "$current_link" "$target" "current-${release_id}"
-codexapp_set_expected_official_version "$next_official_version" "$next_build_number"
+codexapp_set_expected_official_version \
+  "$next_official_version" \
+  "$next_build_number" \
+  "$next_codex_cli_version" \
+  "$next_codex_bin"
 systemctl start "$codexapp_service_name"
-if ! codexapp_wait_for_health 45; then
+if ! codexapp_wait_for_health 90; then
   journalctl -u "$codexapp_service_name" --no-pager -n 120 >&2 || true
   echo "promoted release did not become ready" >&2
   exit 1

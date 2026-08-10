@@ -18,6 +18,7 @@ interface OldOfficialThreadCatalogModule {
 
 interface LatestOfficialThreadCatalogModule {
   wi?: unknown;
+  _i?: unknown;
 }
 
 export function loadQualifiedThreadCatalogContract(
@@ -39,20 +40,35 @@ export function loadQualifiedThreadCatalogContract(
   }
 
   const shared = officialRequire(sharedPath) as LatestOfficialThreadCatalogModule;
-  if (!Array.isArray(shared.wi)) {
+  const sourceKinds = version === '26.730.61639' ? shared._i : shared.wi;
+  if (!Array.isArray(sourceKinds)) {
     throw new Error('qualified official thread catalog source kinds changed');
   }
+  const qualifiedSourceKinds = sourceKinds as unknown[];
   return {
-    convertThread: loadLatestOfficialThreadConverter(qualifiedSourceRoot),
-    sourceKinds: [...(shared.wi as unknown[])],
+    convertThread: loadLatestOfficialThreadConverter(qualifiedSourceRoot, version),
+    sourceKinds: [...qualifiedSourceKinds],
   };
 }
 
 function loadLatestOfficialThreadConverter(
   sourceRoot: string,
+  version: '26.727.51351' | '26.730.61639',
 ): QualifiedThreadCatalogContract['convertThread'] {
   const mainSource = readQualifiedMainSource(sourceRoot);
-  const converterMarker = 'function qx(e,t=Vx){if(e.ephemeral||e.parentThreadId!=null';
+  const contract =
+    version === '26.730.61639'
+      ? {
+          converterName: 'cS',
+          converterMarker: 'function cS(e,t=sS){if(e.ephemeral||e.parentThreadId!=null',
+          endMarker: 'var fS=`codex-notification`',
+        }
+      : {
+          converterName: 'qx',
+          converterMarker: 'function qx(e,t=Vx){if(e.ephemeral||e.parentThreadId!=null',
+          endMarker: 'var Zx=`codex-notification`',
+        };
+  const { converterMarker } = contract;
   const converterIndex = mainSource.indexOf(converterMarker);
   if (
     converterIndex < 0 ||
@@ -63,8 +79,7 @@ function loadLatestOfficialThreadConverter(
   ) {
     throw new Error('qualified official thread converter changed');
   }
-  const endMarker = 'var Zx=`codex-notification`';
-  const prefixEnd = mainSource.indexOf(endMarker, converterIndex);
+  const prefixEnd = mainSource.indexOf(contract.endMarker, converterIndex);
   if (prefixEnd < 0 || prefixEnd > 1_000_000) {
     throw new Error('qualified official thread converter dependency boundary changed');
   }
@@ -79,7 +94,7 @@ function loadLatestOfficialThreadConverter(
     }
     return realRequire(request);
   };
-  const source = `${mainSource.slice(0, prefixEnd)}\n;module.exports.__qualifiedThreadConverter=qx;`;
+  const source = `${mainSource.slice(0, prefixEnd)}\n;module.exports.__qualifiedThreadConverter=${contract.converterName};`;
   const evaluate = runInThisContext(
     `(function(require,module,exports,__dirname,__filename){${source}\n})`,
     {

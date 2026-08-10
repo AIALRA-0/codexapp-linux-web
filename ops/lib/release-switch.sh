@@ -38,6 +38,9 @@ codexapp_verify_release_pair() {
   local descriptor
   local official_version
   local build_number
+  local codex_cli_version
+  local codex_bin
+  local codex_runtime_root
   local official_target
   local source_manifest
 
@@ -46,6 +49,7 @@ codexapp_verify_release_pair() {
     echo "application release is missing or unverified" >&2
     return 1
   fi
+
   if ! runuser -u "$codexapp_service_user" -- test -x "$target" ||
     ! runuser -u "$codexapp_service_user" -- test -r "$target/apps/host/dist/main.js"; then
     echo "application release is inaccessible to the service account" >&2
@@ -73,6 +77,27 @@ codexapp_verify_release_pair() {
       return 1
     fi
     build_number="$(jq -er '.buildNumber | select(test("^[0-9]+$"))' "$descriptor")"
+  fi
+
+  codex_cli_version="$(
+    jq -er '.codexCli | select(test("^[0-9]+([.][0-9A-Za-z+-]+)+$"))' \
+      "$target/manifests/official-${official_version}.json"
+  )"
+  codex_bin="/srv/aialra/codexapp-official/runtime-tools-${codex_cli_version}/node_modules/.bin/codex"
+  codex_runtime_root="/srv/aialra/codexapp-official/runtime-tools-${codex_cli_version}"
+  if [[ ! -x "$codex_bin" ]] ||
+    [[ "$(realpath "$codex_bin")" != "$codex_runtime_root"/* ]]; then
+    echo "qualified Codex runtime is missing or escapes its immutable root: $codex_bin" >&2
+    return 1
+  fi
+  if [[ "$(stat -c '%U:%G' "$codex_runtime_root")" != "root:root" ]] ||
+    find "$codex_runtime_root" -maxdepth 1 -perm /022 -print -quit | grep -q .; then
+    echo "qualified Codex runtime ownership or permissions are unsafe" >&2
+    return 1
+  fi
+  if [[ "$($codex_bin --version 2>/dev/null)" != "codex-cli $codex_cli_version" ]]; then
+    echo "qualified Codex runtime version changed" >&2
+    return 1
   fi
 
   official_target="$codexapp_official_release_root/$official_version"
@@ -112,6 +137,8 @@ codexapp_verify_release_pair() {
   CODEXAPP_PAIR_OFFICIAL_VERSION="$official_version"
   CODEXAPP_PAIR_BUILD_NUMBER="$build_number"
   CODEXAPP_PAIR_OFFICIAL_TARGET="$official_target"
+  CODEXAPP_PAIR_CODEX_CLI_VERSION="$codex_cli_version"
+  CODEXAPP_PAIR_CODEX_BIN="$codex_bin"
 }
 
 codexapp_switch_link() {
@@ -132,6 +159,9 @@ codexapp_switch_link() {
 codexapp_set_expected_official_version() {
   local version="$1"
   local build="$2"
+  local codex_cli_version="$3"
+  local codex_bin="$4"
+  local official_release_root="$codexapp_official_release_root/$version"
   local temporary
 
   if [[ ! -f "$codexapp_environment_file" || -L "$codexapp_environment_file" ]]; then
@@ -139,7 +169,12 @@ codexapp_set_expected_official_version() {
     return 1
   fi
   if [[ "$(grep -c '^EXPECTED_RENDERER_VERSION=' "$codexapp_environment_file")" -ne 1 ]] ||
-    [[ "$(grep -c '^EXPECTED_BUILD_NUMBER=' "$codexapp_environment_file")" -ne 1 ]]; then
+    [[ "$(grep -c '^EXPECTED_BUILD_NUMBER=' "$codexapp_environment_file")" -ne 1 ]] ||
+    [[ "$(grep -c '^EXPECTED_CODEX_VERSION=' "$codexapp_environment_file")" -ne 1 ]] ||
+    [[ "$(grep -c '^CODEX_BIN=' "$codexapp_environment_file")" -ne 1 ]] ||
+    [[ "$(grep -c '^OFFICIAL_SOURCE_ROOT=' "$codexapp_environment_file")" -ne 1 ]] ||
+    [[ "$(grep -c '^OFFICIAL_ROOT=' "$codexapp_environment_file")" -ne 1 ]] ||
+    [[ "$(grep -c '^SOURCE_MANIFEST=' "$codexapp_environment_file")" -ne 1 ]]; then
     echo "production expected-version settings are not unique" >&2
     return 1
   fi
@@ -148,6 +183,9 @@ codexapp_set_expected_official_version() {
   awk \
     -v version="$version" \
     -v build="$build" \
+    -v codex_cli_version="$codex_cli_version" \
+    -v codex_bin="$codex_bin" \
+    -v official_release_root="$official_release_root" \
     '
       /^EXPECTED_RENDERER_VERSION=/ {
         print "EXPECTED_RENDERER_VERSION=" version
@@ -155,6 +193,26 @@ codexapp_set_expected_official_version() {
       }
       /^EXPECTED_BUILD_NUMBER=/ {
         print "EXPECTED_BUILD_NUMBER=" build
+        next
+      }
+      /^EXPECTED_CODEX_VERSION=/ {
+        print "EXPECTED_CODEX_VERSION=codex-cli " codex_cli_version
+        next
+      }
+      /^CODEX_BIN=/ {
+        print "CODEX_BIN=" codex_bin
+        next
+      }
+      /^OFFICIAL_SOURCE_ROOT=/ {
+        print "OFFICIAL_SOURCE_ROOT=" official_release_root "/source"
+        next
+      }
+      /^OFFICIAL_ROOT=/ {
+        print "OFFICIAL_ROOT=" official_release_root "/source/webview"
+        next
+      }
+      /^SOURCE_MANIFEST=/ {
+        print "SOURCE_MANIFEST=" official_release_root "/qualification/source-manifest.json"
         next
       }
       { print }

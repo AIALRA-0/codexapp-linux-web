@@ -9,7 +9,7 @@ import { CodexAppServerClient } from '../packages/app-server-client/dist/index.j
 const codexBin = process.env.SMOKE_CODEX_BIN;
 if (codexBin === undefined) throw new Error('SMOKE_CODEX_BIN is required');
 
-const rendererVersion = process.env.SMOKE_RENDERER_VERSION ?? '26.727.51351';
+const rendererVersion = process.env.SMOKE_RENDERER_VERSION ?? '26.730.61639';
 const root = await mkdtemp(join(tmpdir(), 'codex-core-lifecycle-'));
 const codexHome = join(root, 'codex-home');
 const workspace = join(root, 'workspace');
@@ -36,6 +36,27 @@ function createClient() {
     });
   });
   return client;
+}
+
+function waitForTurnCompleted(client, threadId, timeoutMs = 30_000) {
+  return new Promise((resolve, reject) => {
+    const timeout = setTimeout(() => {
+      client.off('notification', onNotification);
+      reject(new Error(`turn/completed timed out for ${threadId}`));
+    }, timeoutMs);
+    const onNotification = (notification) => {
+      if (
+        notification?.method !== 'turn/completed' ||
+        notification?.params?.threadId !== threadId
+      ) {
+        return;
+      }
+      clearTimeout(timeout);
+      client.off('notification', onNotification);
+      resolve(notification.params);
+    };
+    client.on('notification', onNotification);
+  });
 }
 
 function threadIdFrom(value) {
@@ -118,6 +139,7 @@ try {
   }
 
   let turnStartOutcome = 'accepted';
+  const firstTurnCompleted = waitForTurnCompleted(firstClient, threadId);
   try {
     await firstClient.request('turn/start', {
       threadId,
@@ -129,6 +151,7 @@ try {
         },
       ],
     });
+    await firstTurnCompleted;
   } catch (error) {
     turnStartOutcome = error instanceof Error ? `rejected: ${error.message}` : 'rejected';
   }
@@ -220,6 +243,7 @@ try {
   if (forkedRead?.thread?.historyMode !== 'paginated') {
     throw new Error('forked thread did not preserve official paginated history');
   }
+  const forkTurnCompleted = waitForTurnCompleted(secondClient, forkedThreadId);
   await secondClient.request('turn/start', {
     threadId: forkedThreadId,
     input: [
@@ -230,6 +254,7 @@ try {
       },
     ],
   });
+  await forkTurnCompleted;
   await secondClient.request('thread/name/set', {
     threadId: forkedThreadId,
     name: `${searchMarker} fork`,

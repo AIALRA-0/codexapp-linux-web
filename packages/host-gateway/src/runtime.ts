@@ -64,6 +64,7 @@ import { ThreadMetadataGenerator } from './thread-metadata-generation.js';
 
 const execFileAsync = promisify(execFile);
 const THREAD_CATALOG_STATE_KEY = '__browser-host-official-thread-catalog-v2';
+const INITIAL_ROUTE_STATE_KEY = '__browser-host-initial-route-v1';
 const PINNED_THREAD_IDS_KEY = 'pinned-thread-ids';
 const INITIAL_SIDEBAR_GLOBAL_STATE_KEYS = [
   'desktop-first-seen-at-ms',
@@ -85,12 +86,21 @@ const INITIAL_SIDEBAR_GLOBAL_STATE_KEYS = [
 ] as const;
 
 interface RendererRequestMetadata {
+  browserSessionId?: string;
   method: string;
   prewarmThread?: boolean;
+  rendererRequestId: JsonRpcId;
+  responseCacheKey?: string;
+  responseCacheTtlMs?: number;
   requestFingerprint?: string;
   requestShape?: Record<string, unknown>;
   startedAtMs: number;
   trace?: unknown;
+}
+
+interface RendererResponseCacheEntry {
+  expiresAtMs: number;
+  result: unknown;
 }
 
 interface RendererMessage {
@@ -138,6 +148,14 @@ export function rendererRequestShape(
   };
 }
 
+export function rendererResponseCacheTtlMs(method: string): number | null {
+  // The official shell can ask for these lists several times during one mount.
+  // A two-second deduplication window removes that duplicated cold-start work
+  // without hiding a plugin install or MCP status change for a meaningful time.
+  if (method === 'plugin/list' || method === 'mcpServerStatus/list') return 2_000;
+  return null;
+}
+
 function canonicalizeRendererRequestValue(value: unknown): unknown {
   if (Array.isArray(value)) return value.map(canonicalizeRendererRequestValue);
   if (value === null || typeof value !== 'object') return value ?? null;
@@ -174,14 +192,16 @@ export class UserRuntime extends EventEmitter {
   #pendingGitRequests = new Map<string, string>();
   #prewarmedThreads: OfficialPrewarmedThreads;
   #turnLatency: TurnLatencyTracker;
+  #bootstrapPrepared = false;
+  #preparingBootstrap: Promise<void> | undefined;
   #starting: Promise<void> | undefined;
   #appServerRestartTimer: NodeJS.Timeout | undefined;
   #appServerRestartAttempt = 0;
   #stopping = false;
   #rendererRequests = new Map<JsonRpcId, RendererRequestMetadata>();
+  #rendererResponseCache = new Map<string, RendererResponseCacheEntry>();
   #modelProviderCapabilities: unknown;
   #fetchControllers = new Map<string, AbortController>();
-  #initialAppServerMessages: unknown[] = [];
   #browserDownloads = new Map<string, BrowserDownload & { expiresAt: number }>();
   #backgroundWork: BackgroundWorkTracker;
   #pendingAppServerRequests = new Map<JsonRpcId, JsonRpcRequest>();
@@ -374,6 +394,11 @@ export class UserRuntime extends EventEmitter {
     return this.#backgroundWork.snapshot;
   }
 
+  get cachedInitialRoute(): '/' | '/login' | null {
+    const value = this.#state.get('globalState', INITIAL_ROUTE_STATE_KEY);
+    return value === '/' || value === '/login' ? value : null;
+  }
+
   get initialSidebarBootstrap(): Record<string, unknown> {
     return {
       // The unchanged official renderer understands an incomplete bootstrap
@@ -473,7 +498,20 @@ export class UserRuntime extends EventEmitter {
       includeToken: false,
       refreshToken: false,
     })) as { authMethod?: unknown } | null;
-    return initialRouteForAuthMethod(response?.authMethod);
+    const route = initialRouteForAuthMethod(response?.authMethod);
+    await this.#state.set('globalState', INITIAL_ROUTE_STATE_KEY, route);
+    return route;
+  }
+
+  async prepareBootstrap(): Promise<void> {
+    if (this.#bootstrapPrepared) return;
+    if (this.#preparingBootstrap !== undefined) return this.#preparingBootstrap;
+    this.#preparingBootstrap = this.#prepareBootstrap();
+    try {
+      await this.#preparingBootstrap;
+    } finally {
+      this.#preparingBootstrap = undefined;
+    }
   }
 
   async start(): Promise<void> {
@@ -502,6 +540,7 @@ export class UserRuntime extends EventEmitter {
     this.requestUserInputAutoResolution.clearPendingRequests();
     this.#backgroundWork.clear();
     this.#pendingAppServerRequests.clear();
+    this.#rendererResponseCache.clear();
     await this.#gitWorker?.stop();
     this.#gitWorker = undefined;
     this.#pendingGitRequests.clear();
@@ -551,18 +590,21 @@ export class UserRuntime extends EventEmitter {
               method: prepared.request.method,
               durationMs: receivedAtMs - startedAtMs,
             });
-            this.emit('view-message', {
-              type: 'mcp-response',
-              hostId: 'local',
-              message: { id: prepared.request.id, result: cached },
-              ...(prepared.request.trace === undefined
-                ? {}
-                : {
-                    receivedAtMs,
-                    requestMethod: prepared.request.method,
-                    trace: prepared.request.trace,
-                  }),
-            });
+            this.#emitRendererMessage(
+              {
+                type: 'mcp-response',
+                hostId: 'local',
+                message: { id: prepared.request.id, result: cached },
+                ...(prepared.request.trace === undefined
+                  ? {}
+                  : {
+                      receivedAtMs,
+                      requestMethod: prepared.request.method,
+                      trace: prepared.request.trace,
+                    }),
+              },
+              browserSessionId,
+            );
             return undefined;
           }
         }
@@ -576,27 +618,71 @@ export class UserRuntime extends EventEmitter {
             method: prepared.request.method,
             durationMs: receivedAtMs - startedAtMs,
           });
-          this.emit('view-message', {
-            type: 'mcp-response',
-            hostId: 'local',
-            message: {
-              id: prepared.request.id,
-              result: this.#modelProviderCapabilities,
+          this.#emitRendererMessage(
+            {
+              type: 'mcp-response',
+              hostId: 'local',
+              message: {
+                id: prepared.request.id,
+                result: this.#modelProviderCapabilities,
+              },
+              ...(prepared.request.trace === undefined
+                ? {}
+                : {
+                    receivedAtMs,
+                    requestMethod: prepared.request.method,
+                    trace: prepared.request.trace,
+                  }),
             },
-            ...(prepared.request.trace === undefined
-              ? {}
-              : {
-                  receivedAtMs,
-                  requestMethod: prepared.request.method,
-                  trace: prepared.request.trace,
-                }),
-          });
+            browserSessionId,
+          );
           return undefined;
         }
+        const rendererRequestId = prepared.request.id;
+        const appServerRequestId =
+          browserSessionId === undefined ? rendererRequestId : randomUUID();
+        const requestFingerprint = rendererRequestFingerprint(prepared.request.params);
+        const responseCacheTtlMs = rendererResponseCacheTtlMs(prepared.request.method);
+        const responseCacheKey =
+          responseCacheTtlMs === null
+            ? undefined
+            : `${prepared.request.method}:${requestFingerprint}`;
+        if (responseCacheKey !== undefined) {
+          const cached = this.#rendererResponseCache.get(responseCacheKey);
+          if (cached !== undefined && cached.expiresAtMs > Date.now()) {
+            const receivedAtMs = Date.now();
+            this.emit('performance', {
+              kind: 'official-cache',
+              method: prepared.request.method,
+              durationMs: receivedAtMs - startedAtMs,
+            });
+            this.#emitRendererMessage(
+              {
+                type: 'mcp-response',
+                hostId: 'local',
+                message: { id: rendererRequestId, result: cached.result },
+                ...(prepared.request.trace === undefined
+                  ? {}
+                  : {
+                      receivedAtMs,
+                      requestMethod: prepared.request.method,
+                      trace: prepared.request.trace,
+                    }),
+              },
+              browserSessionId,
+            );
+            return undefined;
+          }
+          if (cached !== undefined) this.#rendererResponseCache.delete(responseCacheKey);
+        }
         const requestShape = rendererRequestShape(prepared.request.method, prepared.request.params);
-        this.#rendererRequests.set(prepared.request.id, {
+        this.#rendererRequests.set(appServerRequestId, {
+          ...(browserSessionId === undefined ? {} : { browserSessionId }),
           method: prepared.request.method,
-          requestFingerprint: rendererRequestFingerprint(prepared.request.params),
+          rendererRequestId,
+          requestFingerprint,
+          ...(responseCacheKey === undefined ? {} : { responseCacheKey }),
+          ...(responseCacheTtlMs === null ? {} : { responseCacheTtlMs }),
           ...(requestShape === undefined ? {} : { requestShape }),
           startedAtMs,
           ...(prepared.request.trace === undefined ? {} : { trace: prepared.request.trace }),
@@ -605,7 +691,10 @@ export class UserRuntime extends EventEmitter {
           this.#turnLatency.start(prepared.request.params, startedAtMs);
         }
         try {
-          await this.#requireAppServer().forwardRequest(prepared.request);
+          await this.#requireAppServer().forwardRequest({
+            ...prepared.request,
+            id: appServerRequestId,
+          });
         } catch (error) {
           if (prepared.request.method === 'turn/start') {
             this.#turnLatency.stop(prepared.request.params);
@@ -637,16 +726,24 @@ export class UserRuntime extends EventEmitter {
           this.config.minimumFreeBytes,
           prepared.request.method,
         );
+        const rendererRequestId = prepared.request.id;
+        const appServerRequestId =
+          browserSessionId === undefined ? rendererRequestId : randomUUID();
         const requestShape = rendererRequestShape(prepared.request.method, prepared.request.params);
-        this.#rendererRequests.set(prepared.request.id, {
+        this.#rendererRequests.set(appServerRequestId, {
+          ...(browserSessionId === undefined ? {} : { browserSessionId }),
           method: prepared.request.method,
           prewarmThread: true,
+          rendererRequestId,
           requestFingerprint: rendererRequestFingerprint(prepared.request.params),
           ...(requestShape === undefined ? {} : { requestShape }),
           startedAtMs,
           ...(prepared.request.trace === undefined ? {} : { trace: prepared.request.trace }),
         });
-        await this.#requireAppServer().forwardRequest(prepared.request);
+        await this.#requireAppServer().forwardRequest({
+          ...prepared.request,
+          id: appServerRequestId,
+        });
         return undefined;
       }
       case 'mcp-notification':
@@ -663,7 +760,9 @@ export class UserRuntime extends EventEmitter {
         }
         return undefined;
       case 'mcp-request-abandon':
-        await this.#requireAppServer().notify('$/cancelRequest', { id: message.requestId });
+        await this.#requireAppServer().notify('$/cancelRequest', {
+          id: this.#appServerRequestIdForRenderer(message.requestId, browserSessionId),
+        });
         return undefined;
       case 'shared-object-set': {
         if (typeof message.key !== 'string') throw new Error('invalid shared-object key');
@@ -677,11 +776,14 @@ export class UserRuntime extends EventEmitter {
       }
       case 'shared-object-subscribe': {
         if (typeof message.key !== 'string') throw new Error('invalid shared-object key');
-        this.emit('view-message', {
-          type: 'shared-object-updated',
-          key: message.key,
-          value: this.#state.get('sharedObjects', message.key),
-        });
+        this.#emitRendererMessage(
+          {
+            type: 'shared-object-updated',
+            key: message.key,
+            value: this.#state.get('sharedObjects', message.key),
+          },
+          browserSessionId,
+        );
         return undefined;
       }
       case 'shared-object-unsubscribe':
@@ -697,33 +799,36 @@ export class UserRuntime extends EventEmitter {
         );
         return undefined;
       case 'ready':
-        for (const initialMessage of this.#initialAppServerMessages) {
-          this.emit('view-message', initialMessage);
-        }
         for (const pendingRequest of this.#pendingAppServerRequests.values()) {
-          this.emit('view-message', toOfficialRendererRequest(pendingRequest));
+          this.#emitRendererMessage(toOfficialRendererRequest(pendingRequest), browserSessionId);
         }
-        this.emit('view-message', {
-          type: 'request-user-input-auto-resolution-snapshot',
-          hostId: 'local',
-          pendingRequests: this.requestUserInputAutoResolution.getPendingRequestSnapshots(),
-        });
+        this.#emitRendererMessage(
+          {
+            type: 'request-user-input-auto-resolution-snapshot',
+            hostId: 'local',
+            pendingRequests: this.requestUserInputAutoResolution.getPendingRequestSnapshots(),
+          },
+          browserSessionId,
+        );
         return undefined;
       case 'fetch':
-        await this.#handleFetch(message);
+        await this.#handleFetch(message, browserSessionId);
         return undefined;
       case 'cancel-fetch':
       case 'cancel-fetch-stream':
-        this.#cancelFetch(message);
+        this.#cancelFetch(message, browserSessionId);
         return undefined;
       case 'fetch-stream':
-        this.#handleFetchStream(message);
+        this.#handleFetchStream(message, browserSessionId);
         return undefined;
       case 'persisted-atom-sync-request':
-        this.emit('view-message', {
-          type: 'persisted-atom-sync',
-          state: this.#state.snapshot('persistedAtoms'),
-        });
+        this.#emitRendererMessage(
+          {
+            type: 'persisted-atom-sync',
+            state: this.#state.snapshot('persistedAtoms'),
+          },
+          browserSessionId,
+        );
         return undefined;
       case 'persisted-atom-update': {
         if (typeof message.key !== 'string') throw new Error('invalid persisted atom key');
@@ -751,16 +856,22 @@ export class UserRuntime extends EventEmitter {
         await this.#state.set('sharedObjects', 'codex_runtimes_config', message.config);
         return undefined;
       case 'electron-window-focus-request':
-        this.emit('view-message', {
-          type: 'electron-window-focus-changed',
-          isFocused: true,
-        });
+        this.#emitRendererMessage(
+          {
+            type: 'electron-window-focus-changed',
+            isFocused: true,
+          },
+          browserSessionId,
+        );
         return undefined;
       case 'avatar-overlay-open-state-request':
-        this.emit('view-message', {
-          type: 'avatar-overlay-open-state-changed',
-          isOpen: false,
-        });
+        this.#emitRendererMessage(
+          {
+            type: 'avatar-overlay-open-state-changed',
+            isOpen: false,
+          },
+          browserSessionId,
+        );
         return undefined;
       case 'electron-window-zoom-changed':
       case 'electron-app-state-snapshot-trigger':
@@ -797,10 +908,13 @@ export class UserRuntime extends EventEmitter {
         // is the exact browser-host equivalent.
         return undefined;
       case 'electron-pick-workspace-root-option':
-        this.emit('view-message', {
-          type: 'workspace-root-option-picked',
-          root: this.workspaceRoot,
-        });
+        this.#emitRendererMessage(
+          {
+            type: 'workspace-root-option-picked',
+            root: this.workspaceRoot,
+          },
+          browserSessionId,
+        );
         return undefined;
       case 'remote-hosted-pip-hidden-thread-ids-changed':
         await this.#state.set(
@@ -915,13 +1029,8 @@ export class UserRuntime extends EventEmitter {
   }
 
   async #start(): Promise<void> {
-    mkdirSync(this.codexHome, { recursive: true, mode: 0o700 });
-    mkdirSync(this.workspaceRoot, { recursive: true, mode: 0o700 });
-    mkdirSync(this.uploadRoot, { recursive: true, mode: 0o700 });
-    await this.#state.load();
-    await this.#pruneRemovedLocalProjectMetadata(this.#state.get('globalState', 'local-projects'));
+    await this.prepareBootstrap();
     await this.browserRuntime.start();
-    this.threadCatalog.load();
     await this.officialDesktopState.start();
     const { stdout, stderr } = await execFileAsync(this.config.codexBin, ['--version'], {
       encoding: 'utf8',
@@ -962,6 +1071,33 @@ export class UserRuntime extends EventEmitter {
         this.#prewarmedThreads.trackResponse(parsed, metadata.startedAtMs);
       }
       if (
+        metadata?.responseCacheKey !== undefined &&
+        metadata.responseCacheTtlMs !== undefined &&
+        parsed.error === undefined
+      ) {
+        this.#rendererResponseCache.set(metadata.responseCacheKey, {
+          expiresAtMs: receivedAtMs + metadata.responseCacheTtlMs,
+          result: parsed.result,
+        });
+        this.#pruneRendererResponseCache(receivedAtMs);
+      }
+      if (metadata?.method === 'getAuthStatus' && parsed.error === undefined) {
+        const result =
+          parsed.result !== null &&
+          typeof parsed.result === 'object' &&
+          !Array.isArray(parsed.result)
+            ? (parsed.result as Record<string, unknown>)
+            : {};
+        void this.#state
+          .set('globalState', INITIAL_ROUTE_STATE_KEY, initialRouteForAuthMethod(result.authMethod))
+          .catch((error: unknown) => {
+            this.emit('capability-error', {
+              requestType: 'initial-route-cache',
+              error: error instanceof Error ? error.message : 'initial route cache failed',
+            });
+          });
+      }
+      if (
         parsed.error !== undefined &&
         !isExpectedAppServerResponseError(metadata?.method, parsed.error.code, parsed.error.message)
       ) {
@@ -972,18 +1108,23 @@ export class UserRuntime extends EventEmitter {
           error: parsed.error.message,
         });
       }
-      this.emit('view-message', {
-        type: 'mcp-response',
-        hostId: 'local',
-        message: parsed,
-        ...(metadata?.trace === undefined
-          ? {}
-          : {
-              receivedAtMs,
-              requestMethod: metadata.method,
-              trace: metadata.trace,
-            }),
-      });
+      const rendererResponse =
+        metadata === undefined ? parsed : { ...parsed, id: metadata.rendererRequestId };
+      this.#emitRendererMessage(
+        {
+          type: 'mcp-response',
+          hostId: 'local',
+          message: rendererResponse,
+          ...(metadata?.trace === undefined
+            ? {}
+            : {
+                receivedAtMs,
+                requestMethod: metadata.method,
+                trace: metadata.trace,
+              }),
+        },
+        metadata?.browserSessionId,
+      );
     });
     client.on('notification', (notification: unknown) => {
       const parsedNotification = jsonRpcNotificationSchema.parse(notification);
@@ -1012,6 +1153,16 @@ export class UserRuntime extends EventEmitter {
     this.#appServerRestartAttempt = 0;
     await this.threadCatalog.start(client);
     await this.automationController.start();
+  }
+
+  async #prepareBootstrap(): Promise<void> {
+    mkdirSync(this.codexHome, { recursive: true, mode: 0o700 });
+    mkdirSync(this.workspaceRoot, { recursive: true, mode: 0o700 });
+    mkdirSync(this.uploadRoot, { recursive: true, mode: 0o700 });
+    await this.#state.load();
+    await this.#pruneRemovedLocalProjectMetadata(this.#state.get('globalState', 'local-projects'));
+    this.threadCatalog.load();
+    this.#bootstrapPrepared = true;
   }
 
   async #restartAppServer(client: CodexAppServerClient): Promise<void> {
@@ -1071,18 +1222,21 @@ export class UserRuntime extends EventEmitter {
   }
 
   #failRendererRequests(error: Error): void {
-    for (const id of this.#rendererRequests.keys()) {
-      this.emit('view-message', {
-        type: 'mcp-response',
-        hostId: 'local',
-        message: {
-          id,
-          error: {
-            code: -32_098,
-            message: error.message,
+    for (const metadata of this.#rendererRequests.values()) {
+      this.#emitRendererMessage(
+        {
+          type: 'mcp-response',
+          hostId: 'local',
+          message: {
+            id: metadata.rendererRequestId,
+            error: {
+              code: -32_098,
+              message: error.message,
+            },
           },
         },
-      });
+        metadata.browserSessionId,
+      );
     }
     this.#rendererRequests.clear();
     this.#prewarmedThreads.clear();
@@ -1125,10 +1279,38 @@ export class UserRuntime extends EventEmitter {
         });
       });
     const message = toOfficialRendererNotification(parsedNotification);
-    if (this.#initialAppServerMessages.length < 500) {
-      this.#initialAppServerMessages.push(message);
-    }
     this.emit('view-message', message);
+  }
+
+  #emitRendererMessage(message: unknown, browserSessionId?: string): void {
+    if (browserSessionId === undefined) {
+      this.emit('view-message', message);
+      return;
+    }
+    this.emit('view-message-for-session', { browserSessionId, message });
+  }
+
+  #pruneRendererResponseCache(nowMs: number): void {
+    for (const [key, cached] of this.#rendererResponseCache) {
+      if (cached.expiresAtMs <= nowMs) this.#rendererResponseCache.delete(key);
+    }
+    while (this.#rendererResponseCache.size > 1_000) {
+      const first = this.#rendererResponseCache.keys().next().value;
+      if (first === undefined) break;
+      this.#rendererResponseCache.delete(first);
+    }
+  }
+
+  #appServerRequestIdForRenderer(rendererRequestId: unknown, browserSessionId?: string): unknown {
+    for (const [appServerRequestId, metadata] of this.#rendererRequests) {
+      if (
+        metadata.rendererRequestId === rendererRequestId &&
+        metadata.browserSessionId === browserSessionId
+      ) {
+        return appServerRequestId;
+      }
+    }
+    return rendererRequestId;
   }
 
   #observePendingRequestNotification(notification: { method: string; params?: unknown }): void {
@@ -1255,14 +1437,15 @@ export class UserRuntime extends EventEmitter {
     return this.#appServer;
   }
 
-  async #handleFetch(message: RendererMessage): Promise<void> {
+  async #handleFetch(message: RendererMessage, browserSessionId?: string): Promise<void> {
     const requestId = message.requestId;
     const url = message.url;
     if (typeof requestId !== 'string' || typeof url !== 'string') {
       throw new Error('invalid renderer fetch request');
     }
     if (!url.startsWith('vscode://codex/')) {
-      const controller = this.#createFetchController(requestId);
+      const controllerKey = this.#fetchControllerKey(requestId, browserSessionId);
+      const controller = this.#createFetchController(controllerKey);
       const startedAtMs = Date.now();
       try {
         const response = await this.#fetchProxy.perform(message, controller.signal);
@@ -1275,10 +1458,10 @@ export class UserRuntime extends EventEmitter {
           responseType: response.responseType,
           durationMs: Date.now() - startedAtMs,
         });
-        this.emit('view-message', response);
+        this.#emitRendererMessage(response, browserSessionId);
       } finally {
-        if (this.#fetchControllers.get(requestId) === controller) {
-          this.#fetchControllers.delete(requestId);
+        if (this.#fetchControllers.get(controllerKey) === controller) {
+          this.#fetchControllers.delete(controllerKey);
         }
       }
       return;
@@ -1293,64 +1476,76 @@ export class UserRuntime extends EventEmitter {
     }
     try {
       const result = await this.#handleDesktopRequest(method, params);
-      this.emit('view-message', {
-        type: 'fetch-response',
-        responseType: 'success',
-        requestId,
-        status: 200,
-        headers: { 'content-type': 'application/json' },
-        bodyJsonString: JSON.stringify(result ?? null),
-      });
+      this.#emitRendererMessage(
+        {
+          type: 'fetch-response',
+          responseType: 'success',
+          requestId,
+          status: 200,
+          headers: { 'content-type': 'application/json' },
+          bodyJsonString: JSON.stringify(result ?? null),
+        },
+        browserSessionId,
+      );
     } catch (error) {
       this.emit('capability-error', {
         requestType: 'fetch',
         method,
         error: error instanceof Error ? error.message : 'desktop request failed',
       });
-      this.emit('view-message', {
-        type: 'fetch-response',
-        responseType: 'error',
-        requestId,
-        status: 432,
-        error: error instanceof Error ? error.message : 'desktop request failed',
-      });
+      this.#emitRendererMessage(
+        {
+          type: 'fetch-response',
+          responseType: 'error',
+          requestId,
+          status: 432,
+          error: error instanceof Error ? error.message : 'desktop request failed',
+        },
+        browserSessionId,
+      );
     }
   }
 
-  #handleFetchStream(message: RendererMessage): void {
+  #handleFetchStream(message: RendererMessage, browserSessionId?: string): void {
     const requestId = message.requestId;
     if (typeof requestId !== 'string' || requestId.length === 0) {
       throw new Error('invalid renderer fetch stream request');
     }
-    const controller = this.#createFetchController(requestId);
+    const controllerKey = this.#fetchControllerKey(requestId, browserSessionId);
+    const controller = this.#createFetchController(controllerKey);
     void this.#fetchProxy
       .performStream(
         message,
         (response) => {
-          this.emit('view-message', response);
+          this.#emitRendererMessage(response, browserSessionId);
         },
         controller.signal,
       )
       .finally(() => {
-        if (this.#fetchControllers.get(requestId) === controller) {
-          this.#fetchControllers.delete(requestId);
+        if (this.#fetchControllers.get(controllerKey) === controller) {
+          this.#fetchControllers.delete(controllerKey);
         }
       });
   }
 
-  #cancelFetch(message: RendererMessage): void {
+  #cancelFetch(message: RendererMessage, browserSessionId?: string): void {
     const requestId = message.requestId;
     if (typeof requestId !== 'string' || requestId.length === 0) {
       throw new Error('invalid renderer fetch cancellation');
     }
-    this.#fetchControllers.get(requestId)?.abort();
-    this.#fetchControllers.delete(requestId);
+    const controllerKey = this.#fetchControllerKey(requestId, browserSessionId);
+    this.#fetchControllers.get(controllerKey)?.abort();
+    this.#fetchControllers.delete(controllerKey);
   }
 
-  #createFetchController(requestId: string): AbortController {
-    this.#fetchControllers.get(requestId)?.abort();
+  #fetchControllerKey(requestId: string, browserSessionId?: string): string {
+    return `${browserSessionId ?? 'runtime'}:${requestId}`;
+  }
+
+  #createFetchController(controllerKey: string): AbortController {
+    this.#fetchControllers.get(controllerKey)?.abort();
     const controller = new AbortController();
-    this.#fetchControllers.set(requestId, controller);
+    this.#fetchControllers.set(controllerKey, controller);
     return controller;
   }
 
@@ -2201,6 +2396,14 @@ export class RuntimeRegistry {
   }
 
   async acquire(identity: AuthentikIdentity): Promise<UserRuntime> {
+    return this.#acquire(identity, true);
+  }
+
+  async acquireBootstrap(identity: AuthentikIdentity): Promise<UserRuntime> {
+    return this.#acquire(identity, false);
+  }
+
+  async #acquire(identity: AuthentikIdentity, startRuntime: boolean): Promise<UserRuntime> {
     const key = userKeyForIdentity(identity);
     let entry = this.#entries.get(key);
     if (entry === undefined) {
@@ -2221,8 +2424,15 @@ export class RuntimeRegistry {
       delete entry.stopTimer;
     }
     entry.references += 1;
-    await entry.runtime.start();
-    return entry.runtime;
+    try {
+      if (startRuntime) await entry.runtime.start();
+      else await entry.runtime.prepareBootstrap();
+      return entry.runtime;
+    } catch (error) {
+      entry.references = Math.max(0, entry.references - 1);
+      this.#reconcileIdleStop(entry.runtime);
+      throw error;
+    }
   }
 
   release(runtime: UserRuntime): void {

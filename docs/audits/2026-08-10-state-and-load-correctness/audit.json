@@ -1,0 +1,858 @@
+{
+  "meta": {
+    "contract_version": "1.0",
+    "title": "CodexApp 状态一致性与首屏加载修复",
+    "mode": "standard",
+    "as_of": "2026-08-10",
+    "status": "complete",
+    "scope": "修复普通对话首屏为空或过慢、ChatGPT 模式创建后白屏、重复对话、刷新后消失、打开到旧状态、多标签页串响应和官方版本升级兼容；以不修改官方渲染器源码的宿主适配完成可回滚发布。",
+    "exclusions": [
+      "本轮不迁移或压测用户明确延期的本地超大对话",
+      "不承诺上游 OpenAI、Authentik、网络或 VPS 永不故障",
+      "不把一次页面可打开解释为全部交互已经正确"
+    ]
+  },
+  "decision_problem": {
+    "project_classification": "高风险、可回滚的生产状态与加载路径修正",
+    "risk_level": "high",
+    "decision_owner": "AIALRA",
+    "desired_outcome": "网页首次打开立即显示已持久化侧边栏；普通和 ChatGPT 对话创建、发送、切换、刷新、分支与删除保持一致；多标签页互不串响应；除真实网络耗时外不增加可感知宿主延迟。",
+    "current_state": "生产已运行官方 26.730.61639、构建号 6234 和 Codex CLI 0.147.0-alpha.1.2；本地 239 项回归、Linux 隔离测试、原子切换、连续健康检查和重启读回均已完成。超大对话按用户决定延期。",
+    "decision": "是否发布严格托管官方 26.730.61639 渲染器、使用轻量启动与会话定向响应的候选版本。",
+    "success_metrics": [
+      "根页面和 bootstrap 不再等待 Codex、MCP、插件和浏览器完整启动",
+      "ChatGPT 相对地址的查询字符串不再被编码进路径",
+      "两个浏览器会话使用相同官方 JSON-RPC 编号时，各自只收到自己的响应",
+      "刷新不再重放最多 500 条历史通知，也不保留被替代页面十分钟缓存",
+      "创建、读取、列表、归档、重启恢复、搜索、分支和删除生命周期全部通过",
+      "官方 UI、认证隔离、桌面工具、MCP、审批和备份恢复隔离测试全部通过",
+      "生产发布后 readyz、版本、日志、真实浏览器刷新和多标签页路径正常"
+    ],
+    "constraints": [
+      "官方渲染器源码保持不变，只做受合同约束的 Electron/网络/状态宿主适配",
+      "不自造对话数据库，不改变官方线程协议和历史分页语义",
+      "发布必须先取得一致性快照，并保留上一不可变版本",
+      "存在活跃后台任务时禁止停止生产服务",
+      "大对话迁移和大对话性能验收延期，不得混入本轮结论"
+    ],
+    "irreversible_actions": [
+      "无备份覆盖生产状态会导致对话或设置不可恢复",
+      "活跃 turn 期间重启服务会丢失未完成的上游运行上下文"
+    ],
+    "research_budget": {
+      "overall_limit": "完成代码根因、官方接口、公开反例、新包合同、Linux 隔离测试和生产真实浏览器六类证据；任一状态一致性测试失败即停止发布。",
+      "parallel_capacity": 1,
+      "paid_or_private_access": [
+        "AIALRA VPS",
+        "本地与 VPS 上的签入仓库",
+        "已签名的官方 Codex 桌面包",
+        "Authentik 保护后的生产网站"
+      ],
+      "cutoff_policy": "大对话按用户决定延期；其余路径必须通过自动化、隔离和生产三层门禁，失败则保持或恢复上一版本。"
+    },
+    "reversal_evidence": [
+      "上一不可变应用版本 20260804.2320-background-retention-official-26.727.51351",
+      "上一不可变官方包 26.727.51351",
+      "切换前一致性状态快照及 SHA-256",
+      "候选发布文件哈希与生产切换日志"
+    ]
+  },
+  "questions": [
+    {
+      "id": "Q1",
+      "question": "为什么页面会没有对话、出现重复对话、刷新后消失或打开到旧状态？",
+      "critical": true,
+      "internal_probe": "追踪浏览器会话、JSON-RPC 编号、初始通知重放、线程目录与刷新清理路径",
+      "external_probe": "核对官方 App Server 的 thread/list、read、resume、fork 和分页语义及公开状态缺陷",
+      "internal_status": "answered",
+      "external_status": "answered",
+      "internal_source_ids": ["S1", "S2"],
+      "external_source_ids": ["S5", "S8", "S9", "S10"],
+      "internal_gap": "",
+      "external_gap": ""
+    },
+    {
+      "id": "Q2",
+      "question": "为什么 ChatGPT 模式创建时间长并可能立即白屏？",
+      "critical": true,
+      "internal_probe": "检查渲染器相对 fetch 地址到上游 ChatGPT API 地址的转换和查询字符串",
+      "external_probe": "核对 WHATWG/Node URL 相对解析规则并以目标请求形式验证",
+      "internal_status": "answered",
+      "external_status": "answered",
+      "internal_source_ids": ["S1", "S3"],
+      "external_source_ids": ["S6"],
+      "internal_gap": "",
+      "external_gap": ""
+    },
+    {
+      "id": "Q3",
+      "question": "哪些首屏延迟属于宿主架构，可以在不造新轮子的前提下降低？",
+      "critical": true,
+      "internal_probe": "测量根页面、bootstrap、App Server、MCP、插件与浏览器启动依赖，并检查刷新时旧消息量",
+      "external_probe": "核对官方 App Server 客户端边界和 Nginx 普通响应/WebSocket 缓冲语义",
+      "internal_status": "answered",
+      "external_status": "answered",
+      "internal_source_ids": ["S1", "S2", "S3"],
+      "external_source_ids": ["S5", "S7"],
+      "internal_gap": "",
+      "external_gap": ""
+    },
+    {
+      "id": "Q4",
+      "question": "升级官方包后怎样保证前端功能仍由官方实现且可控回滚？",
+      "critical": true,
+      "internal_probe": "对签名包、ASAR、渲染器树、主进程导出、preload 合同、CLI 版本和发布原子切换逐项校验",
+      "external_probe": "核对官方包来源和 App Server 协议，同时检索新旧版本已知回归",
+      "internal_status": "answered",
+      "external_status": "answered",
+      "internal_source_ids": ["S3", "S4"],
+      "external_source_ids": ["S5", "S11", "S12", "S13"],
+      "internal_gap": "",
+      "external_gap": ""
+    }
+  ],
+  "source_map": [
+    {
+      "id": "M1",
+      "question_ids": ["Q1", "Q2", "Q3", "Q4"],
+      "origin": "internal",
+      "channel": "代码、配置和测试",
+      "target": "宿主会话、网络转发、启动、线程目录、官方合同和发布脚本",
+      "decision_use": "定位直接根因并限制改动边界",
+      "priority": "high",
+      "access_status": "searched"
+    },
+    {
+      "id": "M2",
+      "question_ids": ["Q1", "Q2", "Q3", "Q4"],
+      "origin": "external",
+      "channel": "官方文档、标准和上游缺陷",
+      "target": "App Server 线程语义、URL 解析、代理缓冲和状态一致性反例",
+      "decision_use": "防止把内部猜测当作协议事实，并检查反例",
+      "priority": "high",
+      "access_status": "searched"
+    },
+    {
+      "id": "M3",
+      "question_ids": ["Q1", "Q2", "Q3", "Q4"],
+      "origin": "internal",
+      "channel": "本地、VPS 隔离和生产运行",
+      "target": "自动回归、真实官方包、真实浏览器、认证和回滚",
+      "decision_use": "决定候选是否允许进入生产",
+      "priority": "high",
+      "access_status": "searched"
+    }
+  ],
+  "sources": [
+    {
+      "id": "S1",
+      "origin": "internal",
+      "title": "修复前宿主状态、会话与网络路径代码审查",
+      "location": "repository:packages/host-gateway/src/runtime.ts,server.ts,session.ts,network.ts",
+      "source_type": "source-code",
+      "date": "2026-08-10",
+      "accessed_at": "2026-08-10",
+      "applicability": "直接覆盖用户报告的空侧边栏、重复/消失、旧状态、白屏和加载等待路径",
+      "limitations": "代码审查不能单独证明生产症状频率",
+      "retrieval_method": "逐行追踪请求、响应、刷新和启动控制流",
+      "observed_content": "相对 URL 查询被写入 pathname；不同标签页共用 JSON-RPC id；每个新页面重放最多 500 条旧通知；root/bootstrap 等待完整运行时。",
+      "direct": true,
+      "independence_group": "codexapp-host-source"
+    },
+    {
+      "id": "S2",
+      "origin": "internal",
+      "title": "生产状态与用户故障观察",
+      "location": "private:production-observation-and-user-reports-20260810",
+      "source_type": "behavioral-data",
+      "date": "2026-08-10",
+      "accessed_at": "2026-08-10",
+      "applicability": "确认症状发生在真实 Authentik、Nginx、VPS 与官方 UI 组合中",
+      "limitations": "尚无长期分位数监控，频率主要来自用户连续观察",
+      "retrieval_method": "用户真实操作报告、生产健康和运行状态读取",
+      "observed_content": "页面可能先无聊天；创建后白屏；一次创建出现多条且刷新消失；打开只显示旧首条；普通交互存在明显延迟。",
+      "direct": true,
+      "independence_group": "production-user-observation"
+    },
+    {
+      "id": "S3",
+      "origin": "internal",
+      "title": "修复候选自动化与生命周期测试",
+      "location": "repository:ci-20260810-state-load-correctness",
+      "source_type": "test-observation",
+      "date": "2026-08-10",
+      "accessed_at": "2026-08-10",
+      "applicability": "验证 URL、会话定向响应、轻量启动、刷新替代、缓存、生命周期和安全边界",
+      "limitations": "超大对话按范围排除；生产登录页的最终人工体验由用户后续验收",
+      "retrieval_method": "macOS 与 Linux CI、官方包集成、核心生命周期和浏览器运行时冒烟",
+      "observed_content": "本地 47 个测试文件、239 项全部通过；生命周期覆盖创建、读、列、归档、重启恢复、搜索、分支和删除。",
+      "direct": true,
+      "independence_group": "candidate-ci"
+    },
+    {
+      "id": "S4",
+      "origin": "internal",
+      "title": "官方 26.730.61639 包资格记录",
+      "location": "repository:manifests/official-26.730.61639.json",
+      "source_type": "internal-artifact",
+      "date": "2026-08-10",
+      "accessed_at": "2026-08-10",
+      "applicability": "锁定官方前端、主进程、preload 和 Codex CLI 版本并支持原子切换",
+      "limitations": "只证明取得和使用的字节一致，不证明上游版本没有自身缺陷",
+      "retrieval_method": "签名/公证检查、ASAR 与树哈希、导出映射和 preload 合同校验",
+      "observed_content": "官方 build 6234、Electron 42.3.0、Codex CLI 0.147.0-alpha.1.2；渲染器和宿主树已固定。",
+      "direct": true,
+      "independence_group": "qualified-official-package"
+    },
+    {
+      "id": "S5",
+      "origin": "external",
+      "title": "OpenAI Codex App Server README",
+      "location": "https://github.com/openai/codex/blob/main/codex-rs/app-server/README.md",
+      "source_type": "official-doc",
+      "date": "2026-08-10",
+      "accessed_at": "2026-08-10",
+      "applicability": "定义 thread/start、list、read、resume、fork、分页和 sourceKinds 等官方边界",
+      "limitations": "主分支可能领先目标包，已用目标包合同与实测复核",
+      "retrieval_method": "打开 OpenAI 官方源码文档",
+      "observed_content": "App Server 使用 JSON-RPC；线程列表和历史读取有官方过滤、游标和分页语义。",
+      "direct": true,
+      "independence_group": "openai-app-server-docs"
+    },
+    {
+      "id": "S6",
+      "origin": "external",
+      "title": "Node.js URL API",
+      "location": "https://nodejs.org/api/url.html",
+      "source_type": "official-doc",
+      "date": "2026-08-10",
+      "accessed_at": "2026-08-10",
+      "applicability": "支持用 new URL(relative, base) 分离解析路径、查询与片段",
+      "limitations": "不描述 ChatGPT 私有接口，只定义标准 URL 行为",
+      "retrieval_method": "打开 Node.js 官方文档",
+      "observed_content": "相对 URL 应由 URL 解析器相对于基础地址解析，而不是整体写入 pathname。",
+      "direct": true,
+      "independence_group": "node-url-docs"
+    },
+    {
+      "id": "S7",
+      "origin": "external",
+      "title": "Nginx proxy_buffering 文档",
+      "location": "https://nginx.org/en/docs/http/ngx_http_proxy_module.html#proxy_buffering",
+      "source_type": "official-doc",
+      "date": "2026-08-10",
+      "accessed_at": "2026-08-10",
+      "applicability": "区分普通 HTML/资源代理响应和升级后的 WebSocket 通道",
+      "limitations": "缓冲只优化代理传输，不解决线程状态错误",
+      "retrieval_method": "打开 Nginx 官方文档",
+      "observed_content": "普通上游响应可缓冲；WebSocket 在 101 后成为升级隧道。",
+      "direct": true,
+      "independence_group": "nginx-docs"
+    },
+    {
+      "id": "S8",
+      "origin": "external",
+      "title": "Codex issue 34446：首条粘贴文本导致线程预览为空",
+      "location": "https://github.com/openai/codex/issues/34446",
+      "source_type": "other",
+      "date": "2026-08-10",
+      "accessed_at": "2026-08-10",
+      "applicability": "反例：即使宿主正确，上游线程元数据仍可能产生空预览",
+      "limitations": "公开 issue 是个案，不代表所有用户或目标版本",
+      "retrieval_method": "打开上游公开缺陷页",
+      "observed_content": "报告特定首条输入形态可能留下空线程预览。",
+      "direct": true,
+      "independence_group": "openai-codex-issues"
+    },
+    {
+      "id": "S9",
+      "origin": "external",
+      "title": "Codex issue 24287：界面卡住与重复提示",
+      "location": "https://github.com/openai/codex/issues/24287",
+      "source_type": "other",
+      "date": "2026-08-10",
+      "accessed_at": "2026-08-10",
+      "applicability": "反例：重复或不可见活动也可能存在于上游 UI 状态链路",
+      "limitations": "公开 issue 的环境与本项目不完全相同",
+      "retrieval_method": "打开上游公开缺陷页",
+      "observed_content": "报告 UI 卡住、重复提示和活动 turn 不可见。",
+      "direct": true,
+      "independence_group": "openai-codex-issues"
+    },
+    {
+      "id": "S10",
+      "origin": "external",
+      "title": "Codex issue 34076：项目元数据分歧与重复会话",
+      "location": "https://github.com/openai/codex/issues/34076",
+      "source_type": "other",
+      "date": "2026-08-10",
+      "accessed_at": "2026-08-10",
+      "applicability": "提供项目归属和重复线程的公开反例",
+      "limitations": "不能直接证明本项目同一根因",
+      "retrieval_method": "打开上游公开缺陷页",
+      "observed_content": "报告项目元数据分歧并形成重复会话。",
+      "direct": true,
+      "independence_group": "openai-codex-issues"
+    },
+    {
+      "id": "S11",
+      "origin": "external",
+      "title": "Codex issue 27843：state-db-only 大分页返回空",
+      "location": "https://github.com/openai/codex/issues/27843",
+      "source_type": "other",
+      "date": "2026-08-10",
+      "accessed_at": "2026-08-10",
+      "applicability": "支持避免自定义大 limit，并严格按目标官方合同分页",
+      "limitations": "报告针对旧 0.140 版本，目标 CLI 已升级",
+      "retrieval_method": "打开上游公开缺陷页",
+      "observed_content": "报告 useStateDbOnly 与较大 limit 组合在旧版本可能返回空列表。",
+      "direct": true,
+      "independence_group": "openai-codex-issues"
+    },
+    {
+      "id": "S12",
+      "origin": "external",
+      "title": "Codex issue 29510：巨型 rollout 的内存代价",
+      "location": "https://github.com/openai/codex/issues/29510",
+      "source_type": "other",
+      "date": "2026-08-10",
+      "accessed_at": "2026-08-10",
+      "applicability": "支持将超大对话单独验收，不把普通路径结论外推",
+      "limitations": "极端个案，且本轮按用户要求排除大对话",
+      "retrieval_method": "打开上游公开缺陷页",
+      "observed_content": "报告巨型 rollout 可导致 App Server 异常内存占用。",
+      "direct": true,
+      "independence_group": "openai-codex-issues"
+    },
+    {
+      "id": "S13",
+      "origin": "external",
+      "title": "Codex issue 20493：文件和数据库存在但聊天隐藏",
+      "location": "https://github.com/openai/codex/issues/20493",
+      "source_type": "other",
+      "date": "2026-08-10",
+      "accessed_at": "2026-08-10",
+      "applicability": "反例：rollout、状态数据库和展示元数据可能发生漂移",
+      "limitations": "公开 issue 不能替代本项目生产数据核验",
+      "retrieval_method": "打开上游公开缺陷页",
+      "observed_content": "报告底层文件或数据库仍存在但 UI 隐藏聊天。",
+      "direct": true,
+      "independence_group": "openai-codex-issues"
+    },
+    {
+      "id": "S14",
+      "origin": "internal",
+      "title": "生产发布、健康与重启读回验收",
+      "location": "private:production-validation-20260810",
+      "source_type": "test-observation",
+      "date": "2026-08-10",
+      "accessed_at": "2026-08-10",
+      "applicability": "证明目标应用、官方包和 CLI 已成对切换，并验证普通对话在服务重启后的持久化读回",
+      "limitations": "不包含用户明确延期的超大对话；真实登录页面仍需要用户做最终主观体验验收",
+      "retrieval_method": "生产原子发布、readyz 连续检查、systemd 日志、临时对话创建、服务重启、重新连接读回和清理",
+      "observed_content": "最终版本切换成功；冷启动约 8 秒后连续 10 次健康检查成功且无重启；临时对话在服务重启后可读并已删除。",
+      "direct": true,
+      "independence_group": "production-validation"
+    },
+    {
+      "id": "SL-problem",
+      "origin": "external",
+      "title": "问题分支检索记录",
+      "location": "https://github.com/openai/codex/issues/24287",
+      "source_type": "search-log",
+      "date": "2026-08-10",
+      "accessed_at": "2026-08-10",
+      "applicability": "检索界面卡住、重复和状态错乱症状",
+      "limitations": "公开缺陷只能作为反例和候选机制",
+      "retrieval_method": "GitHub 上游缺陷多轮关键词检索并打开详情",
+      "observed_content": "找到与 UI 卡住、重复提示和活动状态不可见相邻的上游报告。",
+      "direct": true,
+      "independence_group": "search-problem"
+    },
+    {
+      "id": "SL-mechanism",
+      "origin": "external",
+      "title": "机制分支检索记录",
+      "location": "https://github.com/openai/codex/blob/main/codex-rs/app-server/README.md",
+      "source_type": "search-log",
+      "date": "2026-08-10",
+      "accessed_at": "2026-08-10",
+      "applicability": "检索线程分页、恢复、分支和通知的官方机制",
+      "limitations": "用目标包实测补足主分支版本差异",
+      "retrieval_method": "OpenAI 官方仓库协议检索",
+      "observed_content": "确认线程状态由 App Server 管理，浏览器宿主应透明转发而非自造对话状态。",
+      "direct": true,
+      "independence_group": "search-mechanism"
+    },
+    {
+      "id": "SL-product",
+      "origin": "external",
+      "title": "产品分支检索记录",
+      "location": "https://github.com/openai/codex/issues/34076",
+      "source_type": "search-log",
+      "date": "2026-08-10",
+      "accessed_at": "2026-08-10",
+      "applicability": "检索官方桌面产品的重复会话和项目状态行为",
+      "limitations": "没有公开 Web 版可直接替代本项目",
+      "retrieval_method": "官方产品缺陷和目标桌面包对照",
+      "observed_content": "官方 UI 自身也存在状态回归风险，因此升级必须继续使用版本合同和真实 UI 门禁。",
+      "direct": true,
+      "independence_group": "search-product"
+    },
+    {
+      "id": "SL-research",
+      "origin": "external",
+      "title": "研究分支检索记录",
+      "location": "https://nodejs.org/api/url.html",
+      "source_type": "search-log",
+      "date": "2026-08-10",
+      "accessed_at": "2026-08-10",
+      "applicability": "检索标准相对 URL 解析和查询保留机制",
+      "limitations": "通用标准机制",
+      "retrieval_method": "Node 官方 URL 文档检索",
+      "observed_content": "确认以 URL 解析器组合基础地址与相对地址是保留查询的正确机制。",
+      "direct": true,
+      "independence_group": "search-research"
+    },
+    {
+      "id": "SL-adjacent",
+      "origin": "external",
+      "title": "相邻方案分支检索记录",
+      "location": "https://nginx.org/en/docs/http/ngx_http_proxy_module.html#proxy_buffering",
+      "source_type": "search-log",
+      "date": "2026-08-10",
+      "accessed_at": "2026-08-10",
+      "applicability": "比较自写前端、缓存代理和官方渲染器宿主三种边界",
+      "limitations": "Nginx 只能减少传输等待，不能替代应用状态修复",
+      "retrieval_method": "代理机制与内部架构对照",
+      "observed_content": "普通资产可用成熟代理缓冲；对话语义继续留给官方 App Server。",
+      "direct": true,
+      "independence_group": "search-adjacent"
+    },
+    {
+      "id": "SL-failure",
+      "origin": "external",
+      "title": "失败分支检索记录",
+      "location": "https://github.com/openai/codex/issues/20493",
+      "source_type": "search-log",
+      "date": "2026-08-10",
+      "accessed_at": "2026-08-10",
+      "applicability": "检索列表为空、状态数据库漂移和历史隐藏失败模式",
+      "limitations": "上游报告与宿主故障需分别验证",
+      "retrieval_method": "GitHub 上游失败案例检索并打开详情",
+      "observed_content": "找到聊天数据仍存在但界面隐藏的反例，要求保留底层快照和读回测试。",
+      "direct": true,
+      "independence_group": "search-failure"
+    },
+    {
+      "id": "SL-code",
+      "origin": "external",
+      "title": "代码分支检索记录",
+      "location": "https://github.com/openai/codex/blob/main/codex-rs/app-server/README.md",
+      "source_type": "search-log",
+      "date": "2026-08-10",
+      "accessed_at": "2026-08-10",
+      "applicability": "核对公开协议与解包目标代码的接口映射",
+      "limitations": "桌面渲染器源码不公开，必须以签名包解包和合同核对",
+      "retrieval_method": "官方开源 App Server 与目标包导出映射对照",
+      "observed_content": "宿主只实现 Electron 边界与传输，线程业务继续调用官方协议。",
+      "direct": true,
+      "independence_group": "search-code"
+    },
+    {
+      "id": "SL-patent",
+      "origin": "external",
+      "title": "专利分支有限检索记录",
+      "location": "https://patents.google.com/patent/GB2506624A/en",
+      "source_type": "search-log",
+      "date": "2026-08-10",
+      "accessed_at": "2026-08-10",
+      "applicability": "仅检查浏览器窗口和服务器会话关联的既有概念；本项目不做新颖性主张",
+      "limitations": "单一公开专利库、有限关键词，不构成法律检索或自由实施意见",
+      "retrieval_method": "Google Patents 有限相邻概念检索",
+      "observed_content": "浏览器窗口与服务器会话关联是既有概念；本次是运维修复而非专利性发明。",
+      "direct": true,
+      "independence_group": "search-patent"
+    }
+  ],
+  "claims": [
+    {
+      "id": "C1",
+      "statement": "ChatGPT 白屏的一条已确认根因是查询字符串被编码进 pathname，导致请求命中错误上游路径。",
+      "kind": "fact",
+      "impact": "high",
+      "confidence": "high",
+      "support_source_ids": ["S1", "S3", "S6"],
+      "contradict_source_ids": [],
+      "falsifier": "修复后捕获的实际上游请求仍含 %3F，或正确查询请求仍稳定复现相同白屏"
+    },
+    {
+      "id": "C2",
+      "statement": "共享官方 JSON-RPC 编号而广播响应，会让多标签页把别人的响应当作自己的结果。",
+      "kind": "fact",
+      "impact": "high",
+      "confidence": "high",
+      "support_source_ids": ["S1", "S3"],
+      "contradict_source_ids": [],
+      "falsifier": "两个会话同编号并发测试显示官方客户端能无歧义区分广播响应"
+    },
+    {
+      "id": "C3",
+      "statement": "首屏使用持久化目录先绘制，再后台启动 Codex、MCP、插件和浏览器，可移除宿主串行冷启动等待而不改变官方线程语义。",
+      "kind": "inference",
+      "impact": "high",
+      "confidence": "high",
+      "support_source_ids": ["S1", "S3", "S5", "S14"],
+      "contradict_source_ids": ["S13"],
+      "falsifier": "生产首屏仍必须等待 App Server 才能可靠显示目录，或缓存目录与官方线程在正常写入后持续分歧"
+    },
+    {
+      "id": "C4",
+      "statement": "删除每次 ready 重放旧通知并立即淘汰被刷新替代的断开会话，可避免刷新把过期状态重新灌入新页面。",
+      "kind": "inference",
+      "impact": "high",
+      "confidence": "high",
+      "support_source_ids": ["S1", "S3", "S14"],
+      "contradict_source_ids": ["S9"],
+      "falsifier": "真实刷新测试仍稳定出现旧首条、重复条目或新页面收到上一会话专属响应"
+    },
+    {
+      "id": "C5",
+      "statement": "不能承诺全部未来缺陷归零，因为官方自身仍有线程元数据、列表和极端 rollout 的公开反例。",
+      "kind": "fact",
+      "impact": "high",
+      "confidence": "high",
+      "support_source_ids": ["S8", "S9", "S10", "S11", "S12", "S13"],
+      "contradict_source_ids": [],
+      "falsifier": "上游撤回这些缺陷且目标版本对所有输入规模和状态组合提供完备证明"
+    }
+  ],
+  "assumptions": [
+    {
+      "id": "A1",
+      "statement": "普通规模对话足以完成本轮状态一致性发布门禁，超大对话可在后续独立迁移和压测。",
+      "critical": true,
+      "status": "supported",
+      "decision_impact": "只允许对普通对话范围给出通过结论，不得外推到超大对话。",
+      "falsifier": "普通对话也稳定触发仅与 rollout 大小相关的状态错误",
+      "support_source_ids": ["S2", "S12"],
+      "contradict_source_ids": []
+    },
+    {
+      "id": "A2",
+      "statement": "官方 26.730.61639 的目标导出与 preload 合同可以由当前宿主最小适配，无需修改官方渲染器。",
+      "critical": true,
+      "status": "supported",
+      "decision_impact": "若不成立则暂停升级，不能用自写前端补洞。",
+      "falsifier": "合同检查或真实 UI 出现必须修改官方渲染器源码才能继续的功能",
+      "support_source_ids": ["S3", "S4"],
+      "contradict_source_ids": []
+    }
+  ],
+  "search_branches": [
+    {
+      "name": "adjacent",
+      "status": "executed",
+      "reason": "比较代理缓存、自写前端和严格官方宿主边界",
+      "round_ids": ["R-adjacent"]
+    },
+    {
+      "name": "code",
+      "status": "executed",
+      "reason": "核对公开 App Server 与目标包导出",
+      "round_ids": ["R-code"]
+    },
+    {
+      "name": "failure",
+      "status": "executed",
+      "reason": "检索隐藏、重复、卡住和巨型状态失败",
+      "round_ids": ["R-failure"]
+    },
+    {
+      "name": "mechanism",
+      "status": "executed",
+      "reason": "核对线程与分页官方机制",
+      "round_ids": ["R-mechanism"]
+    },
+    {
+      "name": "patent",
+      "status": "executed",
+      "reason": "按审计要求做有限相邻概念检索，不作新颖性主张",
+      "round_ids": ["R-patent"]
+    },
+    {
+      "name": "problem",
+      "status": "executed",
+      "reason": "检索症状和直接失败表现",
+      "round_ids": ["R-problem"]
+    },
+    {
+      "name": "product",
+      "status": "executed",
+      "reason": "核对官方产品相邻行为和替代路径",
+      "round_ids": ["R-product"]
+    },
+    {
+      "name": "research",
+      "status": "executed",
+      "reason": "核对 URL 和代理标准机制",
+      "round_ids": ["R-research"]
+    }
+  ],
+  "search_rounds": [
+    {
+      "id": "R-problem",
+      "branch": "problem",
+      "query": "Codex app UI stuck duplicate prompt invisible active turn",
+      "channel": "OpenAI GitHub issues",
+      "date": "2026-08-10",
+      "discovery_mode": "keyword",
+      "new_candidate_ids": ["K-upstream-state"],
+      "evidence_source_ids": ["S9", "SL-problem"],
+      "new_high_similarity_count": 1,
+      "new_decision_evidence_count": 1,
+      "search_log_source_id": "SL-problem"
+    },
+    {
+      "id": "R-mechanism",
+      "branch": "mechanism",
+      "query": "Codex App Server thread list resume fork turns pagination",
+      "channel": "OpenAI official repository",
+      "date": "2026-08-10",
+      "discovery_mode": "official-doc",
+      "new_candidate_ids": ["K-official-host"],
+      "evidence_source_ids": ["S5", "SL-mechanism"],
+      "new_high_similarity_count": 1,
+      "new_decision_evidence_count": 1,
+      "search_log_source_id": "SL-mechanism"
+    },
+    {
+      "id": "R-product",
+      "branch": "product",
+      "query": "Codex duplicate sessions project metadata",
+      "channel": "OpenAI GitHub issues and qualified desktop package",
+      "date": "2026-08-10",
+      "discovery_mode": "product-comparison",
+      "new_candidate_ids": ["K-qualified-upgrade"],
+      "evidence_source_ids": ["S10", "SL-product"],
+      "new_high_similarity_count": 1,
+      "new_decision_evidence_count": 1,
+      "search_log_source_id": "SL-product"
+    },
+    {
+      "id": "R-research",
+      "branch": "research",
+      "query": "WHATWG relative URL base preserve query Node URL",
+      "channel": "Node.js official documentation",
+      "date": "2026-08-10",
+      "discovery_mode": "standards",
+      "new_candidate_ids": [],
+      "evidence_source_ids": ["S6", "SL-research"],
+      "new_high_similarity_count": 0,
+      "new_decision_evidence_count": 1,
+      "search_log_source_id": "SL-research"
+    },
+    {
+      "id": "R-adjacent",
+      "branch": "adjacent",
+      "query": "nginx proxy buffering websocket upgraded connection",
+      "channel": "Nginx official documentation",
+      "date": "2026-08-10",
+      "discovery_mode": "adjacent-architecture",
+      "new_candidate_ids": ["K-proxy-only"],
+      "evidence_source_ids": ["S7", "SL-adjacent"],
+      "new_high_similarity_count": 0,
+      "new_decision_evidence_count": 1,
+      "search_log_source_id": "SL-adjacent"
+    },
+    {
+      "id": "R-failure",
+      "branch": "failure",
+      "query": "Codex chats hidden state database rollout files present",
+      "channel": "OpenAI GitHub issues",
+      "date": "2026-08-10",
+      "discovery_mode": "failure-case",
+      "new_candidate_ids": ["K-upstream-state"],
+      "evidence_source_ids": ["S11", "S12", "S13", "SL-failure"],
+      "new_high_similarity_count": 2,
+      "new_decision_evidence_count": 2,
+      "search_log_source_id": "SL-failure"
+    },
+    {
+      "id": "R-code",
+      "branch": "code",
+      "query": "Codex App Server sourceKinds useStateDbOnly thread list",
+      "channel": "OpenAI official repository and qualified package",
+      "date": "2026-08-10",
+      "discovery_mode": "source-contract",
+      "new_candidate_ids": [],
+      "evidence_source_ids": ["S5", "SL-code"],
+      "new_high_similarity_count": 0,
+      "new_decision_evidence_count": 1,
+      "search_log_source_id": "SL-code"
+    },
+    {
+      "id": "R-patent",
+      "branch": "patent",
+      "query": "browser window server session correlation state",
+      "channel": "Google Patents",
+      "date": "2026-08-10",
+      "discovery_mode": "patent-keyword",
+      "new_candidate_ids": [],
+      "evidence_source_ids": ["SL-patent"],
+      "new_high_similarity_count": 0,
+      "new_decision_evidence_count": 0,
+      "search_log_source_id": "SL-patent"
+    }
+  ],
+  "candidates": [
+    {
+      "id": "K-official-host",
+      "name": "严格托管最新版官方渲染器并最小修复宿主",
+      "class": "near",
+      "verified": true,
+      "source_ids": ["S3", "S4", "S5"]
+    },
+    {
+      "id": "K-qualified-upgrade",
+      "name": "继续停留旧官方包只修宿主",
+      "class": "partial",
+      "verified": true,
+      "source_ids": ["S3", "S4"]
+    },
+    {
+      "id": "K-proxy-only",
+      "name": "只调整 Nginx 和网络参数",
+      "class": "adjacent",
+      "verified": true,
+      "source_ids": ["S1", "S7"]
+    },
+    {
+      "id": "K-upstream-state",
+      "name": "等待上游自行解决全部状态问题",
+      "class": "failed",
+      "verified": true,
+      "source_ids": ["S8", "S9", "S10", "S11", "S13"]
+    }
+  ],
+  "novelty": {
+    "applicable": true,
+    "applicability_reason": "标准审计仍执行有限的相邻实现和既有概念检索，但本项目不据此主张可专利性或原创性。",
+    "assessment": "near-match-found",
+    "stop_reason": "decisive-match",
+    "saturation_round_ids": [],
+    "languages": ["中文", "英文"],
+    "regions": ["全球公开网络"],
+    "access_gaps": [
+      {
+        "resource": "付费专利与法律数据库",
+        "impact": "不影响本次运维发布；若未来主张专利性需另行法律检索",
+        "critical": false
+      }
+    ],
+    "scope_statement": "官方桌面宿主是直接近似实现；本项目不主张原创性。公开专利检索只作相邻概念检查，不能解释为法律意见或全面查重。"
+  },
+  "perspectives": [
+    {
+      "id": "P1",
+      "lens": "状态一致性与失败恢复",
+      "producer": "主执行代理",
+      "producer_type": "lead-agent",
+      "producer_reference": "current-thread",
+      "independent": false,
+      "context_isolated": false,
+      "findings": ["优先消除串响应、旧消息重放和非一致备份", "任何读回或刷新失败都阻止发布"],
+      "limitations": "不是独立审查者，结论由自动化和真实生产验证约束。",
+      "source_ids": ["S1", "S2", "S3"],
+      "provenance_source_id": "S3"
+    },
+    {
+      "id": "P2",
+      "lens": "官方兼容与长期维护",
+      "producer": "版本合同测试工具",
+      "producer_type": "tool",
+      "producer_reference": "official-package-contract-suite-20260810",
+      "independent": false,
+      "context_isolated": true,
+      "findings": [
+        "目标包的 19 个 preload 方法、导出映射、渲染器树和 CLI 版本均能被当前宿主明确锁定"
+      ],
+      "limitations": "工具由同一仓库维护，只能证明合同符合，不能证明所有交互正确。",
+      "source_ids": ["S3", "S4"],
+      "provenance_source_id": "S3"
+    },
+    {
+      "id": "P3",
+      "lens": "真实用户体验与可感知延迟",
+      "producer": "AIALRA 用户观察",
+      "producer_type": "human",
+      "producer_reference": "current-thread-user-reports",
+      "independent": false,
+      "context_isolated": false,
+      "findings": [
+        "旧生产首屏、发送、切换和创建均存在可感知等待",
+        "重复、消失和旧首条属于正确性失败而不是单纯网络慢"
+      ],
+      "limitations": "缺少修复后的长期样本和浏览器性能分位数",
+      "source_ids": ["S2"],
+      "provenance_source_id": "S2"
+    }
+  ],
+  "real_world_validations": [
+    {
+      "id": "V1",
+      "role": "目标环境自动回归",
+      "participant_reference": "AIALRA VPS",
+      "method": "在目标 Linux、目标官方包和目标 Codex CLI 上运行完整测试与生命周期冒烟",
+      "conducted_at": "2026-08-10",
+      "outcome": "47 个测试文件、239 项回归通过；官方 UI、认证、生命周期、MCP、桌面工具、审批、备份恢复、原子发布、连续健康检查和生产重启读回通过。",
+      "limitations": "超大对话按用户要求延期；最终主观页面体验由用户后续验收",
+      "status": "completed",
+      "evidence_source_ids": ["S3", "S4", "S14"]
+    },
+    {
+      "id": "V2",
+      "role": "真实用户",
+      "participant_reference": "AIALRA",
+      "method": "在生产网站连续打开、创建、刷新、切换和观察对话状态",
+      "conducted_at": "2026-08-10",
+      "outcome": "确认旧生产存在空列表、白屏、重复、消失、旧状态和普遍延迟，作为修复前基线。",
+      "limitations": "修复后的最终用户验收尚未开始",
+      "status": "completed",
+      "evidence_source_ids": ["S2"]
+    }
+  ],
+  "alignment_questions": [
+    {
+      "id": "AQ1",
+      "question": "超大本地对话是否纳入本轮迁移与性能结论？",
+      "decision_changing": true,
+      "status": "answered",
+      "answer": "用户决定暂不迁移；本轮明确排除"
+    },
+    {
+      "id": "AQ2",
+      "question": "是否允许在取得一致性备份和通过门禁后直接完成生产切换？",
+      "decision_changing": true,
+      "status": "answered",
+      "answer": "用户已授权全量端到端修复"
+    }
+  ],
+  "recommendation": {
+    "verdict": "proceed",
+    "action": "保持生产运行严格托管的官方 26.730.61639，并交给用户验收普通对话的真实体验。不要迁移超大对话，也不要用自写前端或自建对话库补洞。",
+    "rationale": "已定位三个直接宿主根因；自动回归、隔离全路径、生产切换、连续健康检查和重启读回均已通过，修复保持官方线程协议和渲染器不变，上一版本与状态仍可回滚。",
+    "strongest_counterevidence": "官方上游仍有聊天隐藏、重复、分页和巨型 rollout 的公开缺陷，因此普通对话通过不能证明大对话或所有未来状态组合无缺陷。",
+    "minimum_test": "同编号双会话隔离、ChatGPT 查询保留、普通线程完整生命周期、刷新不重放旧状态、官方 UI 与认证隔离、MCP/插件、审批、备份恢复和生产真实浏览器。",
+    "failure_response": "任一状态、认证、工具或恢复门禁失败则不发布；生产健康或真实浏览器失败则自动或人工恢复上一应用、官方包、CLI 和环境组合，并从一致性快照读回。",
+    "reversal_condition": "生产出现对话丢失、重复、串响应、持续白屏、版本合同不符、服务重启循环或关键功能回归。",
+    "support_source_ids": ["S1", "S3", "S4", "S5", "S6", "S7"],
+    "counter_source_ids": ["S8", "S9", "S10", "S11", "S12", "S13"]
+  },
+  "review_triggers": [
+    "生产切换后立即复审真实浏览器结果和服务日志",
+    "开始迁移或打开超大对话前重新运行独立大对话审计与资源压测",
+    "官方桌面包、Codex CLI、App Server 线程合同或 Authentik 配置变化时重新资格检查",
+    "再次出现空列表、重复、刷新消失、旧首条、白屏或多标签页状态错乱时立即停止扩大发布"
+  ]
+}

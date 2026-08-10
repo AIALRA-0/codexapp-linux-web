@@ -6,7 +6,7 @@
 
 [![CI](https://github.com/AIALRA-0/codexapp-linux-web/actions/workflows/ci.yml/badge.svg)](https://github.com/AIALRA-0/codexapp-linux-web/actions/workflows/ci.yml)
 [![Node.js 24](https://img.shields.io/badge/Node.js-24-339933?logo=nodedotjs&logoColor=white)](https://nodejs.org/)
-[![Official renderer](https://img.shields.io/badge/renderer-26.727.51351-111111)](./manifests/official-26.727.51351.json)
+[![Official renderer](https://img.shields.io/badge/renderer-26.730.61639-111111)](./manifests/official-26.730.61639.json)
 [![License: MIT](https://img.shields.io/badge/code-MIT-blue.svg)](./LICENSE)
 
 [它解决什么](#它解决什么) · [真实界面](#真实界面) · [实现方式](#实现方式) · [验证结果](#验证结果) · [部署与升级](#部署与升级) · [数据边界](#数据边界)
@@ -70,7 +70,7 @@ flowchart TD
 | 页面     | 新任务、拉取请求、站点、已安排、插件和全部设置页面                   |
 | 运维     | 备份、恢复、不可变发布、健康检查和失败自动回滚                       |
 
-自动化仓库检查当前覆盖 45 个测试文件和 222 个测试
+自动化仓库检查当前覆盖 47 个测试文件和 239 个测试
 
 真实运行环境还会执行官方窗口、任务生命周期、MCP、权限、文件、终端、Git、浏览器、备份恢复和持久化烟雾测试
 
@@ -126,7 +126,7 @@ VPS 使用普通服务器网络请求访问 ChatGPT 项目列表时会收到 Clo
 - 保留 Chromium 用户命名空间沙箱，不使用 `--no-sandbox`
 - Ubuntu 只对这个不可变、由 root 管理的可执行文件开放用户命名空间，系统全局限制保持开启
 
-官方 macOS 包声明 Electron 42.3.0 / Chromium 150.0.7871.182，但公开 Linux Electron 42.3.0 实际携带的是 Chromium 148，不能冒充官方包的组合。Linux 网络进程因此使用已经真实验证、同为 Chromium 150 的 [Electron 43.2.0](https://releases.electronjs.org/release/v43.2.0)；Ubuntu 的按文件开放方式来自 [Chromium 官方 AppArmor 说明](https://chromium.googlesource.com/chromium/src/+/main/docs/security/apparmor-userns-restrictions.md)
+官方 macOS 包声明 Electron 42.3.0 / Chromium 151.0.7922.71，但公开 Linux Electron 42.3.0 实际携带的是更旧的 Chromium，不能冒充官方包的组合。Linux 网络进程继续使用已经真实验证的 [Electron 43.2.0](https://releases.electronjs.org/release/v43.2.0)；Ubuntu 的按文件开放方式来自 [Chromium 官方 AppArmor 说明](https://chromium.googlesource.com/chromium/src/+/main/docs/security/apparmor-userns-restrictions.md)
 
 真实登录态下，普通请求返回 403；同一账号通过生产 renderer 路由返回 200 和有效 JSON
 
@@ -250,6 +250,7 @@ ChatGPT 项目列表的真实登录态业务响应已经通过，不再依赖 WA
 - [MCP 迁移与重新连接](./docs/MCP-MIGRATION-2026-08-03.md)
 - [生产端到端验收记录](./docs/USER-JOURNEY-AUDIT-2026-07-29.md)
 - [2026-08-04 官方 26.727.51351 发布复验](./docs/VALIDATION-2026-08-04.md)
+- [2026-08-10 状态与加载修复复验](./docs/VALIDATION-2026-08-10.md)
 - [2026-08-03 发布复验](./docs/VALIDATION-2026-08-03.md)
 - [2026-07-31 发布复验](./docs/VALIDATION-2026-07-31.md)
 - [2026-07-30 发布复验](./docs/VALIDATION-2026-07-30.md)
@@ -257,9 +258,9 @@ ChatGPT 项目列表的真实登录态业务响应已经通过，不再依赖 WA
 
 ## 已锁定上游版本
 
-- ChatGPT / Codex renderer：`26.727.51351`
-- 官方构建号：`6119`
-- Codex app-server：`0.146.0-alpha.9.2`
+- ChatGPT / Codex renderer：`26.730.61639`
+- 官方构建号：`6234`
+- Codex app-server：`0.147.0-alpha.1.2`
 - preload 契约：19 个方法
 - 项目列表网络进程：Electron `43.2.0`、Chromium `150.0.7871.129`
 

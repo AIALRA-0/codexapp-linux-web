@@ -7,7 +7,7 @@ const { CodexAppServerClient } = await import(
 const codexBin = requiredEnvironment('VERIFY_CODEX_BIN');
 const codexHome = requiredEnvironment('VERIFY_CODEX_HOME');
 const workspace = requiredEnvironment('VERIFY_WORKSPACE');
-const rendererVersion = process.env.VERIFY_RENDERER_VERSION ?? '26.727.51351';
+const rendererVersion = process.env.VERIFY_RENDERER_VERSION ?? '26.730.61639';
 const configuredGoogleAccounts = csvEnvironment('VERIFY_GOOGLE_ACCOUNTS');
 const refreshGoogleAccounts = process.env.VERIFY_REFRESH_GOOGLE_ACCOUNTS === '1';
 const cases = [

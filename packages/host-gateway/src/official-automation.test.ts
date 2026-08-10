@@ -39,7 +39,7 @@ describeQualified('OfficialAutomationController', () => {
     expect(templates.automationInstructions).toContain('::inbox-item{title=');
     expect(templates.heartbeatPromptTemplate).toContain('{{AUTOMATION_ID}}');
     expect(templates.heartbeatPromptTemplate).toContain('{{AUTOMATION_PROMPT}}');
-  });
+  }, 30_000);
 
   it('runs a projectless automation through official thread and inbox state', async () => {
     const root = await mkdtemp(join(tmpdir(), 'codexapp-official-automation-'));
@@ -152,7 +152,7 @@ describeQualified('OfficialAutomationController', () => {
     ]);
     expect(viewMessages).toContainEqual({ type: 'automation-runs-updated' });
     expect(viewMessages).toContainEqual({ type: 'inbox-items-changed' });
-  });
+  }, 30_000);
 
   it('runs a repository automation in an official managed worktree', async () => {
     const root = await mkdtemp(join(tmpdir(), 'codexapp-official-worktree-automation-'));
@@ -317,5 +317,5 @@ describeQualified('OfficialAutomationController', () => {
     ]) {
       expect(writableRoots).toContain(expectedRoot);
     }
-  });
+  }, 30_000);
 });

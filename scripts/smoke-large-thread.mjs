@@ -11,7 +11,7 @@ const rolloutPath = process.env.SMOKE_ROLLOUT_PATH;
 const workspace = process.env.SMOKE_WORKSPACE ?? process.cwd();
 const includeFullRead = process.env.SMOKE_INCLUDE_FULL_READ === '1';
 const includeLegacyComparison = process.env.SMOKE_INCLUDE_LEGACY_COMPARISON === '1';
-const rendererVersion = process.env.SMOKE_RENDERER_VERSION ?? '26.727.51351';
+const rendererVersion = process.env.SMOKE_RENDERER_VERSION ?? '26.730.61639';
 
 const client = new CodexAppServerClient({
   codexBin,

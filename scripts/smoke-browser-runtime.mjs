@@ -11,7 +11,7 @@ if (executablePath === undefined || executablePath.length === 0) {
 }
 const officialSourceRoot =
   process.env.OFFICIAL_SOURCE_ROOT ??
-  join(process.cwd(), '.official', 'releases', '26.727.51351', 'source');
+  join(process.cwd(), '.official', 'releases', '26.730.61639', 'source');
 
 const temporaryRoot = await mkdtemp(join(tmpdir(), 'codex-browser-smoke-'));
 const viewMessages = [];

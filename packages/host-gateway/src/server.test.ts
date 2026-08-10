@@ -13,6 +13,7 @@ import {
   isConcurrentBridgeInvocation,
   missingBridgeSessionRequiresReload,
   officialInitialRouteLocation,
+  reconnectableIdentityEntries,
   resolveBrowserFileAsset,
   shouldServeRendererIndex,
   terminateWebsocketClients,
@@ -78,6 +79,43 @@ describe('authenticated session capacity accounting', () => {
           groups: [],
         }),
       ).toBe(1);
+    } finally {
+      clearTimeout(reconnectTimer);
+    }
+  });
+
+  it('selects only stale disconnected sessions for same-identity supersession', () => {
+    const reconnectTimer = setTimeout(() => undefined, 60_000);
+    try {
+      const entries = new Map([
+        [
+          'stale-same-user',
+          {
+            identity: { subject: 'subject-a', username: 'old-name', groups: [] },
+            cleanupTimer: reconnectTimer,
+          },
+        ],
+        [
+          'active-same-user',
+          {
+            identity: { subject: 'subject-a', username: 'old-name', groups: [] },
+          },
+        ],
+        [
+          'stale-other-user',
+          {
+            identity: { subject: 'subject-b', username: 'old-name', groups: [] },
+            cleanupTimer: reconnectTimer,
+          },
+        ],
+      ]);
+      expect(
+        reconnectableIdentityEntries(entries, {
+          subject: 'subject-a',
+          username: 'new-name',
+          groups: [],
+        }).map(([sessionId]) => sessionId),
+      ).toEqual(['stale-same-user']);
     } finally {
       clearTimeout(reconnectTimer);
     }

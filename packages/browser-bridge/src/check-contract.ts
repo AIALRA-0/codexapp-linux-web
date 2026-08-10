@@ -10,7 +10,7 @@ import {
 
 const requestedContractPath = process.argv[2];
 const requestedSourceRoot = process.env.OFFICIAL_SOURCE_ROOT;
-const defaultRendererVersion = '26.727.51351';
+const defaultRendererVersion = '26.730.61639';
 const preliminarySourceRoot = resolve(
   requestedSourceRoot ?? join('.official', 'releases', defaultRendererVersion, 'source'),
 );

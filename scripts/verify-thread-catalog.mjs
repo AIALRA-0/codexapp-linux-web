@@ -8,7 +8,7 @@ const codexBin = requiredEnvironment('VERIFY_CODEX_BIN');
 const codexHome = requiredEnvironment('VERIFY_CODEX_HOME');
 const workspace = requiredEnvironment('VERIFY_WORKSPACE');
 const officialSourceRoot = requiredEnvironment('VERIFY_OFFICIAL_SOURCE_ROOT');
-const rendererVersion = process.env.VERIFY_RENDERER_VERSION ?? '26.727.51351';
+const rendererVersion = process.env.VERIFY_RENDERER_VERSION ?? '26.730.61639';
 const recordPaths = requiredEnvironment('VERIFY_RECORDS')
   .split(',')
   .map((value) => value.trim())

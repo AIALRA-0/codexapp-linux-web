@@ -7,8 +7,10 @@ symbolic link.
 
 `ops/install-release.sh RELEASE SOURCE --stage` prepares an immutable release
 without changing service state. `ops/promote-release.sh RELEASE` verifies it
-again, updates `current`, restarts the service, checks readiness for 30 seconds,
-and restores the previous link on failure. `ops/rollback-release.sh RELEASE`
+again, updates `current`, restarts the service, checks readiness for up to 90 seconds,
+and restores the previous link on failure. The production gate allows up to 90
+seconds for a cold start but still requires five consecutive healthy checks.
+`ops/rollback-release.sh RELEASE`
 performs the same guarded operation for an explicit previous release.
 
 Promotion also reads `/ops/background-work` from the active loopback service.
@@ -125,11 +127,11 @@ remain visible or block deployment. This does not disable the official Outlook
 plugin or a separately connected active Outlook account.
 
 The pre-promotion capability gate uses
-`manifests/server-capabilities-26.727.51351.json`. It fails if any of the 51
+`manifests/server-capabilities-26.730.61639.json`. It fails if any of the 51
 migrated Skills, four MCP servers, or required representative tools are absent:
 
 ```sh
-VERIFY_CAPABILITIES_MANIFEST="$APPLICATION_ROOT/manifests/server-capabilities-26.727.51351.json" \
+VERIFY_CAPABILITIES_MANIFEST="$APPLICATION_ROOT/manifests/server-capabilities-26.730.61639.json" \
   node "$APPLICATION_ROOT/scripts/verify-codex-capabilities.mjs"
 ```
 

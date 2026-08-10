@@ -18,6 +18,7 @@ export class BrowserSession {
   #pendingAppHostMessages = new PendingPortMessages();
   #requiresReload = false;
   #viewListener: (message: unknown) => void;
+  #targetedViewListener: (event: { browserSessionId: string; message: unknown }) => void;
   #workerListener: (event: { worker: string; message: unknown }) => void;
 
   constructor(id: string, runtime: UserRuntime) {
@@ -26,10 +27,15 @@ export class BrowserSession {
     this.#viewListener = (message) => {
       this.send({ type: 'view-message', message });
     };
+    this.#targetedViewListener = (event) => {
+      if (event.browserSessionId !== this.id) return;
+      this.send({ type: 'view-message', message: event.message });
+    };
     this.#workerListener = (event) => {
       this.send({ type: 'worker-message', worker: event.worker, message: event.message });
     };
     runtime.on('view-message', this.#viewListener);
+    runtime.on('view-message-for-session', this.#targetedViewListener);
     runtime.on('worker-message', this.#workerListener);
     runtime.requestUserInputAutoResolution.setSurfaceForegrounded(this.id, false);
   }
@@ -66,6 +72,7 @@ export class BrowserSession {
 
   dispose(): void {
     this.runtime.off('view-message', this.#viewListener);
+    this.runtime.off('view-message-for-session', this.#targetedViewListener);
     this.runtime.off('worker-message', this.#workerListener);
     this.#socket?.close(1001, 'session disposed');
     this.#socket = undefined;

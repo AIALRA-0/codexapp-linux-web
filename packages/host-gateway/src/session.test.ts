@@ -116,4 +116,20 @@ describe('browser session reconnect protocol', () => {
     expect(socket.closes).toEqual([{ code: 4410, reason: 'browser session replay unavailable' }]);
     session.dispose();
   });
+
+  it('delivers a targeted renderer response only to its owning browser session', () => {
+    const runtime = new RuntimeHarness();
+    const first = new BrowserSession('session-first', runtime as unknown as UserRuntime);
+    const second = new BrowserSession('session-second', runtime as unknown as UserRuntime);
+
+    runtime.emit('view-message-for-session', {
+      browserSessionId: 'session-second',
+      message: { type: 'mcp-response', message: { id: 7, result: { ok: true } } },
+    });
+
+    expect(first.pendingHostFrames).toBe(0);
+    expect(second.pendingHostFrames).toBe(1);
+    first.dispose();
+    second.dispose();
+  });
 });

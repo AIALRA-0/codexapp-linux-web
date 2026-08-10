@@ -1,7 +1,7 @@
 import { readFileSync } from 'node:fs';
 import { join, resolve } from 'node:path';
 
-export type QualifiedOfficialVersion = '26.721.81911' | '26.727.51351';
+export type QualifiedOfficialVersion = '26.721.81911' | '26.727.51351' | '26.730.61639';
 
 const DESKTOP_STATE_EXPORTS = {
   '26.721.81911': {
@@ -96,6 +96,52 @@ const DESKTOP_STATE_EXPORTS = {
     Jr: 'Rr',
     autoDenyPermissions: 'en',
   },
+  '26.730.61639': {
+    E: 'b',
+    Bl: 'wc',
+    Ht: 'Nt',
+    Gt: 'It',
+    Wt: 'Ft',
+    Cr: 'or',
+    Di: 'li',
+    Er: 'lr',
+    Gr: 'Or',
+    Tr: 'cr',
+    Vr: 'wr',
+    qr: 'Ar',
+    br: 'rr',
+    kr: 'fr',
+    Sr: 'ar',
+    xr: 'ir',
+    zl: 'Cc',
+    Jl: 'Ac',
+    Ql: 'Nc',
+    Xl: 'jc',
+    Zl: 'Mc',
+    rn: 'qt',
+    wr: 'sr',
+    _r: 'er',
+    Ar: 'pr',
+    yr: 'nr',
+    vr: 'tr',
+    Ur: 'Er',
+    T: 'y',
+    w: 'v',
+    C: '_',
+    S: 'g',
+    Kr: 'kr',
+    Wr: 'Dr',
+    Hr: 'Tr',
+    Rr: 'xr',
+    zo: 'no',
+    Rt: 'kt',
+    Lt: 'Ot',
+    on: 'Xt',
+    Sc: 'us',
+    xc: 'ls',
+    Jr: 'jr',
+    autoDenyPermissions: 'Zt',
+  },
 } as const satisfies Record<QualifiedOfficialVersion, Record<string, string>>;
 
 const GIT_EXPORTS = {
@@ -111,17 +157,28 @@ const GIT_EXPORTS = {
     gitManager: 'O',
     localExecutionHostRpc: 'k',
   },
+  '26.730.61639': {
+    attachRpc: 'St',
+    githubService: 'x',
+    gitManager: 'O',
+    localExecutionHostRpc: 'k',
+  },
 } as const satisfies Record<QualifiedOfficialVersion, Record<string, string>>;
 
 const DEVELOPER_INSTRUCTIONS_EXPORTS = {
   '26.721.81911': 'an',
   '26.727.51351': 'Qt',
+  '26.730.61639': 'Yt',
 } as const satisfies Record<QualifiedOfficialVersion, string>;
 
 export function readQualifiedOfficialVersion(sourceRoot: string): QualifiedOfficialVersion {
   const packagePath = join(resolve(sourceRoot), 'package.json');
   const parsed = JSON.parse(readFileSync(packagePath, 'utf8')) as { version?: unknown };
-  if (parsed.version !== '26.721.81911' && parsed.version !== '26.727.51351') {
+  if (
+    parsed.version !== '26.721.81911' &&
+    parsed.version !== '26.727.51351' &&
+    parsed.version !== '26.730.61639'
+  ) {
     throw new Error(`unqualified official package version: ${String(parsed.version)}`);
   }
   return parsed.version;

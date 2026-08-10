@@ -17,6 +17,35 @@ describe('renderer fetch security', () => {
   });
 
   it.each([
+    [
+      '/conversations?offset=0&limit=28&order=updated',
+      'https://chatgpt.com/backend-api/conversations?offset=0&limit=28&order=updated',
+    ],
+    ['pins?include_unpinned=false', 'https://chatgpt.com/backend-api/pins?include_unpinned=false'],
+    [
+      '/models?history_and_training_disabled=false#ignored-by-http',
+      'https://chatgpt.com/backend-api/models?history_and_training_disabled=false#ignored-by-http',
+    ],
+  ])('preserves the query while resolving relative URL %s', (target, expected) => {
+    expect(resolveRendererFetchUrl(target, 'https://chatgpt.com/backend-api/').href).toBe(expected);
+  });
+
+  it('does not duplicate a non-trailing backend API base path', () => {
+    expect(resolveRendererFetchUrl('/projects', 'https://chatgpt.com/backend-api').href).toBe(
+      'https://chatgpt.com/backend-api/projects',
+    );
+  });
+
+  it('leaves absolute official URLs unchanged', () => {
+    expect(
+      resolveRendererFetchUrl(
+        'https://chatgpt.com/backend-api/conversations?limit=1',
+        'https://chatgpt.com/backend-api/',
+      ).href,
+    ).toBe('https://chatgpt.com/backend-api/conversations?limit=1');
+  });
+
+  it.each([
     'http://chatgpt.com/backend-api/test',
     'https://chatgpt.com.evil.example/test',
     'https://127.0.0.1/test',

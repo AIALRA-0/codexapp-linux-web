@@ -12,6 +12,7 @@ class RegistryRuntimeHarness extends EventEmitter {
   readonly identity: AuthentikIdentity;
   readonly userKey: string;
   readonly start = vi.fn(() => Promise.resolve());
+  readonly prepareBootstrap = vi.fn(() => Promise.resolve());
   readonly stop = vi.fn(() => Promise.resolve());
   hasBackgroundWork = false;
   backgroundWorkSnapshot = {
@@ -90,5 +91,13 @@ describe('runtime registry background retention', () => {
     await vi.advanceTimersByTimeAsync(60_000);
     expect(runtime.stop).toHaveBeenCalledOnce();
     expect(registry.backgroundWorkSnapshot.runtimeCount).toBe(0);
+  });
+
+  it('loads only persisted bootstrap state without waiting for the full runtime', async () => {
+    const { registry, runtime } = createRegistry();
+    const acquired = await registry.acquireBootstrap(identity);
+    expect(runtime.prepareBootstrap).toHaveBeenCalledOnce();
+    expect(runtime.start).not.toHaveBeenCalled();
+    registry.release(acquired);
   });
 });
