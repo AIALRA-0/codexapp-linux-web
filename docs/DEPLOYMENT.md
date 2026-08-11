@@ -127,7 +127,7 @@ remain visible or block deployment. This does not disable the official Outlook
 plugin or a separately connected active Outlook account.
 
 The pre-promotion capability gate uses
-`manifests/server-capabilities-26.730.61639.json`. It fails if any of the 51
+`manifests/server-capabilities-26.730.61639.json`. It fails if any of the 45
 migrated Skills, four MCP servers, or required representative tools are absent:
 
 ```sh
