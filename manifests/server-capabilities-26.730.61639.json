@@ -1,6 +1,6 @@
 {
   "rendererVersion": "26.730.61639",
-  "minimumSkillCount": 51,
+  "minimumSkillCount": 45,
   "requiredSkills": [
     "aialra-expression-style",
     "aialra-shopping-browser:shopping-browser-research",
@@ -17,7 +17,6 @@
     "github:github",
     "github:yeet",
     "gmail:gmail",
-    "gmail:gmail-inbox-triage",
     "google-drive:google-docs",
     "google-drive:google-drive",
     "google-drive:google-drive-comments",
@@ -29,11 +28,6 @@
     "meituan-research",
     "openai-docs",
     "outlook-email:outlook-email",
-    "outlook-email:outlook-email-inbox-triage",
-    "outlook-email:outlook-email-reply-drafting",
-    "outlook-email:outlook-email-shared-mailboxes",
-    "outlook-email:outlook-email-subscription-cleanup",
-    "outlook-email:outlook-email-task-extraction",
     "pdf:pdf",
     "pinduoduo-price-research",
     "plugin-creator",
