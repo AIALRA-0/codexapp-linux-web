@@ -40,7 +40,12 @@ export function loadQualifiedThreadCatalogContract(
   }
 
   const shared = officialRequire(sharedPath) as LatestOfficialThreadCatalogModule;
-  const sourceKinds = version === '26.730.61639' ? shared._i : shared.wi;
+  const sourceKinds =
+    version === '26.803.81509'
+      ? (shared as LatestOfficialThreadCatalogModule & { bi?: unknown }).bi
+      : version === '26.730.61639'
+        ? shared._i
+        : shared.wi;
   if (!Array.isArray(sourceKinds)) {
     throw new Error('qualified official thread catalog source kinds changed');
   }
@@ -53,21 +58,27 @@ export function loadQualifiedThreadCatalogContract(
 
 function loadLatestOfficialThreadConverter(
   sourceRoot: string,
-  version: '26.727.51351' | '26.730.61639',
+  version: '26.727.51351' | '26.730.61639' | '26.803.81509',
 ): QualifiedThreadCatalogContract['convertThread'] {
   const mainSource = readQualifiedMainSource(sourceRoot);
   const contract =
-    version === '26.730.61639'
+    version === '26.803.81509'
       ? {
-          converterName: 'cS',
-          converterMarker: 'function cS(e,t=sS){if(e.ephemeral||e.parentThreadId!=null',
-          endMarker: 'var fS=`codex-notification`',
+          converterName: 'uS',
+          converterMarker: 'function uS(e,t=lS){if(e.ephemeral||e.parentThreadId!=null',
+          endMarker: 'var mS=`codex-notification`',
         }
-      : {
-          converterName: 'qx',
-          converterMarker: 'function qx(e,t=Vx){if(e.ephemeral||e.parentThreadId!=null',
-          endMarker: 'var Zx=`codex-notification`',
-        };
+      : version === '26.730.61639'
+        ? {
+            converterName: 'cS',
+            converterMarker: 'function cS(e,t=sS){if(e.ephemeral||e.parentThreadId!=null',
+            endMarker: 'var fS=`codex-notification`',
+          }
+        : {
+            converterName: 'qx',
+            converterMarker: 'function qx(e,t=Vx){if(e.ephemeral||e.parentThreadId!=null',
+            endMarker: 'var Zx=`codex-notification`',
+          };
   const { converterMarker } = contract;
   const converterIndex = mainSource.indexOf(converterMarker);
   if (

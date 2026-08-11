@@ -1,0 +1,51 @@
+[Unit]
+Description=NewCodexApp stable controller
+Requires=codexapp-official-sandbox-policy.service
+After=network-online.target codexapp-official-browser-display.service codexapp-official-sandbox-policy.service codexapp-openai-egress-proxy.service
+Wants=network-online.target codexapp-official-browser-display.service codexapp-openai-egress-proxy.service
+
+[Service]
+Type=simple
+User=newcodexapp
+Group=newcodexapp
+SupplementaryGroups=codexappweb
+WorkingDirectory=/srv/aialra/apps/newcodexapp-controller/current
+EnvironmentFile=/srv/aialra/config/secrets/newcodexapp-controller.env
+Environment=HOME=/srv/aialra/state/newcodexapp-controller/service-home
+Environment=XDG_CACHE_HOME=/srv/aialra/state/newcodexapp-controller/service-home/.cache
+Environment=XDG_CONFIG_HOME=/srv/aialra/state/newcodexapp-controller/service-home/.config
+Environment=DISPLAY=127.0.0.1:99
+ExecStart=/usr/bin/node /srv/aialra/apps/newcodexapp-controller/current/apps/host/dist/main.js
+Restart=on-failure
+RestartSec=3
+TimeoutStopSec=20s
+KillMode=mixed
+UMask=0077
+TasksMax=2048
+MemoryHigh=4G
+MemoryMax=6G
+CPUWeight=200
+OOMScoreAdjust=-500
+
+NoNewPrivileges=true
+PrivateTmp=true
+PrivateDevices=true
+ProtectSystem=strict
+ProtectHome=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectKernelLogs=true
+ProtectControlGroups=true
+ProtectClock=true
+RestrictSUIDSGID=true
+RestrictRealtime=true
+LockPersonality=true
+CapabilityBoundingSet=
+AmbientCapabilities=
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6 AF_NETLINK
+SystemCallArchitectures=native
+SystemCallFilter=@system-service @sandbox @pkey @mount
+ReadWritePaths=/srv/aialra/state/newcodexapp-controller
+
+[Install]
+WantedBy=multi-user.target

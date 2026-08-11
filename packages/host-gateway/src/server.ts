@@ -284,6 +284,7 @@ export async function createGateway(config: GatewayConfig): Promise<FastifyInsta
       const bootstrap = runtimeBootstrapSchema.parse({
         contractVersion: 1,
         rendererVersion: config.expectedRendererVersion,
+        desktopUserAgent: `Codex Desktop/${config.expectedRendererVersion} (X11; Linux; ${process.arch})`,
         websocketUrl: new URL('/api/bridge', config.publicOrigin)
           .toString()
           .replace(/^http/u, 'ws'),

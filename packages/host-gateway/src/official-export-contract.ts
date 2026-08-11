@@ -1,7 +1,8 @@
 import { readFileSync } from 'node:fs';
 import { join, resolve } from 'node:path';
 
-export type QualifiedOfficialVersion = '26.721.81911' | '26.727.51351' | '26.730.61639';
+export type QualifiedOfficialVersion =
+  '26.721.81911' | '26.727.51351' | '26.730.61639' | '26.803.81509';
 
 const DESKTOP_STATE_EXPORTS = {
   '26.721.81911': {
@@ -142,6 +143,52 @@ const DESKTOP_STATE_EXPORTS = {
     Jr: 'jr',
     autoDenyPermissions: 'Zt',
   },
+  '26.803.81509': {
+    E: 'b',
+    Bl: 'Ac',
+    Ht: 'Nt',
+    Gt: 'It',
+    Wt: 'Ft',
+    Cr: 'cr',
+    Di: 'fi',
+    Er: 'dr',
+    Gr: 'Ar',
+    Tr: 'ur',
+    Vr: 'Er',
+    qr: 'Mr',
+    br: 'ar',
+    kr: 'mr',
+    Sr: 'sr',
+    xr: 'or',
+    zl: 'kc',
+    Jl: 'Pc',
+    Ql: 'Lc',
+    Xl: 'Fc',
+    Zl: 'Ic',
+    rn: 'qt',
+    wr: 'lr',
+    _r: 'nr',
+    Ar: 'hr',
+    yr: 'ir',
+    vr: 'rr',
+    Ur: 'Or',
+    T: 'y',
+    w: 'v',
+    C: '_',
+    S: 'g',
+    Kr: 'jr',
+    Wr: 'kr',
+    Hr: 'Dr',
+    Rr: 'Cr',
+    zo: 'oo',
+    Rt: 'kt',
+    Lt: 'Ot',
+    on: 'Xt',
+    Sc: 'hs',
+    xc: 'ms',
+    Jr: 'Nr',
+    autoDenyPermissions: 'Zt',
+  },
 } as const satisfies Record<QualifiedOfficialVersion, Record<string, string>>;
 
 const GIT_EXPORTS = {
@@ -163,12 +210,19 @@ const GIT_EXPORTS = {
     gitManager: 'O',
     localExecutionHostRpc: 'k',
   },
+  '26.803.81509': {
+    attachRpc: 'St',
+    githubService: 'x',
+    gitManager: 'O',
+    localExecutionHostRpc: 'k',
+  },
 } as const satisfies Record<QualifiedOfficialVersion, Record<string, string>>;
 
 const DEVELOPER_INSTRUCTIONS_EXPORTS = {
   '26.721.81911': 'an',
   '26.727.51351': 'Qt',
   '26.730.61639': 'Yt',
+  '26.803.81509': 'Yt',
 } as const satisfies Record<QualifiedOfficialVersion, string>;
 
 export function readQualifiedOfficialVersion(sourceRoot: string): QualifiedOfficialVersion {
@@ -177,7 +231,8 @@ export function readQualifiedOfficialVersion(sourceRoot: string): QualifiedOffic
   if (
     parsed.version !== '26.721.81911' &&
     parsed.version !== '26.727.51351' &&
-    parsed.version !== '26.730.61639'
+    parsed.version !== '26.730.61639' &&
+    parsed.version !== '26.803.81509'
   ) {
     throw new Error(`unqualified official package version: ${String(parsed.version)}`);
   }

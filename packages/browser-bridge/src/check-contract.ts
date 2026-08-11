@@ -10,7 +10,7 @@ import {
 
 const requestedContractPath = process.argv[2];
 const requestedSourceRoot = process.env.OFFICIAL_SOURCE_ROOT;
-const defaultRendererVersion = '26.730.61639';
+const defaultRendererVersion = '26.803.81509';
 const preliminarySourceRoot = resolve(
   requestedSourceRoot ?? join('.official', 'releases', defaultRendererVersion, 'source'),
 );
@@ -71,6 +71,7 @@ if (sourceDifferences.length > 0) {
 }
 
 const expected = new Set([
+  'acknowledgeChunkedMessage',
   'getPreloadStartedAtMs',
   'sendMessageFromView',
   'getPathForFile',
@@ -85,6 +86,7 @@ const expected = new Set([
   'subscribeToSystemThemeVariant',
   'triggerSentryTestError',
   'getSentryInitOptions',
+  'getDesktopUserAgent',
   'getAppSessionId',
   'getBuildFlavor',
   'isDeviceCheckSupported',

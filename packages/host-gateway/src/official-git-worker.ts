@@ -456,9 +456,14 @@ class LocalExecutionHost {
       });
       throw error;
     }
+    const explicitRepository = normalizeExplicitGitDirectory(
+      options.args,
+      options.cwd,
+      options.env,
+    );
     const child = spawn(command, args, {
-      cwd: options.cwd,
-      env: mergeSpawnEnvironment(this.workerEnvironment, options.env),
+      cwd: explicitRepository.cwd,
+      env: mergeSpawnEnvironment(this.workerEnvironment, explicitRepository.env),
       detached: process.platform !== 'win32',
       stdio: ['pipe', 'pipe', 'pipe'],
     });
@@ -625,6 +630,58 @@ class LocalExecutionHost {
     if (isWithin(absolute, this.#root) || isWithin(absolute, this.#canonicalRoot)) return;
     this.#assertAllowedPath(absolute, 'stat');
   }
+}
+
+/**
+ * Git 2.43 treats running from a repository's `.git` directory as implicit
+ * bare-repository discovery when `safe.bareRepository=explicit` is enabled.
+ * The current official desktop Git module intentionally enables that guard and
+ * reads repository-scoped configuration from the common Git directory. Make
+ * the same repository explicit through Git's standard environment boundary;
+ * the official command and its safety setting remain unchanged.
+ */
+function normalizeExplicitGitDirectory(
+  args: string[],
+  cwd: string,
+  env: Record<string, string>,
+): { cwd: string; env: Record<string, string> } {
+  if (
+    process.platform !== 'linux' ||
+    basename(args[0] ?? '') !== 'git' ||
+    gitSubcommand(args) !== 'config' ||
+    !args.includes('safe.bareRepository=explicit') ||
+    basename(cwd) !== '.git' ||
+    env.GIT_DIR !== undefined ||
+    env.GIT_WORK_TREE !== undefined
+  ) {
+    return { cwd, env };
+  }
+  try {
+    if (!statSync(join(cwd, 'config')).isFile()) return { cwd, env };
+  } catch {
+    return { cwd, env };
+  }
+  return {
+    cwd: dirname(cwd),
+    env: {
+      ...env,
+      GIT_DIR: cwd,
+      GIT_WORK_TREE: dirname(cwd),
+    },
+  };
+}
+
+function gitSubcommand(args: string[]): string | null {
+  for (let index = 1; index < args.length; index += 1) {
+    const argument = args[index];
+    if (argument === '-c') {
+      index += 1;
+      continue;
+    }
+    if (argument?.startsWith('-') === true) continue;
+    return argument ?? null;
+  }
+  return null;
 }
 
 class LocalSpawnResult {

@@ -132,4 +132,34 @@ describe('browser session reconnect protocol', () => {
     first.dispose();
     second.dispose();
   });
+
+  it('sends large renderer messages as acknowledged official chunks', () => {
+    const session = createSession();
+    const socket = new SocketHarness();
+    session.attach(socket as unknown as WebSocket, 0);
+    session.acknowledge(socket.frames.at(-1)?.sequence ?? 0);
+    session.send({
+      type: 'view-message',
+      message: { type: 'mcp-response', body: 'x'.repeat(2 * 1024 * 1024) },
+    });
+
+    expect(socket.frames.at(-1)).toMatchObject({
+      type: 'view-message',
+      message: { marker: 'codex-host-chunked-message-v1', kind: 'start', sequence: 0 },
+    });
+    let chunkFrameCount = 1;
+    while (session.pendingHostFrames > 0 && chunkFrameCount < 100) {
+      const sequence = socket.frames.at(-1)?.sequence;
+      if (sequence === undefined) throw new Error('chunk frame is missing');
+      session.acknowledge(sequence);
+      chunkFrameCount += 1;
+    }
+    expect(chunkFrameCount).toBeGreaterThan(3);
+    expect(session.pendingHostFrames).toBe(0);
+    expect(socket.frames.at(-1)).toMatchObject({
+      type: 'view-message',
+      message: { marker: 'codex-host-chunked-message-v1', kind: 'end' },
+    });
+    session.dispose();
+  });
 });

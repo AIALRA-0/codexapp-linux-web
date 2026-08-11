@@ -212,7 +212,7 @@ function projectDisplayName(name) {
       'career-coaching': '求职陪跑',
       'contabo-vps': 'Contabo VPS',
       'expression-skill': '语气 Skill',
-      'trillium-reader': 'Trillium Reader',
+      'trillium-reader': 'Trillium Note',
       'usc-course': 'USC 课程体系',
     }[name] ?? name
   );

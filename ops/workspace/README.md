@@ -17,7 +17,7 @@ workspace/
 │   │   ├── adaptive-scheduler/
 │   │   ├── guandan-lab/
 │   │   └── chesskit/
-│   ├── trillium-reader/
+│   ├── trillium-reader/        # 兼容旧目录名；项目显示名为 Trillium Note
 │   └── aialra-interview/
 ├── incoming/
 ├── shared/

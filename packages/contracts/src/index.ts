@@ -149,6 +149,7 @@ export type PreloadContract = z.infer<typeof preloadContractSchema>;
 export const runtimeBootstrapSchema = z.object({
   contractVersion: z.literal(CONTRACT_VERSION),
   rendererVersion: z.string(),
+  desktopUserAgent: z.string().min(1),
   websocketUrl: z.string().url(),
   ticket: z.string().min(32),
   appSessionId: z.string().uuid(),

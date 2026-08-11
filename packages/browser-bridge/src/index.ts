@@ -24,6 +24,7 @@ type Unsubscribe = () => void;
 
 interface ElectronBridge {
   windowType: 'electron';
+  acknowledgeChunkedMessage(transferId: string, sequence: number): void;
   getPreloadStartedAtMs(): number;
   sendMessageFromView(message: unknown): Promise<void>;
   getPathForFile(file: File): string | null;
@@ -38,6 +39,7 @@ interface ElectronBridge {
   subscribeToSystemThemeVariant(listener: () => void): Unsubscribe;
   triggerSentryTestError(): Promise<void>;
   getSentryInitOptions(): Record<string, unknown>;
+  getDesktopUserAgent(): string;
   getAppSessionId(): string;
   getBuildFlavor(): string;
   isDeviceCheckSupported(): boolean;
@@ -56,6 +58,7 @@ interface HostPortRegistration {
 }
 
 const REQUIRED_METHODS = [
+  'acknowledgeChunkedMessage',
   'getPreloadStartedAtMs',
   'sendMessageFromView',
   'getPathForFile',
@@ -70,6 +73,7 @@ const REQUIRED_METHODS = [
   'subscribeToSystemThemeVariant',
   'triggerSentryTestError',
   'getSentryInitOptions',
+  'getDesktopUserAgent',
   'getAppSessionId',
   'getBuildFlavor',
   'isDeviceCheckSupported',
@@ -526,6 +530,10 @@ function installBridge(): void {
 
   const bridge: ElectronBridge = {
     windowType: 'electron',
+    // The browser transport acknowledges every host frame at the WebSocket
+    // protocol layer. The Electron-only chunk IPC is therefore never emitted
+    // by this host, but the official preload contract still requires the hook.
+    acknowledgeChunkedMessage: () => undefined,
     getPreloadStartedAtMs: () => preloadStartedAt,
     sendMessageFromView: async (message) => {
       const pickFilesRequest = parseBrowserPickFilesRequest(message);
@@ -564,6 +572,7 @@ function installBridge(): void {
       await transport.invoke('trigger-sentry-test');
     },
     getSentryInitOptions: () => bootstrap.sentryInitOptions,
+    getDesktopUserAgent: () => bootstrap.desktopUserAgent,
     getAppSessionId: () => bootstrap.appSessionId,
     getBuildFlavor: () => bootstrap.buildFlavor,
     isDeviceCheckSupported: () => false,
