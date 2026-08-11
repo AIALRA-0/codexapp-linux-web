@@ -5,6 +5,13 @@ const baseUrl = process.env.SMOKE_BASE_URL;
 const browserExecutable = process.env.BROWSER_EXECUTABLE;
 const proxySecret = process.env.SMOKE_PROXY_SECRET;
 const screenshotPath = process.env.SMOKE_SCREENSHOT_PATH;
+const initialPath = process.env.SMOKE_INITIAL_PATH ?? '/';
+const expectedText = process.env.SMOKE_EXPECTED_TEXT;
+const clickText = process.env.SMOKE_CLICK_TEXT;
+const afterClickText = process.env.SMOKE_AFTER_CLICK_TEXT;
+const smokeSubject = process.env.SMOKE_SUBJECT ?? 'official-ui-smoke-subject';
+const smokeUsername = process.env.SMOKE_USERNAME ?? 'official-ui-smoke';
+const smokeEmail = process.env.SMOKE_EMAIL ?? 'official-ui-smoke@example.invalid';
 const expectedRendererVersion = process.env.SMOKE_RENDERER_VERSION ?? '26.730.61639';
 if (baseUrl === undefined || browserExecutable === undefined) {
   throw new Error('SMOKE_BASE_URL and BROWSER_EXECUTABLE are required');
@@ -19,9 +26,9 @@ const context = await browser.newContext({
   extraHTTPHeaders: {
     'X-Aialra-Authenticated': '1',
     ...(proxySecret === undefined ? {} : { 'X-Aialra-Proxy-Secret': proxySecret }),
-    'X-Aialra-Sub': 'official-ui-smoke-subject',
-    'X-Aialra-User': 'official-ui-smoke',
-    'X-Aialra-Email': 'official-ui-smoke@example.invalid',
+    'X-Aialra-Sub': smokeSubject,
+    'X-Aialra-User': smokeUsername,
+    'X-Aialra-Email': smokeEmail,
     'X-Aialra-Groups': 'aialra:access:codexapp,aialra:role:developer',
   },
   viewport: { width: 1440, height: 1000 },
@@ -31,6 +38,7 @@ const pageErrors = [];
 const failedLocalRequests = [];
 let bridgeConnected = false;
 let bridgeReady = false;
+let clickedHref;
 
 page.on('pageerror', (error) => pageErrors.push(error.message));
 page.on('response', (response) => {
@@ -51,7 +59,7 @@ page.on('websocket', (socket) => {
 });
 
 try {
-  const response = await page.goto(baseUrl, {
+  const response = await page.goto(new URL(initialPath, baseUrl).toString(), {
     waitUntil: 'domcontentloaded',
     timeout: 45_000,
   });
@@ -63,7 +71,7 @@ try {
       window.__CODEX_BROWSER_BOOTSTRAP__?.rendererVersion === version &&
       document.body.childElementCount > 0,
     expectedRendererVersion,
-    { timeout: 30_000 },
+    { timeout: 120_000 },
   );
   await waitFor(() => bridgeReady, 30_000);
   await page.waitForFunction(
@@ -82,8 +90,14 @@ try {
         );
       });
     },
-    { timeout: 30_000 },
+    undefined,
+    { timeout: 120_000 },
   );
+  if (expectedText !== undefined) {
+    await page.waitForFunction((text) => document.body.innerText.includes(text), expectedText, {
+      timeout: 120_000,
+    });
+  }
 
   const renderer = await page.evaluate(() => ({
     bootstrapVersion: window.__CODEX_BROWSER_BOOTSTRAP__?.rendererVersion,
@@ -138,6 +152,19 @@ try {
       `official renderer emitted errors: ${JSON.stringify({ pageErrors, failedLocalRequests })}`,
     );
   }
+  if (clickText !== undefined) {
+    const target = page.getByText(clickText, { exact: false }).first();
+    await target.waitFor({ state: 'visible', timeout: 120_000 });
+    clickedHref = await target.evaluate(
+      (element) => element.closest('a')?.getAttribute('href') ?? undefined,
+    );
+    await target.click();
+  }
+  if (afterClickText !== undefined) {
+    await page.waitForFunction((text) => document.body.innerText.includes(text), afterClickText, {
+      timeout: 180_000,
+    });
+  }
   const screenshot = await page.screenshot({
     ...(screenshotPath === undefined ? {} : { path: screenshotPath }),
     type: 'png',
@@ -161,8 +188,12 @@ try {
       rendererVersion: renderer.bootstrapVersion,
       bridgeConnected,
       bridgeReady,
+      clickedHref,
+      currentUrl: page.url(),
       elementCount: renderer.elementCount,
       bodyTextLength: renderer.bodyTextLength,
+      expectedTextAsserted: expectedText !== undefined,
+      afterClickTextAsserted: afterClickText !== undefined,
       screenshotBytes: screenshot.length,
       screenshotMaximumChannelDeviation: Math.round(maximumChannelDeviation * 100) / 100,
       localAssetFailures: failedLocalRequests.length,

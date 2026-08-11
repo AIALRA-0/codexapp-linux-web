@@ -23,6 +23,7 @@ unit_target="/etc/systemd/system/newcodexapp-controller.service"
 nginx_available="/srv/aialra/config/nginx/sites-available/newcodexapp.aialra.online.conf"
 nginx_enabled="/etc/nginx/sites-enabled/newcodexapp.aialra.online.conf"
 auth_gateway_apps="/srv/aialra/apps/auth-gateway/apps.json"
+authentik_callback_reconciler="/srv/aialra/apps/authentik/reconcile_authentik_callbacks.sh"
 
 if [[ ! -d "$application_release" || -L "$application_release" ]]; then
   echo "a pinned controller application release is required" >&2
@@ -34,6 +35,10 @@ if [[ ! -d "$official_release/source" || -L "$official_release/source" ]]; then
 fi
 if [[ ! -f "$auth_gateway_apps" || -L "$auth_gateway_apps" ]]; then
   echo "the unified authentication app registry is missing" >&2
+  exit 64
+fi
+if [[ ! -x "$authentik_callback_reconciler" || -L "$authentik_callback_reconciler" ]]; then
+  echo "the Authentik callback reconciler is missing" >&2
   exit 64
 fi
 stable_codex_bin="$(sed -n 's/^CODEX_BIN=//p' "$stable_environment")"
@@ -129,6 +134,7 @@ mv -f -- "$auth_gateway_apps_next" "$auth_gateway_apps"
 systemctl daemon-reload
 systemctl enable newcodexapp-controller.service >/dev/null
 systemctl restart aialra-auth-gateway.service
+"$authentik_callback_reconciler"
 
 printf '{"ok":true,"controllerRelease":"%s","officialRelease":"%s","serviceStarted":false}\n' \
   "$controller_target" \

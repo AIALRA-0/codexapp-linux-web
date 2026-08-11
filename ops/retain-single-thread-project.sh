@@ -175,6 +175,7 @@ DELETE FROM thread_dynamic_tools WHERE thread_id <> '$thread_id';
 DELETE FROM thread_spawn_edges
  WHERE parent_thread_id <> '$thread_id' OR child_thread_id <> '$thread_id';
 DELETE FROM threads WHERE id <> '$thread_id';
+UPDATE threads SET cwd = '$project_root' WHERE id = '$thread_id';
 DELETE FROM thread_sections
  WHERE id NOT IN (
    SELECT thread_section_id FROM threads WHERE thread_section_id IS NOT NULL
@@ -189,6 +190,7 @@ filtered_state="$maintenance_root/control/host-state.filtered.json"
 jq \
   --arg thread "$thread_id" \
   --arg project "$project_id" \
+  --arg project_root "$project_root" \
   '
     .globalState["local-projects"] |= with_entries(select(.key == $project))
     | .globalState["project-order"] = [$project]
@@ -197,6 +199,8 @@ jq \
     | .globalState["selected-project"] = {type: "local", projectId: $project}
     | .globalState["thread-project-assignments"] |= with_entries(select(.key == $thread))
     | .globalState["thread-workspace-root-hints"] |= ((. // {}) | with_entries(select(.key == $thread)))
+    | .globalState["thread-project-assignments"][$thread].cwd = $project_root
+    | .globalState["thread-workspace-root-hints"][$thread] = $project_root
     | .globalState["projectless-thread-ids"] |= ((. // []) | map(select(. == $thread)))
     | .globalState["pinned-thread-ids"] |= ((. // []) | map(select(. == $thread)))
     | .globalState["thread-projectless-output-directories"] |= ((. // {}) | with_entries(select(.key == $thread)))
@@ -223,9 +227,12 @@ jq \
 jq -e \
   --arg thread "$thread_id" \
   --arg project "$project_id" \
+  --arg project_root "$project_root" \
   '(.globalState["local-projects"] | keys) == [$project]
    and (.globalState["thread-project-assignments"] | keys) == [$thread]
-   and .globalState["thread-project-assignments"][$thread].projectId == $project' \
+   and .globalState["thread-project-assignments"][$thread].projectId == $project
+   and .globalState["thread-project-assignments"][$thread].cwd == $project_root
+   and .globalState["thread-workspace-root-hints"][$thread] == $project_root' \
   "$filtered_state" >/dev/null
 chown --reference="$host_state" "$filtered_state"
 chmod --reference="$host_state" "$filtered_state"
@@ -238,6 +245,7 @@ chmod 0600 "$codex_home/session_index.jsonl"
 
 if [[ "$(sqlite3 "$database" 'select count(*) from threads;')" != "1" ]] ||
   [[ "$(sqlite3 "$database" "select count(*) from threads where id='$thread_id';")" != "1" ]] ||
+  [[ "$(sqlite3 "$database" "select cwd from threads where id='$thread_id';")" != "$project_root" ]] ||
   [[ "$(sqlite3 "$database" 'pragma integrity_check;')" != "ok" ]] ||
   [[ "$(find "$codex_home/sessions" -type f -name 'rollout-*.jsonl' | wc -l)" != "1" ]] ||
   [[ "$(find "$projects_root" -mindepth 1 -maxdepth 1 -type d | wc -l)" != "1" ]] ||

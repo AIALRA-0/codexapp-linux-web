@@ -9,6 +9,7 @@ import {
   countIdentitySessions,
   countReconnectableIdentitySessions,
   findMissingBrowserBridgeImports,
+  injectBridgeScripts,
   installWebSocketHeartbeat,
   isConcurrentBridgeInvocation,
   missingBridgeSessionRequiresReload,
@@ -37,6 +38,31 @@ describe('browser bridge module boundary', () => {
         ]),
       ),
     ).toEqual([]);
+  });
+});
+
+describe('official renderer HTML adapter', () => {
+  it('anchors every relative official asset to the site root before the first asset is parsed', () => {
+    const rendered = injectBridgeScripts(
+      '<html><head><link rel="stylesheet" href="./assets/app.css"></head><body><script type="module" crossorigin src="./assets/app.js"></script></body></html>',
+      '/__codex/bridge-test/index.js',
+    );
+
+    expect(rendered).toContain('<head>\n    <base href="/">');
+    expect(rendered.indexOf('<base href="/">')).toBeLessThan(rendered.indexOf('./assets/app.css'));
+    expect(rendered).toContain('<script src="/__codex/bootstrap.js"></script>');
+    expect(rendered).toContain(
+      '<script type="module" src="/__codex/bridge-test/index.js"></script>',
+    );
+  });
+
+  it('fails closed if the official package introduces its own base URL', () => {
+    expect(() =>
+      injectBridgeScripts(
+        '<html><head><base href="./"><script type="module" crossorigin src="./assets/app.js"></script></head></html>',
+        '/__codex/bridge-test/index.js',
+      ),
+    ).toThrow('official index head marker changed');
   });
 });
 

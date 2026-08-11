@@ -955,16 +955,26 @@ function requireIdentity(request: FastifyRequest, config: GatewayConfig): Authen
   }
 }
 
-function injectBridgeScripts(index: string, bridgePath: string): string {
+export function injectBridgeScripts(index: string, bridgePath: string): string {
+  const headNeedle = '<head>';
+  const headPosition = index.indexOf(headNeedle);
+  if (
+    headPosition < 0 ||
+    index.indexOf(headNeedle, headPosition + headNeedle.length) >= 0 ||
+    /<base\b/iu.test(index)
+  ) {
+    throw new Error('official index head marker changed');
+  }
+  const indexWithBase = `${index.slice(0, headPosition + headNeedle.length)}\n    <base href="/">${index.slice(headPosition + headNeedle.length)}`;
   const needle = '<script type="module" crossorigin';
-  const position = index.indexOf(needle);
-  if (position < 0 || index.indexOf(needle, position + needle.length) >= 0) {
+  const position = indexWithBase.indexOf(needle);
+  if (position < 0 || indexWithBase.indexOf(needle, position + needle.length) >= 0) {
     throw new Error('official index entry script marker changed');
   }
   const insertion =
     '<script src="/__codex/bootstrap.js"></script>\n' +
     `    <script type="module" src="${bridgePath}"></script>\n    `;
-  return `${index.slice(0, position)}${insertion}${index.slice(position)}`;
+  return `${indexWithBase.slice(0, position)}${insertion}${indexWithBase.slice(position)}`;
 }
 
 function escapeScriptJson(value: unknown): string {
