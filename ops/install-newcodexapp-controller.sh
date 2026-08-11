@@ -21,7 +21,8 @@ proxy_key="/srv/aialra/config/secrets/newcodexapp-controller-proxy-secret"
 proxy_snippet="/srv/aialra/config/nginx/snippets/newcodexapp-controller-proxy-secret.conf"
 unit_target="/etc/systemd/system/newcodexapp-controller.service"
 nginx_available="/srv/aialra/config/nginx/sites-available/newcodexapp.aialra.online.conf"
-nginx_enabled="/srv/aialra/config/nginx/sites-enabled/newcodexapp.aialra.online.conf"
+nginx_enabled="/etc/nginx/sites-enabled/newcodexapp.aialra.online.conf"
+auth_gateway_apps="/srv/aialra/apps/auth-gateway/apps.json"
 
 if [[ ! -d "$application_release" || -L "$application_release" ]]; then
   echo "a pinned controller application release is required" >&2
@@ -29,6 +30,10 @@ if [[ ! -d "$application_release" || -L "$application_release" ]]; then
 fi
 if [[ ! -d "$official_release/source" || -L "$official_release/source" ]]; then
   echo "the pinned official release is missing" >&2
+  exit 64
+fi
+if [[ ! -f "$auth_gateway_apps" || -L "$auth_gateway_apps" ]]; then
+  echo "the unified authentication app registry is missing" >&2
   exit 64
 fi
 stable_codex_bin="$(sed -n 's/^CODEX_BIN=//p' "$stable_environment")"
@@ -105,8 +110,25 @@ chmod 0600 "$proxy_snippet"
 install -o root -g root -m 0644 "$source_root/ops/systemd/newcodexapp-controller.service" "$unit_target"
 install -o root -g root -m 0644 "$source_root/ops/nginx/newcodexapp.aialra.online.conf" "$nginx_available"
 ln -sfn "$nginx_available" "$nginx_enabled"
+
+auth_gateway_apps_next="$(mktemp /srv/aialra/apps/auth-gateway/.apps.newcodexapp.XXXXXXXX.json)"
+jq \
+  '. + {
+    "newcodexapp.aialra.online": {
+      name: "New Codex App",
+      slug: "codexapp",
+      style: "complex"
+    }
+  }' \
+  "$auth_gateway_apps" >"$auth_gateway_apps_next"
+jq -e '."newcodexapp.aialra.online".slug == "codexapp"' "$auth_gateway_apps_next" >/dev/null
+chown --reference="$auth_gateway_apps" "$auth_gateway_apps_next"
+chmod --reference="$auth_gateway_apps" "$auth_gateway_apps_next"
+mv -f -- "$auth_gateway_apps_next" "$auth_gateway_apps"
+
 systemctl daemon-reload
 systemctl enable newcodexapp-controller.service >/dev/null
+systemctl restart aialra-auth-gateway.service
 
 printf '{"ok":true,"controllerRelease":"%s","officialRelease":"%s","serviceStarted":false}\n' \
   "$controller_target" \
