@@ -331,7 +331,7 @@ try {
       if (inspectSettingsMenu === 'settings' || inspectSettingsMenu === 'language') {
         const settingsItem = page
           .locator('[role="menuitem"]')
-          .filter({ hasText: /^(?:设置|Settings)/u })
+          .filter({ hasText: /^(?:设置|Settings|設定|Paramètres)/u })
           .last();
         await settingsItem.waitFor({ state: 'visible', timeout: 20_000 });
         await settingsItem.click();
