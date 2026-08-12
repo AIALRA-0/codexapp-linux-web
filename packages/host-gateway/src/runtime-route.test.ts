@@ -10,6 +10,7 @@ import {
   rendererRequestShape,
   rendererNotificationCacheInvalidationPrefixes,
   rendererResponseCanBeCached,
+  rendererResponseCacheGenerationCanStore,
   rendererResponseCacheKey,
   rendererResponseCacheInvalidationPrefixes,
   rendererResponseCacheTtlMs,
@@ -63,6 +64,8 @@ describe('renderer request diagnostics', () => {
     expect(rendererResponseCacheTtlMs('plugin/installed')).toBe(6 * 60 * 60 * 1_000);
     expect(rendererResponseCacheTtlMs('app/installed')).toBe(5 * 60 * 1_000);
     expect(rendererResponseCacheTtlMs('mcpServerStatus/list')).toBe(5 * 60 * 1_000);
+    expect(rendererResponseCacheTtlMs('thread/turns/list')).toBe(24 * 60 * 60 * 1_000);
+    expect(rendererResponseCacheTtlMs('thread/items/list')).toBe(24 * 60 * 60 * 1_000);
     expect(
       rendererResponseCacheTtlMs('thread/resume', {
         excludeTurns: true,
@@ -93,6 +96,26 @@ describe('renderer request diagnostics', () => {
         initialTurnsPage: { data: [{ text: 'x'.repeat(8 * 1024 * 1024) }] },
       }),
     ).toBe(false);
+  });
+
+  it('caches only bounded read-only history pages', () => {
+    expect(rendererResponseCanBeCached('thread/turns/list', { data: [{ id: 'turn-1' }] })).toBe(
+      true,
+    );
+    expect(rendererResponseCanBeCached('thread/items/list', { data: [{ id: 'item-1' }] })).toBe(
+      true,
+    );
+    expect(
+      rendererResponseCanBeCached('thread/turns/list', {
+        data: [{ text: 'x'.repeat(8 * 1024 * 1024) }],
+      }),
+    ).toBe(false);
+  });
+
+  it('never stores a read that completed after a cache invalidation', () => {
+    expect(rendererResponseCacheGenerationCanStore(4, 4)).toBe(true);
+    expect(rendererResponseCacheGenerationCanStore(4, 5)).toBe(false);
+    expect(rendererResponseCacheGenerationCanStore(undefined, 5)).toBe(false);
   });
 
   it('reuses a resumed thread only when the later request supplies no new overrides', () => {
@@ -150,14 +173,22 @@ describe('renderer request diagnostics', () => {
     ]);
     expect(rendererResponseCacheInvalidationPrefixes('account/login/start')).toEqual(['']);
     expect(rendererResponseCacheInvalidationPrefixes('account/logout')).toEqual(['']);
-    expect(rendererResponseCacheInvalidationPrefixes('turn/start')).toEqual(['thread/resume:']);
+    expect(rendererResponseCacheInvalidationPrefixes('turn/start')).toEqual([
+      'thread/resume:',
+      'thread/turns/list:',
+      'thread/items/list:',
+    ]);
     expect(rendererResponseCacheInvalidationPrefixes('thread/name/set')).toEqual([
       'thread/resume:',
+      'thread/turns/list:',
+      'thread/items/list:',
     ]);
     expect(rendererResponseCacheInvalidationPrefixes('thread/read')).toEqual([]);
     expect(rendererResponseCacheInvalidationPrefixes('thread/resume')).toEqual([]);
     expect(rendererResponseCacheInvalidationPrefixes('thread/unsubscribe')).toEqual([
       'thread/resume:',
+      'thread/turns/list:',
+      'thread/items/list:',
     ]);
     expect(rendererResponseCacheInvalidationPrefixes('plugin/list')).toEqual([]);
   });
@@ -167,12 +198,18 @@ describe('renderer request diagnostics', () => {
     expect(rendererNotificationCacheInvalidationPrefixes('thread/started')).toEqual([]);
     expect(rendererNotificationCacheInvalidationPrefixes('turn/started')).toEqual([
       'thread/resume:',
+      'thread/turns/list:',
+      'thread/items/list:',
     ]);
     expect(rendererNotificationCacheInvalidationPrefixes('turn/completed')).toEqual([
       'thread/resume:',
+      'thread/turns/list:',
+      'thread/items/list:',
     ]);
     expect(rendererNotificationCacheInvalidationPrefixes('thread/deleted')).toEqual([
       'thread/resume:',
+      'thread/turns/list:',
+      'thread/items/list:',
     ]);
   });
 });

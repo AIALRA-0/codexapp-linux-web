@@ -1,6 +1,16 @@
 import { createHash } from 'node:crypto';
 import { createReadStream } from 'node:fs';
-import { readFile, stat, writeFile } from 'node:fs/promises';
+import {
+  chown,
+  chmod,
+  copyFile,
+  mkdir,
+  readFile,
+  rename,
+  rm,
+  stat,
+  writeFile,
+} from 'node:fs/promises';
 import { isAbsolute, join, relative, resolve } from 'node:path';
 
 import Database from 'better-sqlite3';
@@ -14,8 +24,10 @@ if (mode === 'export') {
   await exportRecords(options);
 } else if (mode === 'import') {
   await importRecords(options);
+} else if (mode === 'sync-existing') {
+  await syncExistingRecord(options);
 } else {
-  throw new Error('usage: migrate-codex-threads.mjs <export|import> [options]');
+  throw new Error('usage: migrate-codex-threads.mjs <export|import|sync-existing> [options]');
 }
 
 async function exportRecords(values) {
@@ -181,6 +193,108 @@ async function importRecords(values) {
   }
 }
 
+async function syncExistingRecord(values) {
+  const sourceHome = requiredAbsolutePath(values, 'source-home');
+  const targetHome = requiredAbsolutePath(values, 'target-home');
+  const threadId = requiredString(values['thread-id'], '--thread-id');
+  const expectedSourceSha256 = optionalString(values['expected-source-sha256']);
+  const backupRoot = requiredAbsolutePath(values, 'backup-root');
+
+  const sourceDatabase = new Database(join(sourceHome, 'state_5.sqlite'), {
+    readonly: true,
+    fileMustExist: true,
+  });
+  const targetDatabasePath = join(targetHome, 'state_5.sqlite');
+  const targetDatabase = new Database(targetDatabasePath, { fileMustExist: true });
+  try {
+    const sourceRow = sourceDatabase.prepare('SELECT * FROM threads WHERE id = ?').get(threadId);
+    const targetRow = targetDatabase.prepare('SELECT * FROM threads WHERE id = ?').get(threadId);
+    if (sourceRow === undefined) throw new Error(`source thread is missing: ${threadId}`);
+    if (targetRow === undefined) throw new Error(`target thread is missing: ${threadId}`);
+
+    const sourceRollout = resolve(requiredString(sourceRow.rollout_path, 'source rollout path'));
+    const targetRollout = resolve(requiredString(targetRow.rollout_path, 'target rollout path'));
+    safeRelativePath(sourceHome, sourceRollout, 'source rollout path');
+    safeRelativePath(targetHome, targetRollout, 'target rollout path');
+    const sourceDigest = await fileDigest(sourceRollout);
+    if (expectedSourceSha256 !== undefined && sourceDigest.sha256 !== expectedSourceSha256) {
+      throw new Error(
+        `source rollout digest changed: expected ${expectedSourceSha256}, got ${sourceDigest.sha256}`,
+      );
+    }
+
+    await mkdir(backupRoot, { recursive: true, mode: 0o700 });
+    const backupRollout = join(backupRoot, 'rollout.jsonl');
+    const backupDatabase = join(backupRoot, 'state_5.sqlite');
+    await copyFile(targetRollout, backupRollout);
+    targetDatabase.pragma('wal_checkpoint(TRUNCATE)');
+    await copyFile(targetDatabasePath, backupDatabase);
+    const targetBefore = await fileDigest(targetRollout);
+    const targetMetadata = await stat(targetRollout);
+
+    const temporaryRollout = `${targetRollout}.sync-${process.pid}`;
+    await copyFile(sourceRollout, temporaryRollout);
+    const copiedDigest = await fileDigest(temporaryRollout);
+    if (copiedDigest.sha256 !== sourceDigest.sha256 || copiedDigest.bytes !== sourceDigest.bytes) {
+      await rm(temporaryRollout, { force: true });
+      throw new Error('temporary rollout digest differs from the source');
+    }
+    await chmod(temporaryRollout, targetMetadata.mode);
+    await chown(temporaryRollout, targetMetadata.uid, targetMetadata.gid);
+    await rename(temporaryRollout, targetRollout);
+
+    const targetColumns = new Set(
+      targetDatabase
+        .prepare('PRAGMA table_info(threads)')
+        .all()
+        .map((column) => column.name),
+    );
+    const immutableTargetColumns = new Set(['id', 'rollout_path', 'cwd']);
+    const updatedColumns = Object.keys(sourceRow).filter(
+      (column) => targetColumns.has(column) && !immutableTargetColumns.has(column),
+    );
+    const assignments = updatedColumns.map((column) => `${quoteIdentifier(column)} = @${column}`);
+    const updateValues = Object.fromEntries(
+      updatedColumns.map((column) => [column, sourceRow[column]]),
+    );
+    const transaction = targetDatabase.transaction(() => {
+      targetDatabase
+        .prepare(`UPDATE threads SET ${assignments.join(', ')} WHERE id = @id`)
+        .run({ ...updateValues, id: threadId });
+    });
+    try {
+      transaction();
+    } catch (error) {
+      const restoreTemporary = `${targetRollout}.restore-${process.pid}`;
+      await copyFile(backupRollout, restoreTemporary);
+      await rename(restoreTemporary, targetRollout);
+      throw error;
+    }
+    targetDatabase.pragma('wal_checkpoint(TRUNCATE)');
+
+    const finalDigest = await fileDigest(targetRollout);
+    if (finalDigest.sha256 !== sourceDigest.sha256 || finalDigest.bytes !== sourceDigest.bytes) {
+      throw new Error('final target rollout digest differs from the source');
+    }
+    process.stdout.write(
+      `${JSON.stringify({
+        ok: true,
+        mode,
+        threadId,
+        backupRoot,
+        source: sourceDigest,
+        targetBefore,
+        targetAfter: finalDigest,
+        preservedTargetFields: [...immutableTargetColumns].sort(),
+        updatedColumns,
+      })}\n`,
+    );
+  } finally {
+    sourceDatabase.close();
+    targetDatabase.close();
+  }
+}
+
 function parseArguments(values) {
   const parsed = {};
   for (let index = 0; index < values.length; index += 1) {
@@ -221,6 +335,10 @@ function requiredString(value, label) {
     throw new Error(`${label} must be a non-empty string`);
   }
   return value;
+}
+
+function optionalString(value) {
+  return value === undefined ? undefined : requiredString(value, 'optional value');
 }
 
 function quoteIdentifier(value) {

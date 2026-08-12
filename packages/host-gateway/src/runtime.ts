@@ -96,6 +96,7 @@ interface RendererRequestMetadata {
   method: string;
   prewarmThread?: boolean;
   rendererRequestId: JsonRpcId;
+  responseCacheGeneration?: number;
   responseCacheKey?: string;
   responseCacheOverrideFingerprint?: string;
   responseCachePrincipalKey?: string;
@@ -117,10 +118,32 @@ interface RendererResponseInFlight {
   waiters: RendererRequestMetadata[];
 }
 
+export function rendererResponseCacheGenerationCanStore(
+  requestGeneration: number | undefined,
+  currentGeneration: number,
+): boolean {
+  return requestGeneration !== undefined && requestGeneration === currentGeneration;
+}
+
+function rendererResponseInFlightKey(cacheKey: string, generation: number): string {
+  return `${String(generation)}:${cacheKey}`;
+}
+
 const THREAD_RESUME_CACHE_PREFIX = 'thread/resume:';
+const THREAD_TURNS_CACHE_PREFIX = 'thread/turns/list:';
+const THREAD_ITEMS_CACHE_PREFIX = 'thread/items/list:';
+const THREAD_CONTENT_CACHE_PREFIXES = [
+  THREAD_RESUME_CACHE_PREFIX,
+  THREAD_TURNS_CACHE_PREFIX,
+  THREAD_ITEMS_CACHE_PREFIX,
+] as const;
 const THREAD_RESUME_CACHE_TTL_MS = 24 * 60 * 60 * 1_000;
+const THREAD_HISTORY_CACHE_TTL_MS = 24 * 60 * 60 * 1_000;
 const MAX_THREAD_RESUME_CACHE_ENTRIES = 32;
+const MAX_THREAD_HISTORY_CACHE_ENTRIES = 64;
 const MAX_THREAD_RESUME_CACHE_ENTRY_BYTES = 8 * 1024 * 1024;
+const MAX_THREAD_HISTORY_CACHE_ENTRY_BYTES = 8 * 1024 * 1024;
+const MAX_THREAD_HISTORY_CACHE_BYTES = 64 * 1024 * 1024;
 
 function recordOrNull(value: unknown): Record<string, unknown> | null {
   return value !== null && typeof value === 'object' && !Array.isArray(value)
@@ -225,6 +248,9 @@ export function rendererResponseCacheTtlMs(method: string, params?: unknown): nu
   if (method === 'plugin/list' || method === 'plugin/installed') return 6 * 60 * 60 * 1_000;
   if (method === 'app/installed') return 5 * 60 * 1_000;
   if (method === 'mcpServerStatus/list') return 5 * 60 * 1_000;
+  if (method === 'thread/turns/list' || method === 'thread/items/list') {
+    return THREAD_HISTORY_CACHE_TTL_MS;
+  }
   if (method === 'thread/resume') {
     const request = recordOrNull(params);
     const initialTurnsPage = recordOrNull(request?.initialTurnsPage);
@@ -241,6 +267,13 @@ export function rendererResponseCacheTtlMs(method: string, params?: unknown): nu
 }
 
 export function rendererResponseCanBeCached(method: string, result: unknown): boolean {
+  if (method === 'thread/turns/list' || method === 'thread/items/list') {
+    const serialized = JSON.stringify(result);
+    return (
+      serialized !== undefined &&
+      Buffer.byteLength(serialized) <= MAX_THREAD_HISTORY_CACHE_ENTRY_BYTES
+    );
+  }
   if (method !== 'thread/resume') return true;
   const response = recordOrNull(result);
   const thread = recordOrNull(response?.thread);
@@ -286,14 +319,14 @@ export function rendererResponseCacheInvalidationPrefixes(method: string): strin
     method.startsWith('turn/') ||
     (method.startsWith('thread/') && !THREAD_READ_ONLY_METHODS.has(method))
   ) {
-    return [THREAD_RESUME_CACHE_PREFIX];
+    return [...THREAD_CONTENT_CACHE_PREFIXES];
   }
   return [];
 }
 
 export function rendererNotificationCacheInvalidationPrefixes(method: string): string[] {
   if (method === 'turn/started' || method === 'turn/completed' || method === 'thread/deleted') {
-    return [THREAD_RESUME_CACHE_PREFIX];
+    return [...THREAD_CONTENT_CACHE_PREFIXES];
   }
   return [];
 }
@@ -347,6 +380,7 @@ export class UserRuntime extends EventEmitter {
   #rendererRequests = new Map<JsonRpcId, RendererRequestMetadata>();
   #rendererResponseCache = new Map<string, RendererResponseCacheEntry>();
   #rendererResponseInFlight = new Map<string, RendererResponseInFlight>();
+  #rendererResponseCacheGeneration = 0;
   #modelProviderCapabilities: unknown;
   #fetchControllers = new Map<string, AbortController>();
   #browserDownloads = new Map<string, BrowserDownload & { expiresAt: number }>();
@@ -835,6 +869,8 @@ export class UserRuntime extends EventEmitter {
           responseCacheTtlMs === null
             ? undefined
             : rendererResponseCacheKey(prepared.request.method, prepared.request.params);
+        const responseCacheGeneration =
+          responseCacheKey === undefined ? undefined : this.#rendererResponseCacheGeneration;
         const responseCacheOverrideFingerprint =
           prepared.request.method === 'thread/resume'
             ? threadResumeOverrideFingerprint(prepared.request.params)
@@ -878,10 +914,9 @@ export class UserRuntime extends EventEmitter {
             }
             this.#rendererResponseCache.delete(responseCacheKey);
           }
-          responseCachePrincipalKey =
-            prepared.request.method === 'thread/resume'
-              ? undefined
-              : await this.#readDiscoveryResponseCachePrincipalKey();
+          responseCachePrincipalKey = prepared.request.method.startsWith('thread/')
+            ? undefined
+            : await this.#readDiscoveryResponseCachePrincipalKey();
           if (responseCachePrincipalKey !== undefined) {
             try {
               const persisted = this.#discoveryResponseCacheStore.read(
@@ -929,6 +964,7 @@ export class UserRuntime extends EventEmitter {
           rendererRequestId,
           requestFingerprint,
           ...(responseCacheKey === undefined ? {} : { responseCacheKey }),
+          ...(responseCacheGeneration === undefined ? {} : { responseCacheGeneration }),
           ...(responseCacheOverrideFingerprint === undefined
             ? {}
             : { responseCacheOverrideFingerprint }),
@@ -946,12 +982,16 @@ export class UserRuntime extends EventEmitter {
           this.#fetchProxy.invalidateResponseCache();
         }
         if (responseCacheKey !== undefined && responseCacheReadEligible) {
-          const inFlight = this.#rendererResponseInFlight.get(responseCacheKey);
+          const inFlightKey = rendererResponseInFlightKey(
+            responseCacheKey,
+            responseCacheGeneration as number,
+          );
+          const inFlight = this.#rendererResponseInFlight.get(inFlightKey);
           if (inFlight !== undefined) {
             inFlight.waiters.push(metadata);
             return undefined;
           }
-          this.#rendererResponseInFlight.set(responseCacheKey, {
+          this.#rendererResponseInFlight.set(inFlightKey, {
             appServerRequestId,
             waiters: [],
           });
@@ -1360,6 +1400,10 @@ export class UserRuntime extends EventEmitter {
       if (
         metadata?.responseCacheKey !== undefined &&
         metadata.responseCacheTtlMs !== undefined &&
+        rendererResponseCacheGenerationCanStore(
+          metadata.responseCacheGeneration,
+          this.#rendererResponseCacheGeneration,
+        ) &&
         parsed.error === undefined &&
         rendererResponseCanBeCached(metadata.method, parsed.result)
       ) {
@@ -1587,7 +1631,7 @@ export class UserRuntime extends EventEmitter {
     }
     this.#rendererRequests.clear();
     this.#rendererResponseInFlight.clear();
-    this.#deleteRendererResponseCachePrefixes([THREAD_RESUME_CACHE_PREFIX]);
+    this.#invalidateRendererResponseCachePrefixes(THREAD_CONTENT_CACHE_PREFIXES);
     this.#prewarmedThreads.clear();
     this.#turnLatency.clear();
   }
@@ -1596,7 +1640,7 @@ export class UserRuntime extends EventEmitter {
     parsedNotification: { method: string; params?: unknown },
     suppressPrewarmedThread = true,
   ): void {
-    this.#deleteRendererResponseCachePrefixes(
+    this.#invalidateRendererResponseCachePrefixes(
       rendererNotificationCacheInvalidationPrefixes(parsedNotification.method),
     );
     this.#turnLatency.observeNotification(parsedNotification);
@@ -1657,11 +1701,29 @@ export class UserRuntime extends EventEmitter {
     for (const key of threadResumeKeys.slice(0, -MAX_THREAD_RESUME_CACHE_ENTRIES)) {
       this.#rendererResponseCache.delete(key);
     }
+    const threadHistoryKeys = [...this.#rendererResponseCache.keys()].filter(
+      (key) =>
+        key.startsWith(THREAD_TURNS_CACHE_PREFIX) || key.startsWith(THREAD_ITEMS_CACHE_PREFIX),
+    );
+    let threadHistoryBytes = threadHistoryKeys.reduce((total, key) => {
+      const cached = this.#rendererResponseCache.get(key);
+      if (cached === undefined) return total;
+      const serialized = JSON.stringify(cached.result);
+      return total + (serialized === undefined ? 0 : Buffer.byteLength(serialized));
+    }, 0);
+    for (const [index, key] of threadHistoryKeys.entries()) {
+      const overEntryLimit = threadHistoryKeys.length - index > MAX_THREAD_HISTORY_CACHE_ENTRIES;
+      if (!overEntryLimit && threadHistoryBytes <= MAX_THREAD_HISTORY_CACHE_BYTES) break;
+      const cached = this.#rendererResponseCache.get(key);
+      const serialized = cached === undefined ? undefined : JSON.stringify(cached.result);
+      threadHistoryBytes -= serialized === undefined ? 0 : Buffer.byteLength(serialized);
+      this.#rendererResponseCache.delete(key);
+    }
   }
 
   #invalidateRendererResponseCache(method: string): void {
     const prefixes = rendererResponseCacheInvalidationPrefixes(method);
-    this.#deleteRendererResponseCachePrefixes(prefixes);
+    this.#invalidateRendererResponseCachePrefixes(prefixes);
     const persistentPrefixes = prefixes.filter((prefix) => !prefix.startsWith('thread/'));
     if (persistentPrefixes.length === 0) return;
     try {
@@ -1683,6 +1745,12 @@ export class UserRuntime extends EventEmitter {
     }
   }
 
+  #invalidateRendererResponseCachePrefixes(prefixes: readonly string[]): void {
+    if (prefixes.length === 0) return;
+    this.#rendererResponseCacheGeneration += 1;
+    this.#deleteRendererResponseCachePrefixes(prefixes);
+  }
+
   async #readDiscoveryResponseCachePrincipalKey(): Promise<string | undefined> {
     try {
       const persistedAuth = JSON.parse(
@@ -1702,11 +1770,15 @@ export class UserRuntime extends EventEmitter {
     appServerRequestId: JsonRpcId,
     metadata: RendererRequestMetadata | undefined,
   ): RendererRequestMetadata[] {
-    const key = metadata?.responseCacheKey;
+    if (metadata === undefined) return [];
+    const key = metadata.responseCacheKey;
     if (key === undefined) return [];
-    const inFlight = this.#rendererResponseInFlight.get(key);
+    const generation = metadata.responseCacheGeneration;
+    if (generation === undefined) return [];
+    const inFlightKey = rendererResponseInFlightKey(key, generation);
+    const inFlight = this.#rendererResponseInFlight.get(inFlightKey);
     if (inFlight?.appServerRequestId !== appServerRequestId) return [];
-    this.#rendererResponseInFlight.delete(key);
+    this.#rendererResponseInFlight.delete(inFlightKey);
     return inFlight.waiters;
   }
 

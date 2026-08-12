@@ -19,6 +19,15 @@ const smokeEmail = process.env.SMOKE_EMAIL ?? 'official-ui-smoke@example.invalid
 const expectedRendererVersion = process.env.SMOKE_RENDERER_VERSION ?? '26.730.61639';
 const smokeAttempt = Number(process.env.SMOKE_ATTEMPT ?? '1');
 const inspectSettingsMenu = process.env.SMOKE_INSPECT_SETTINGS_MENU ?? '';
+const switchLocaleLabel = optionalEnvironmentValue('SMOKE_SWITCH_LOCALE_LABEL');
+const switchLocaleExpected = optionalEnvironmentValue('SMOKE_SWITCH_LOCALE_EXPECTED');
+const switchLocaleSequence = parseLocaleSwitchSequence(
+  optionalEnvironmentValue('SMOKE_SWITCH_LOCALES_JSON'),
+  switchLocaleLabel,
+  switchLocaleExpected,
+);
+const verifyLocaleAfterReload = process.env.SMOKE_VERIFY_LOCALE_AFTER_RELOAD === '1';
+const requireCompressedMainAsset = process.env.SMOKE_REQUIRE_COMPRESSED_MAIN_ASSET === '1';
 if (baseUrl === undefined || browserExecutable === undefined) {
   throw new Error('SMOKE_BASE_URL and BROWSER_EXECUTABLE are required');
 }
@@ -43,6 +52,8 @@ const page = await context.newPage();
 const pageErrors = [];
 const failedLocalRequests = [];
 const loadedLocaleAssets = [];
+let mainAssetEncoding;
+let mainAssetTransferBytes;
 let bridgeConnected = false;
 let bridgeReady = false;
 let clickedHref;
@@ -59,6 +70,11 @@ let settingsMenuInspection;
 
 page.on('pageerror', (error) => pageErrors.push(error.message));
 page.on('response', (response) => {
+  if (/\/assets\/app-initial-[^/]+\.js$/u.test(response.url())) {
+    mainAssetEncoding = response.headers()['content-encoding'];
+    const contentLength = Number(response.headers()['content-length']);
+    mainAssetTransferBytes = Number.isFinite(contentLength) ? contentLength : undefined;
+  }
   if (
     /\/assets\/(?:zh-CN|zh-TW|zh-HK|ja-JP|ko-KR|fr-FR|de-DE|es-(?:ES|419))-[^/]+\.js$/u.test(
       response.url(),
@@ -243,6 +259,14 @@ try {
       `official renderer emitted errors: ${JSON.stringify({ pageErrors, failedLocalRequests })}`,
     );
   }
+  if (requireCompressedMainAsset && mainAssetEncoding !== 'gzip') {
+    throw new Error(
+      `official renderer main asset was not compressed: ${JSON.stringify({
+        mainAssetEncoding,
+        mainAssetTransferBytes,
+      })}`,
+    );
+  }
   if (clickText !== undefined) {
     const target = page.getByText(clickText, { exact: false }).first();
     await target.waitFor({ state: 'visible', timeout: 120_000 });
@@ -268,7 +292,7 @@ try {
         bodyText: document.body.innerText.slice(-4_000),
         interactiveElements: Array.from(
           document.querySelectorAll(
-            'button, [role="button"], [role="menuitem"], [role="option"], [role="tab"], [role="dialog"]',
+            'button, input, select, [role="button"], [role="combobox"], [role="menuitem"], [role="option"], [role="tab"], [role="dialog"]',
           ),
         )
           .map((element) => {
@@ -291,7 +315,11 @@ try {
       }));
     const beforeOpen = await inspectInteractiveElements();
     let afterOpen;
-    if (inspectSettingsMenu === 'open') {
+    if (
+      inspectSettingsMenu === 'open' ||
+      inspectSettingsMenu === 'settings' ||
+      inspectSettingsMenu === 'language'
+    ) {
       const accountButton = page
         .locator('button, [role="button"]')
         .filter({ hasText: /Lucas Ding|22aialra22@gmail\.com/u })
@@ -300,6 +328,98 @@ try {
       await accountButton.click();
       await page.waitForTimeout(500);
       afterOpen = await inspectInteractiveElements();
+      if (inspectSettingsMenu === 'settings' || inspectSettingsMenu === 'language') {
+        const settingsItem = page
+          .locator('[role="menuitem"]')
+          .filter({ hasText: /^(?:设置|Settings)/u })
+          .last();
+        await settingsItem.waitFor({ state: 'visible', timeout: 20_000 });
+        await settingsItem.click();
+        await page.waitForFunction(
+          () =>
+            !document.body.innerText.includes('正在加载设置…') &&
+            !document.body.innerText.includes('Loading settings…'),
+          undefined,
+          { timeout: 120_000 },
+        );
+        const settingsDialog = await inspectInteractiveElements();
+        let languageMenu;
+        let switchedLocale;
+        if (inspectSettingsMenu === 'language') {
+          const languageButton = page
+            .locator('button')
+            .filter({ hasText: /^(?:简体中文|English|繁體中文|日本語|Français)/u })
+            .last();
+          await languageButton.waitFor({ state: 'visible', timeout: 20_000 });
+          await languageButton.click();
+          await page.waitForTimeout(300);
+          languageMenu = await inspectInteractiveElements();
+          const switchedLocales = [];
+          for (let index = 0; index < switchLocaleSequence.length; index += 1) {
+            const localeSwitch = switchLocaleSequence[index];
+            if (index > 0) {
+              const currentLanguageButton = page
+                .locator('button')
+                .filter({
+                  hasText: new RegExp(
+                    `^${escapeRegExp(switchLocaleSequence[index - 1].label)}$`,
+                    'u',
+                  ),
+                })
+                .last();
+              await currentLanguageButton.waitFor({ state: 'visible', timeout: 20_000 });
+              await currentLanguageButton.click();
+            }
+            const localeOption = page
+              .locator('[role="option"], [role="menuitem"], button')
+              .filter({ hasText: new RegExp(`^${escapeRegExp(localeSwitch.label)}$`, 'u') })
+              .last();
+            await localeOption.waitFor({ state: 'visible', timeout: 20_000 });
+            await localeOption.click();
+            await page.waitForFunction(
+              (locale) => document.documentElement.lang === locale,
+              localeSwitch.expected,
+              { timeout: 30_000 },
+            );
+            if (localeSwitch.expected !== 'en-US') {
+              await waitFor(
+                () =>
+                  loadedLocaleAssets.some((asset) =>
+                    asset?.startsWith(`${localeSwitch.expected}-`),
+                  ),
+                30_000,
+              );
+            }
+            switchedLocales.push({
+              label: localeSwitch.label,
+              documentLocale: await page.evaluate(() => document.documentElement.lang),
+              localeAsset: loadedLocaleAssets.find((asset) =>
+                asset?.startsWith(`${localeSwitch.expected}-`),
+              ),
+            });
+          }
+          if (switchLocaleSequence.length > 0) {
+            switchedLocale = { sequence: switchedLocales };
+            if (verifyLocaleAfterReload) {
+              const finalLocale = switchLocaleSequence.at(-1).expected;
+              await page.reload({ waitUntil: 'domcontentloaded', timeout: 45_000 });
+              await page.waitForFunction(
+                (locale) => document.documentElement.lang === locale,
+                finalLocale,
+                { timeout: 120_000 },
+              );
+              switchedLocale.persistedAfterReload =
+                (await page.evaluate(() => document.documentElement.lang)) === finalLocale;
+            }
+          }
+        }
+        afterOpen = {
+          profileMenu: afterOpen,
+          settingsDialog,
+          languageMenu,
+          switchedLocale,
+        };
+      }
     }
     settingsMenuInspection = { beforeOpen, afterOpen };
   }
@@ -328,6 +448,8 @@ try {
       historySnapshotGate: renderer.historySnapshotGate,
       documentLocale: renderer.documentLocale,
       loadedLocaleAssets,
+      mainAssetEncoding,
+      mainAssetTransferBytes,
       bridgeConnected,
       bridgeReady,
       clickedHref,
@@ -406,6 +528,36 @@ function elapsed(timestampMs) {
 function optionalEnvironmentValue(name) {
   const value = process.env[name];
   return value === undefined || value.length === 0 ? undefined : value;
+}
+
+function escapeRegExp(value) {
+  return value.replace(/[.*+?^${}()|[\]\\]/gu, '\\$&');
+}
+
+function parseLocaleSwitchSequence(json, label, expected) {
+  if (json !== undefined) {
+    const parsed = JSON.parse(json);
+    if (
+      !Array.isArray(parsed) ||
+      parsed.some(
+        (entry) =>
+          entry === null ||
+          typeof entry !== 'object' ||
+          typeof entry.label !== 'string' ||
+          entry.label.length === 0 ||
+          typeof entry.expected !== 'string' ||
+          entry.expected.length === 0,
+      )
+    ) {
+      throw new Error('SMOKE_SWITCH_LOCALES_JSON must be a locale switch array');
+    }
+    return parsed;
+  }
+  if (label === undefined) return [];
+  if (expected === undefined) {
+    throw new Error('SMOKE_SWITCH_LOCALE_EXPECTED is required with a locale label');
+  }
+  return [{ label, expected }];
 }
 
 function reportProgress(stage) {

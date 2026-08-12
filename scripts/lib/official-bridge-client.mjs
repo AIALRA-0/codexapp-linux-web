@@ -465,10 +465,16 @@ function requestTimeoutFromEnvironment() {
   return parsed;
 }
 
-export function createIdentityHeaders({ email, proxySecret, subject, username }) {
+export function createIdentityHeaders({
+  email,
+  proxySecret,
+  proxySecretHeader = 'X-Aialra-Proxy-Secret',
+  subject,
+  username,
+}) {
   return {
     'X-Aialra-Authenticated': '1',
-    'X-Aialra-Proxy-Secret': proxySecret,
+    [proxySecretHeader]: proxySecret,
     'X-Aialra-Sub': subject,
     'X-Aialra-User': username,
     'X-Aialra-Email': email,
