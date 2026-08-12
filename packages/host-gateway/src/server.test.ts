@@ -6,15 +6,18 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
 import {
+  BROWSER_BRIDGE_MODULES,
   countIdentitySessions,
   countReconnectableIdentitySessions,
   findMissingBrowserBridgeImports,
   injectBridgeScripts,
+  injectInitialRouteMeta,
   installWebSocketHeartbeat,
   isConcurrentBridgeInvocation,
   missingBridgeSessionRequiresReload,
   officialInitialRouteLocation,
   reconnectableIdentityEntries,
+  rendererInitialRouteForRequest,
   resolveBrowserFileAsset,
   shouldServeRendererIndex,
   terminateWebsocketClients,
@@ -35,6 +38,19 @@ describe('browser bridge module boundary', () => {
         new Map([
           ['index.js', "import { pick } from './browser-file-picker.js';"],
           ['browser-file-picker.js', 'export const pick = true;'],
+        ]),
+      ),
+    ).toEqual([]);
+  });
+
+  it('serves every local module imported by the production browser bridge', () => {
+    expect(BROWSER_BRIDGE_MODULES).toContain('official-feature-gates.js');
+    expect(
+      findMissingBrowserBridgeImports(
+        new Map([
+          ['index.js', "import './browser-file-picker.js'; import './official-feature-gates.js';"],
+          ['browser-file-picker.js', 'export const picker = true;'],
+          ['official-feature-gates.js', 'export const historySnapshots = true;'],
         ]),
       ),
     ).toEqual([]);
@@ -159,6 +175,32 @@ describe('official renderer navigation fallback', () => {
     expect(shouldServeRendererIndex('index.html', undefined)).toBe(true);
     expect(shouldServeRendererIndex('login', 'text/html,application/xhtml+xml')).toBe(true);
     expect(shouldServeRendererIndex('local/thread-1', 'text/html')).toBe(true);
+  });
+
+  it('passes a refreshed browser route through the official initial-route contract', () => {
+    expect(
+      rendererInitialRouteForRequest(
+        'local/thread-1',
+        '/local/thread-1?hostId=local',
+        'https://codex.example.test',
+      ),
+    ).toBe('/local/thread-1?hostId=local');
+    expect(rendererInitialRouteForRequest('', '/', 'https://codex.example.test')).toBeNull();
+    expect(
+      rendererInitialRouteForRequest(
+        'local/thread-1',
+        '/local/thread-1?initialRoute=%2Flogin',
+        'https://codex.example.test',
+      ),
+    ).toBeNull();
+
+    const rendered = injectInitialRouteMeta(
+      '<html><head><base href="/"></head><body></body></html>',
+      '/local/thread-1?label=a&view="full"',
+    );
+    expect(rendered).toContain(
+      '<meta name="initial-route" content="/local/thread-1?label=a&amp;view=&quot;full&quot;">',
+    );
   });
 
   it('does not turn missing static module requests into HTML', () => {

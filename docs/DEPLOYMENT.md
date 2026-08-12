@@ -35,6 +35,12 @@ retained and replayed with the original JSON-RPC id, so a returning browser can
 answer the same approval rather than stranding the turn. After the turn and all
 requests finish, the normal `IDLE_RUNTIME_SECONDS` countdown resumes.
 
+The production systemd drop-in sets that idle countdown to 24 hours so a large
+completed thread remains fast across ordinary page closes and browser restarts.
+Active turns are protected separately and never depend on this timer. The host
+still bounds the in-process resume cache to 32 idle responses, 8 MiB each, and
+the service keeps its 6 GiB memory limit.
+
 This protects tasks from application idle collection and normal guarded
 deployments. It does not claim that an in-flight upstream model stream can
 survive a kernel crash, VPS power loss, process OOM kill, or forced

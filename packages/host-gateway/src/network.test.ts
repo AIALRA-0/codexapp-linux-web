@@ -4,6 +4,8 @@ import {
   assertAllowedRendererFetchUrl,
   parseRendererFetchRequest,
   RendererFetchProxy,
+  rendererFetchMutatesCachedSettings,
+  rendererFetchResponseCachePolicy,
   resolveRendererFetchUrl,
   shouldUseOfficialElectronNetwork,
   shouldUseRendererEgressProxy,
@@ -85,6 +87,116 @@ describe('renderer fetch security', () => {
 });
 
 describe('renderer fetch proxy', () => {
+  it('caches only authenticated read-only startup settings for a bounded period', () => {
+    const request = parseRendererFetchRequest({
+      type: 'fetch',
+      requestId: 'settings-1',
+      url: '/settings/user',
+      method: 'GET',
+      headers: { 'X-OpenAI-Attach-Auth': '1' },
+    });
+    expect(
+      rendererFetchResponseCachePolicy(
+        request,
+        new URL('https://chatgpt.com/backend-api/settings/user'),
+      )?.ttlMs,
+    ).toBe(60_000);
+    expect(
+      rendererFetchResponseCachePolicy(
+        { ...request, method: 'POST' },
+        new URL('https://chatgpt.com/backend-api/settings/user'),
+      ),
+    ).toBeNull();
+    expect(
+      rendererFetchResponseCachePolicy(
+        { ...request, attachAuth: false },
+        new URL('https://chatgpt.com/backend-api/settings/user'),
+      ),
+    ).toBeNull();
+    expect(
+      rendererFetchMutatesCachedSettings(
+        { ...request, method: 'POST' },
+        new URL('https://chatgpt.com/backend-api/settings/user'),
+      ),
+    ).toBe(true);
+    expect(
+      rendererFetchMutatesCachedSettings(
+        { ...request, method: 'POST' },
+        new URL('https://chatgpt.com/backend-api/wham/models'),
+      ),
+    ).toBe(false);
+  });
+
+  it('reuses a successful startup response and invalidates it explicitly', async () => {
+    const fetchImplementation = vi.fn(() =>
+      Promise.resolve(
+        new Response(JSON.stringify({ locale: 'zh-CN' }), {
+          status: 200,
+          headers: { 'content-type': 'application/json' },
+        }),
+      ),
+    ) as typeof fetch;
+    const proxy = new RendererFetchProxy({
+      appVersion: '26.803.81509',
+      fetchImplementation,
+      getAuthToken: () => Promise.resolve('token'),
+    });
+    const message = {
+      type: 'fetch',
+      requestId: 'settings-1',
+      url: '/settings/user',
+      method: 'GET',
+      headers: { 'X-OpenAI-Attach-Auth': '1' },
+    };
+    const first = await proxy.perform(message);
+    const second = await proxy.perform({ ...message, requestId: 'settings-2' });
+    expect(first).toMatchObject({ requestId: 'settings-1', responseType: 'success' });
+    expect(second).toMatchObject({ requestId: 'settings-2', responseType: 'success' });
+    expect(fetchImplementation).toHaveBeenCalledTimes(1);
+
+    proxy.invalidateResponseCache();
+    await proxy.perform({ ...message, requestId: 'settings-3' });
+    expect(fetchImplementation).toHaveBeenCalledTimes(2);
+  });
+
+  it('ignores random tracing headers while preserving response-changing cache variants', () => {
+    const base = parseRendererFetchRequest({
+      type: 'fetch',
+      requestId: 'settings-cache-key',
+      url: '/settings/user',
+      method: 'GET',
+      headers: {
+        Accept: 'application/json',
+        'Accept-Language': 'zh-CN',
+        'X-OpenAI-Attach-Auth': '1',
+        traceparent: '00-first-random-trace',
+      },
+    });
+    const url = new URL('https://chatgpt.com/backend-api/settings/user');
+    const first = rendererFetchResponseCachePolicy(base, url);
+    const differentTrace = rendererFetchResponseCachePolicy(
+      {
+        ...base,
+        headers: { ...base.headers, traceparent: '00-second-random-trace' },
+      },
+      url,
+    );
+    const differentLanguage = rendererFetchResponseCachePolicy(
+      {
+        ...base,
+        headers: { ...base.headers, 'Accept-Language': 'en-US' },
+      },
+      url,
+    );
+    const differentEncoding = rendererFetchResponseCachePolicy(
+      { ...base, binaryResponse: true },
+      url,
+    );
+    expect(first?.key).toBe(differentTrace?.key);
+    expect(first?.key).not.toBe(differentLanguage?.key);
+    expect(first?.key).not.toBe(differentEncoding?.key);
+  });
+
   it('keeps the fallback narrow while routing every official backend API request through Electron', () => {
     expect(
       shouldUseRendererEgressProxy(

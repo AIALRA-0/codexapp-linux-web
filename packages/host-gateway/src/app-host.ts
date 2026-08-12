@@ -155,6 +155,7 @@ class BrowserAppHost extends RpcTarget {
       applicationMenu: new ApplicationMenuService(),
       appActions: new AppActionsService(),
       appInfo: new AppInfoService(this.#runtime),
+      appServerHistorySnapshots: this.#runtime.appServerHistorySnapshots,
       appUpdates: new AppUpdatesService(),
       artifactDocuments: new ArtifactDocumentsService(this.#runtime),
       // The official Linux host does not construct the native macOS/Windows

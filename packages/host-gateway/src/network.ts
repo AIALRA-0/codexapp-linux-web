@@ -1,4 +1,5 @@
 import { fetch as undiciFetch, ProxyAgent, type Dispatcher } from 'undici';
+import { createHash } from 'node:crypto';
 
 const DEFAULT_CHATGPT_API_BASE = 'https://chatgpt.com/backend-api/';
 const DEFAULT_MAX_RESPONSE_BYTES = 32 * 1024 * 1024;
@@ -39,6 +40,8 @@ const FORBIDDEN_OUTBOUND_HEADERS = new Set([
 ]);
 
 const FORBIDDEN_RESPONSE_HEADERS = new Set(['set-cookie', 'set-cookie2']);
+
+const RESPONSE_CACHE_VARY_HEADERS = new Set(['accept', 'accept-language']);
 
 const ALLOWED_HOST_SUFFIXES = [
   'chatgpt.com',
@@ -137,6 +140,10 @@ export class RendererFetchError extends Error {
 
 export class RendererFetchProxy {
   readonly options: RendererFetchProxyOptions;
+  readonly #responseCache = new Map<
+    string,
+    { expiresAtMs: number; response: RendererFetchResponse }
+  >();
 
   constructor(options: RendererFetchProxyOptions) {
     this.options = options;
@@ -151,6 +158,17 @@ export class RendererFetchProxy {
         this.options.chatGptApiBase ?? DEFAULT_CHATGPT_API_BASE,
       );
       assertAllowedRendererFetchUrl(resolvedUrl);
+      if (rendererFetchMutatesCachedSettings(request, resolvedUrl)) {
+        this.invalidateResponseCache();
+      }
+      const responseCache = rendererFetchResponseCachePolicy(request, resolvedUrl);
+      if (responseCache !== null) {
+        const cached = this.#responseCache.get(responseCache.key);
+        if (cached !== undefined && cached.expiresAtMs > Date.now()) {
+          return { ...cached.response, requestId: request.requestId };
+        }
+        if (cached !== undefined) this.#responseCache.delete(responseCache.key);
+      }
       if (isDiscardableTelemetryIngest(request, resolvedUrl)) {
         return {
           type: 'fetch-response',
@@ -190,7 +208,7 @@ export class RendererFetchProxy {
           });
         }
       }
-      return {
+      const result: RendererFetchResponse = {
         type: 'fetch-response',
         responseType: 'success',
         requestId: request.requestId,
@@ -198,6 +216,14 @@ export class RendererFetchProxy {
         headers,
         bodyJsonString,
       };
+      if (responseCache !== null) {
+        this.#responseCache.set(responseCache.key, {
+          expiresAtMs: Date.now() + responseCache.ttlMs,
+          response: result,
+        });
+        this.#pruneResponseCache();
+      }
+      return result;
     } catch (error) {
       const status = error instanceof RendererFetchError ? error.status : 500;
       const errorCode = error instanceof RendererFetchError ? error.errorCode : undefined;
@@ -209,6 +235,22 @@ export class RendererFetchProxy {
         error: error instanceof Error ? error.message : 'Unknown fetch proxy error',
         ...(errorCode === undefined ? {} : { errorCode }),
       };
+    }
+  }
+
+  invalidateResponseCache(): void {
+    this.#responseCache.clear();
+  }
+
+  #pruneResponseCache(): void {
+    const now = Date.now();
+    for (const [key, cached] of this.#responseCache) {
+      if (cached.expiresAtMs <= now) this.#responseCache.delete(key);
+    }
+    while (this.#responseCache.size > 100) {
+      const first = this.#responseCache.keys().next().value;
+      if (first === undefined) break;
+      this.#responseCache.delete(first);
     }
   }
 
@@ -417,6 +459,47 @@ export class RendererFetchProxy {
       headers = createOutboundHeaders(request, url, token, this.options.appVersion, integrityState);
     }
   }
+}
+
+export function rendererFetchResponseCachePolicy(
+  request: RendererFetchRequest,
+  url: URL,
+): { key: string; ttlMs: number } | null {
+  if (request.method !== 'GET' || !request.attachAuth) return null;
+  let ttlMs: number | null = null;
+  if (url.pathname.startsWith('/backend-api/settings/')) ttlMs = 60_000;
+  else if (url.pathname.startsWith('/backend-api/accounts/')) ttlMs = 60_000;
+  else if (url.pathname.startsWith('/backend-api/wham/')) ttlMs = 15_000;
+  if (ttlMs === null) return null;
+  const requestIdentity = JSON.stringify({
+    attachDesktopSurface: request.attachDesktopSurface,
+    attachIntegrityState: request.attachIntegrityState,
+    binaryResponse: request.binaryResponse,
+    headers: Object.fromEntries(
+      Object.entries(request.headers)
+        .map(([name, value]) => [name.toLowerCase(), value] as const)
+        .filter(([name]) => RESPONSE_CACHE_VARY_HEADERS.has(name))
+        .sort(([left], [right]) => left.localeCompare(right)),
+    ),
+    url: url.href,
+  });
+  return {
+    key: createHash('sha256').update(requestIdentity).digest('hex'),
+    ttlMs,
+  };
+}
+
+export function rendererFetchMutatesCachedSettings(
+  request: RendererFetchRequest,
+  url: URL,
+): boolean {
+  return (
+    request.attachAuth &&
+    request.method !== 'GET' &&
+    request.method !== 'HEAD' &&
+    (url.pathname.startsWith('/backend-api/settings/') ||
+      url.pathname.startsWith('/backend-api/accounts/'))
+  );
 }
 
 export function parseRendererFetchRequest(

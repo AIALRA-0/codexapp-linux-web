@@ -23,6 +23,7 @@ import { CodexAppServerClient, type ServerRequestEvent } from '@codexapp/app-ser
 
 import { deleteAllArchivedThreads, deleteArchivedThread } from './archived-thread-operations.js';
 import { BackgroundWorkTracker, type BackgroundWorkSnapshot } from './background-work.js';
+import { DiscoveryResponseCacheStore } from './discovery-response-cache.js';
 import {
   readBrowserPermissionSnapshot,
   writeBrowserApprovalMode,
@@ -45,6 +46,11 @@ import { OfficialBrowserRuntime } from './browser-runtime.js';
 import { buildOfficialDeveloperInstructions } from './official-developer-instructions.js';
 import { OfficialDesktopState } from './official-desktop-state.js';
 import { OfficialGithubService, OfficialGitWorker } from './official-git-worker.js';
+import {
+  AppServerHistorySnapshotsService,
+  AppServerHistorySnapshotStore,
+  type HistorySnapshotPrincipal,
+} from './history-snapshots.js';
 import { OfficialPrewarmedThreads } from './prewarmed-threads.js';
 import { RequestUserInputAutoResolution } from './request-user-input-auto-resolution.js';
 import { ensureRuntimeDirectory, resolveRuntimeDirectory } from './runtime-directory.js';
@@ -91,6 +97,8 @@ interface RendererRequestMetadata {
   prewarmThread?: boolean;
   rendererRequestId: JsonRpcId;
   responseCacheKey?: string;
+  responseCacheOverrideFingerprint?: string;
+  responseCachePrincipalKey?: string;
   responseCacheTtlMs?: number;
   requestFingerprint?: string;
   requestShape?: Record<string, unknown>;
@@ -100,7 +108,24 @@ interface RendererRequestMetadata {
 
 interface RendererResponseCacheEntry {
   expiresAtMs: number;
+  resumeOverrideFingerprint?: string;
   result: unknown;
+}
+
+interface RendererResponseInFlight {
+  appServerRequestId: JsonRpcId;
+  waiters: RendererRequestMetadata[];
+}
+
+const THREAD_RESUME_CACHE_PREFIX = 'thread/resume:';
+const THREAD_RESUME_CACHE_TTL_MS = 24 * 60 * 60 * 1_000;
+const MAX_THREAD_RESUME_CACHE_ENTRIES = 32;
+const MAX_THREAD_RESUME_CACHE_ENTRY_BYTES = 8 * 1024 * 1024;
+
+function recordOrNull(value: unknown): Record<string, unknown> | null {
+  return value !== null && typeof value === 'object' && !Array.isArray(value)
+    ? (value as Record<string, unknown>)
+    : null;
 }
 
 interface RendererMessage {
@@ -129,15 +154,59 @@ export function rendererRequestFingerprint(params: unknown): string {
   return createHash('sha256').update(JSON.stringify(canonical)).digest('hex').slice(0, 12);
 }
 
+const THREAD_RESUME_LOCATOR_KEYS = new Set([
+  'cwd',
+  'excludeTurns',
+  'history',
+  'initialTurnsPage',
+  'path',
+  'threadId',
+]);
+
+export function threadResumeHasMaterialOverrides(params: unknown): boolean {
+  const request = recordOrNull(params);
+  if (request === null) return false;
+  return Object.entries(request).some(
+    ([key, value]) => !THREAD_RESUME_LOCATOR_KEYS.has(key) && value !== null && value !== undefined,
+  );
+}
+
+export function threadResumeOverrideFingerprint(params: unknown): string {
+  const request = recordOrNull(params) ?? {};
+  const overrides = Object.fromEntries(
+    Object.entries(request).filter(([key]) => !THREAD_RESUME_LOCATOR_KEYS.has(key)),
+  );
+  return rendererRequestFingerprint(overrides);
+}
+
+export function rendererResponseCacheKey(method: string, params: unknown): string {
+  if (method !== 'thread/resume') return `${method}:${rendererRequestFingerprint(params)}`;
+  const request = recordOrNull(params) ?? {};
+  const locator = Object.fromEntries(
+    Object.entries(request).filter(([key]) => THREAD_RESUME_LOCATOR_KEYS.has(key)),
+  );
+  return `${THREAD_RESUME_CACHE_PREFIX}${rendererRequestFingerprint(locator)}`;
+}
+
 export function rendererRequestShape(
   method: string,
   params: unknown,
 ): Record<string, unknown> | undefined {
-  if (method !== 'plugin/list') return undefined;
   const record =
     params !== null && typeof params === 'object' && !Array.isArray(params)
       ? (params as Record<string, unknown>)
       : {};
+  if (method === 'thread/resume') {
+    return {
+      parameterFingerprints: Object.fromEntries(
+        Object.keys(record)
+          .sort()
+          .map((key) => [key, rendererRequestFingerprint(record[key])]),
+      ),
+      parameterKeys: Object.keys(record).sort(),
+    };
+  }
+  if (method !== 'plugin/list') return undefined;
   return {
     cwdCount: Array.isArray(record.cwds) ? record.cwds.length : null,
     cwdsProvided: Object.hasOwn(record, 'cwds'),
@@ -148,12 +217,85 @@ export function rendererRequestShape(
   };
 }
 
-export function rendererResponseCacheTtlMs(method: string): number | null {
-  // The official shell can ask for these lists several times during one mount.
-  // A two-second deduplication window removes that duplicated cold-start work
-  // without hiding a plugin install or MCP status change for a meaningful time.
-  if (method === 'plugin/list' || method === 'mcpServerStatus/list') return 2_000;
+export function rendererResponseCacheTtlMs(method: string, params?: unknown): number | null {
+  // Match the unchanged official shell's own refresh windows. The browser host
+  // persists these read-only results so a page refresh or host restart does not
+  // repeat the same filesystem and MCP discovery work. Official mutations
+  // invalidate the affected namespace immediately below.
+  if (method === 'plugin/list' || method === 'plugin/installed') return 6 * 60 * 60 * 1_000;
+  if (method === 'app/installed') return 5 * 60 * 1_000;
+  if (method === 'mcpServerStatus/list') return 5 * 60 * 1_000;
+  if (method === 'thread/resume') {
+    const request = recordOrNull(params);
+    const initialTurnsPage = recordOrNull(request?.initialTurnsPage);
+    if (
+      request?.excludeTurns === true &&
+      initialTurnsPage?.limit === 5 &&
+      initialTurnsPage.itemsView === 'full' &&
+      initialTurnsPage.sortDirection === 'desc'
+    ) {
+      return THREAD_RESUME_CACHE_TTL_MS;
+    }
+  }
   return null;
+}
+
+export function rendererResponseCanBeCached(method: string, result: unknown): boolean {
+  if (method !== 'thread/resume') return true;
+  const response = recordOrNull(result);
+  const thread = recordOrNull(response?.thread);
+  const status = recordOrNull(thread?.status);
+  if (status?.type !== 'idle') return false;
+  const serialized = JSON.stringify(result);
+  return (
+    serialized !== undefined && Buffer.byteLength(serialized) <= MAX_THREAD_RESUME_CACHE_ENTRY_BYTES
+  );
+}
+
+const THREAD_READ_ONLY_METHODS = new Set([
+  'thread/backgroundTerminals/clean',
+  'thread/goal/get',
+  'thread/items/list',
+  'thread/list',
+  'thread/loaded/list',
+  'thread/read',
+  'thread/resume',
+  'thread/search',
+  'thread/searchOccurrences',
+  'thread/turns/list',
+]);
+
+export function rendererResponseCacheInvalidationPrefixes(method: string): string[] {
+  if (
+    method === 'plugin/install' ||
+    method === 'plugin/uninstall' ||
+    method.startsWith('plugin/marketplace/')
+  ) {
+    return ['plugin/', 'app/'];
+  }
+  if (
+    method === 'config/value/write' ||
+    method === 'config/batchWrite' ||
+    method.startsWith('mcpServer/oauth/') ||
+    method === 'mcpServer/reload'
+  ) {
+    return ['mcpServerStatus/'];
+  }
+  if (method.startsWith('account/login') || method.startsWith('account/logout')) return [''];
+  if (
+    method.startsWith('turn/') ||
+    (method.startsWith('thread/') && !THREAD_READ_ONLY_METHODS.has(method))
+  ) {
+    return [THREAD_RESUME_CACHE_PREFIX];
+  }
+  return [];
+}
+
+export function rendererNotificationCacheInvalidationPrefixes(method: string): string[] {
+  if (method === 'turn/started' || method === 'turn/completed' || method === 'thread/deleted') {
+    return [THREAD_RESUME_CACHE_PREFIX];
+  }
+  return [];
 }
 
 function canonicalizeRendererRequestValue(value: unknown): unknown {
@@ -182,6 +324,10 @@ export class UserRuntime extends EventEmitter {
   readonly requestUserInputAutoResolution: RequestUserInputAutoResolution;
   readonly threadMetadataGenerator: ThreadMetadataGenerator;
   readonly browserRuntime: OfficialBrowserRuntime;
+  readonly appServerHistorySnapshots: AppServerHistorySnapshotsService;
+
+  #historySnapshotStore: AppServerHistorySnapshotStore;
+  #discoveryResponseCacheStore: DiscoveryResponseCacheStore;
 
   #appServer: CodexAppServerClient | undefined;
   #appDirectoryCache: OfficialAppDirectoryCache;
@@ -200,6 +346,7 @@ export class UserRuntime extends EventEmitter {
   #stopping = false;
   #rendererRequests = new Map<JsonRpcId, RendererRequestMetadata>();
   #rendererResponseCache = new Map<string, RendererResponseCacheEntry>();
+  #rendererResponseInFlight = new Map<string, RendererResponseInFlight>();
   #modelProviderCapabilities: unknown;
   #fetchControllers = new Map<string, AbortController>();
   #browserDownloads = new Map<string, BrowserDownload & { expiresAt: number }>();
@@ -219,6 +366,23 @@ export class UserRuntime extends EventEmitter {
     this.codexHome = join(this.root, 'codex-home');
     this.workspaceRoot = join(this.root, 'workspace');
     this.uploadRoot = join(this.root, 'uploads');
+    this.#historySnapshotStore = new AppServerHistorySnapshotStore(
+      join(this.root, 'codex-history-snapshots.db'),
+    );
+    this.#discoveryResponseCacheStore = new DiscoveryResponseCacheStore(
+      join(this.root, 'codex-discovery-responses.db'),
+    );
+    this.appServerHistorySnapshots = new AppServerHistorySnapshotsService({
+      getPrincipal: () => this.#readHistorySnapshotPrincipal(),
+      onOperation: (method, durationMs) => {
+        this.emit('performance', {
+          durationMs,
+          kind: 'app-server-history-snapshot',
+          method,
+        });
+      },
+      store: this.#historySnapshotStore,
+    });
     this.terminalManager = new TerminalManager({
       userRoot: this.root,
       codexHome: this.codexHome,
@@ -541,6 +705,7 @@ export class UserRuntime extends EventEmitter {
     this.#backgroundWork.clear();
     this.#pendingAppServerRequests.clear();
     this.#rendererResponseCache.clear();
+    this.#rendererResponseInFlight.clear();
     await this.#gitWorker?.stop();
     this.#gitWorker = undefined;
     this.#pendingGitRequests.clear();
@@ -554,6 +719,26 @@ export class UserRuntime extends EventEmitter {
     await this.#appServer?.stop();
     this.#appServer = undefined;
     this.#modelProviderCapabilities = undefined;
+    this.appServerHistorySnapshots.invalidate();
+    this.#historySnapshotStore.close();
+    this.#discoveryResponseCacheStore.close();
+  }
+
+  async #readHistorySnapshotPrincipal(): Promise<HistorySnapshotPrincipal | null> {
+    try {
+      const persistedAuth = JSON.parse(
+        await readFile(join(this.codexHome, 'auth.json'), 'utf8'),
+      ) as unknown;
+      const persistedPrincipal = historySnapshotPrincipalFromCodexAuth(persistedAuth);
+      if (persistedPrincipal !== null) return persistedPrincipal;
+    } catch {
+      // A first-time login may not have written auth.json yet. In that case,
+      // fall back to the authoritative running app-server response below.
+    }
+    await this.start();
+    const token = await this.#getAuthToken(false);
+    if (token === null) return null;
+    return historySnapshotPrincipalFromAccessToken(token);
   }
 
   async handleViewMessage(messageValue: unknown, browserSessionId?: string): Promise<unknown> {
@@ -642,51 +827,136 @@ export class UserRuntime extends EventEmitter {
         const appServerRequestId =
           browserSessionId === undefined ? rendererRequestId : randomUUID();
         const requestFingerprint = rendererRequestFingerprint(prepared.request.params);
-        const responseCacheTtlMs = rendererResponseCacheTtlMs(prepared.request.method);
+        const responseCacheTtlMs = rendererResponseCacheTtlMs(
+          prepared.request.method,
+          prepared.request.params,
+        );
         const responseCacheKey =
           responseCacheTtlMs === null
             ? undefined
-            : `${prepared.request.method}:${requestFingerprint}`;
+            : rendererResponseCacheKey(prepared.request.method, prepared.request.params);
+        const responseCacheOverrideFingerprint =
+          prepared.request.method === 'thread/resume'
+            ? threadResumeOverrideFingerprint(prepared.request.params)
+            : undefined;
+        let responseCacheReadEligible = responseCacheKey !== undefined;
+        let responseCachePrincipalKey: string | undefined;
         if (responseCacheKey !== undefined) {
-          const cached = this.#rendererResponseCache.get(responseCacheKey);
-          if (cached !== undefined && cached.expiresAtMs > Date.now()) {
-            const receivedAtMs = Date.now();
-            this.emit('performance', {
-              kind: 'official-cache',
-              method: prepared.request.method,
-              durationMs: receivedAtMs - startedAtMs,
-            });
-            this.#emitRendererMessage(
-              {
-                type: 'mcp-response',
-                hostId: 'local',
-                message: { id: rendererRequestId, result: cached.result },
-                ...(prepared.request.trace === undefined
-                  ? {}
-                  : {
-                      receivedAtMs,
-                      requestMethod: prepared.request.method,
-                      trace: prepared.request.trace,
-                    }),
-              },
-              browserSessionId,
-            );
-            return undefined;
+          let cached = this.#rendererResponseCache.get(responseCacheKey);
+          if (cached !== undefined && cached.expiresAtMs <= Date.now()) {
+            this.#rendererResponseCache.delete(responseCacheKey);
+            cached = undefined;
           }
-          if (cached !== undefined) this.#rendererResponseCache.delete(responseCacheKey);
+          responseCacheReadEligible =
+            prepared.request.method !== 'thread/resume' ||
+            !threadResumeHasMaterialOverrides(prepared.request.params) ||
+            cached?.resumeOverrideFingerprint === responseCacheOverrideFingerprint;
+          if (cached !== undefined && cached.expiresAtMs > Date.now()) {
+            if (responseCacheReadEligible) {
+              const receivedAtMs = Date.now();
+              this.emit('performance', {
+                kind: 'official-cache',
+                method: prepared.request.method,
+                durationMs: receivedAtMs - startedAtMs,
+              });
+              this.#emitRendererMessage(
+                {
+                  type: 'mcp-response',
+                  hostId: 'local',
+                  message: { id: rendererRequestId, result: cached.result },
+                  ...(prepared.request.trace === undefined
+                    ? {}
+                    : {
+                        receivedAtMs,
+                        requestMethod: prepared.request.method,
+                        trace: prepared.request.trace,
+                      }),
+                },
+                browserSessionId,
+              );
+              return undefined;
+            }
+            this.#rendererResponseCache.delete(responseCacheKey);
+          }
+          responseCachePrincipalKey =
+            prepared.request.method === 'thread/resume'
+              ? undefined
+              : await this.#readDiscoveryResponseCachePrincipalKey();
+          if (responseCachePrincipalKey !== undefined) {
+            try {
+              const persisted = this.#discoveryResponseCacheStore.read(
+                responseCachePrincipalKey,
+                responseCacheKey,
+              );
+              if (persisted !== null) {
+                const receivedAtMs = Date.now();
+                this.#rendererResponseCache.set(responseCacheKey, persisted);
+                this.emit('performance', {
+                  kind: 'official-persistent-cache',
+                  method: prepared.request.method,
+                  durationMs: receivedAtMs - startedAtMs,
+                });
+                this.#emitRendererMessage(
+                  {
+                    type: 'mcp-response',
+                    hostId: 'local',
+                    message: { id: rendererRequestId, result: persisted.result },
+                    ...(prepared.request.trace === undefined
+                      ? {}
+                      : {
+                          receivedAtMs,
+                          requestMethod: prepared.request.method,
+                          trace: prepared.request.trace,
+                        }),
+                  },
+                  browserSessionId,
+                );
+                return undefined;
+              }
+            } catch (error) {
+              this.emit('capability-error', {
+                requestType: 'discovery-response-cache-read',
+                method: prepared.request.method,
+                error: error instanceof Error ? error.message : 'discovery cache read failed',
+              });
+            }
+          }
         }
         const requestShape = rendererRequestShape(prepared.request.method, prepared.request.params);
-        this.#rendererRequests.set(appServerRequestId, {
+        const metadata: RendererRequestMetadata = {
           ...(browserSessionId === undefined ? {} : { browserSessionId }),
           method: prepared.request.method,
           rendererRequestId,
           requestFingerprint,
           ...(responseCacheKey === undefined ? {} : { responseCacheKey }),
+          ...(responseCacheOverrideFingerprint === undefined
+            ? {}
+            : { responseCacheOverrideFingerprint }),
+          ...(responseCachePrincipalKey === undefined ? {} : { responseCachePrincipalKey }),
           ...(responseCacheTtlMs === null ? {} : { responseCacheTtlMs }),
           ...(requestShape === undefined ? {} : { requestShape }),
           startedAtMs,
           ...(prepared.request.trace === undefined ? {} : { trace: prepared.request.trace }),
-        });
+        };
+        this.#invalidateRendererResponseCache(prepared.request.method);
+        if (
+          prepared.request.method.startsWith('account/login') ||
+          prepared.request.method.startsWith('account/logout')
+        ) {
+          this.#fetchProxy.invalidateResponseCache();
+        }
+        if (responseCacheKey !== undefined && responseCacheReadEligible) {
+          const inFlight = this.#rendererResponseInFlight.get(responseCacheKey);
+          if (inFlight !== undefined) {
+            inFlight.waiters.push(metadata);
+            return undefined;
+          }
+          this.#rendererResponseInFlight.set(responseCacheKey, {
+            appServerRequestId,
+            waiters: [],
+          });
+        }
+        this.#rendererRequests.set(appServerRequestId, metadata);
         if (prepared.request.method === 'turn/start') {
           this.#turnLatency.start(prepared.request.params, startedAtMs);
         }
@@ -696,6 +966,8 @@ export class UserRuntime extends EventEmitter {
             id: appServerRequestId,
           });
         } catch (error) {
+          this.#rendererRequests.delete(appServerRequestId);
+          this.#releaseRendererResponseInFlight(appServerRequestId, metadata, error);
           if (prepared.request.method === 'turn/start') {
             this.#turnLatency.stop(prepared.request.params);
           }
@@ -1057,6 +1329,7 @@ export class UserRuntime extends EventEmitter {
       const metadata = this.#rendererRequests.get(parsed.id);
       this.#rendererRequests.delete(parsed.id);
       const receivedAtMs = Date.now();
+      const waiters = this.#takeRendererResponseWaiters(parsed.id, metadata);
       if (metadata !== undefined) {
         this.emit('performance', {
           kind: 'app-server',
@@ -1070,16 +1343,54 @@ export class UserRuntime extends EventEmitter {
       if (metadata?.prewarmThread === true) {
         this.#prewarmedThreads.trackResponse(parsed, metadata.startedAtMs);
       }
+      if (metadata?.method === 'thread/resume' && parsed.error === undefined) {
+        const responseRecord = recordOrNull(parsed.result);
+        const threadRecord = recordOrNull(responseRecord?.thread);
+        const statusRecord = recordOrNull(threadRecord?.status);
+        this.emit('performance', {
+          kind: 'official-cache-decision',
+          method: metadata.method,
+          durationMs: receivedAtMs - metadata.startedAtMs,
+          requestFingerprint: metadata.requestFingerprint,
+          cacheable: rendererResponseCanBeCached(metadata.method, parsed.result),
+          resultBytes: Buffer.byteLength(JSON.stringify(parsed.result)),
+          statusType: typeof statusRecord?.type === 'string' ? statusRecord.type : null,
+        });
+      }
       if (
         metadata?.responseCacheKey !== undefined &&
         metadata.responseCacheTtlMs !== undefined &&
-        parsed.error === undefined
+        parsed.error === undefined &&
+        rendererResponseCanBeCached(metadata.method, parsed.result)
       ) {
         this.#rendererResponseCache.set(metadata.responseCacheKey, {
           expiresAtMs: receivedAtMs + metadata.responseCacheTtlMs,
+          ...(metadata.responseCacheOverrideFingerprint === undefined
+            ? {}
+            : { resumeOverrideFingerprint: metadata.responseCacheOverrideFingerprint }),
           result: parsed.result,
         });
+        if (metadata.responseCachePrincipalKey !== undefined) {
+          try {
+            this.#discoveryResponseCacheStore.write(
+              metadata.responseCachePrincipalKey,
+              metadata.responseCacheKey,
+              metadata.method,
+              metadata.responseCacheTtlMs,
+              parsed.result,
+            );
+          } catch (error) {
+            this.emit('capability-error', {
+              requestType: 'discovery-response-cache-write',
+              method: metadata.method,
+              error: error instanceof Error ? error.message : 'discovery cache write failed',
+            });
+          }
+        }
         this.#pruneRendererResponseCache(receivedAtMs);
+      }
+      if (metadata !== undefined && parsed.error === undefined) {
+        this.#invalidateRendererResponseCache(metadata.method);
       }
       if (metadata?.method === 'getAuthStatus' && parsed.error === undefined) {
         const result =
@@ -1125,6 +1436,30 @@ export class UserRuntime extends EventEmitter {
         },
         metadata?.browserSessionId,
       );
+      for (const waiter of waiters) {
+        this.emit('performance', {
+          kind: 'official-cache-coalesced',
+          method: waiter.method,
+          durationMs: receivedAtMs - waiter.startedAtMs,
+          requestFingerprint: waiter.requestFingerprint,
+          requestShape: waiter.requestShape,
+        });
+        this.#emitRendererMessage(
+          {
+            type: 'mcp-response',
+            hostId: 'local',
+            message: { ...parsed, id: waiter.rendererRequestId },
+            ...(waiter.trace === undefined
+              ? {}
+              : {
+                  receivedAtMs,
+                  requestMethod: waiter.method,
+                  trace: waiter.trace,
+                }),
+          },
+          waiter.browserSessionId,
+        );
+      }
     });
     client.on('notification', (notification: unknown) => {
       const parsedNotification = jsonRpcNotificationSchema.parse(notification);
@@ -1138,6 +1473,12 @@ export class UserRuntime extends EventEmitter {
     });
     client.on('stderr', (line: string) => this.emit('app-server-stderr', line));
     client.on('protocol-error', (error: Error) => this.emit('error', error));
+    client.on('process-cleanup-error', (error: unknown) => {
+      this.emit('capability-error', {
+        requestType: 'app-server-process-cleanup',
+        error: error instanceof Error ? error.message : 'app-server process cleanup failed',
+      });
+    });
     client.on('exit', (details: unknown) => {
       this.emit('app-server-exit', details);
       if (this.#appServer !== client || this.#stopping) return;
@@ -1222,7 +1563,13 @@ export class UserRuntime extends EventEmitter {
   }
 
   #failRendererRequests(error: Error): void {
-    for (const metadata of this.#rendererRequests.values()) {
+    const metadataValues = [...this.#rendererRequests.entries()].flatMap(
+      ([appServerRequestId, metadata]) => [
+        metadata,
+        ...this.#takeRendererResponseWaiters(appServerRequestId, metadata),
+      ],
+    );
+    for (const metadata of metadataValues) {
       this.#emitRendererMessage(
         {
           type: 'mcp-response',
@@ -1239,6 +1586,8 @@ export class UserRuntime extends EventEmitter {
       );
     }
     this.#rendererRequests.clear();
+    this.#rendererResponseInFlight.clear();
+    this.#deleteRendererResponseCachePrefixes([THREAD_RESUME_CACHE_PREFIX]);
     this.#prewarmedThreads.clear();
     this.#turnLatency.clear();
   }
@@ -1247,6 +1596,9 @@ export class UserRuntime extends EventEmitter {
     parsedNotification: { method: string; params?: unknown },
     suppressPrewarmedThread = true,
   ): void {
+    this.#deleteRendererResponseCachePrefixes(
+      rendererNotificationCacheInvalidationPrefixes(parsedNotification.method),
+    );
     this.#turnLatency.observeNotification(parsedNotification);
     this.#backgroundWork.observeNotification(parsedNotification);
     this.#observePendingRequestNotification(parsedNotification);
@@ -1298,6 +1650,85 @@ export class UserRuntime extends EventEmitter {
       const first = this.#rendererResponseCache.keys().next().value;
       if (first === undefined) break;
       this.#rendererResponseCache.delete(first);
+    }
+    const threadResumeKeys = [...this.#rendererResponseCache.keys()].filter((key) =>
+      key.startsWith(THREAD_RESUME_CACHE_PREFIX),
+    );
+    for (const key of threadResumeKeys.slice(0, -MAX_THREAD_RESUME_CACHE_ENTRIES)) {
+      this.#rendererResponseCache.delete(key);
+    }
+  }
+
+  #invalidateRendererResponseCache(method: string): void {
+    const prefixes = rendererResponseCacheInvalidationPrefixes(method);
+    this.#deleteRendererResponseCachePrefixes(prefixes);
+    const persistentPrefixes = prefixes.filter((prefix) => !prefix.startsWith('thread/'));
+    if (persistentPrefixes.length === 0) return;
+    try {
+      this.#discoveryResponseCacheStore.invalidate(persistentPrefixes);
+    } catch (error) {
+      this.emit('capability-error', {
+        requestType: 'discovery-response-cache-invalidate',
+        method,
+        error: error instanceof Error ? error.message : 'discovery cache invalidation failed',
+      });
+    }
+  }
+
+  #deleteRendererResponseCachePrefixes(prefixes: readonly string[]): void {
+    for (const prefix of prefixes) {
+      for (const key of this.#rendererResponseCache.keys()) {
+        if (key.startsWith(prefix)) this.#rendererResponseCache.delete(key);
+      }
+    }
+  }
+
+  async #readDiscoveryResponseCachePrincipalKey(): Promise<string | undefined> {
+    try {
+      const persistedAuth = JSON.parse(
+        await readFile(join(this.codexHome, 'auth.json'), 'utf8'),
+      ) as unknown;
+      const principal = historySnapshotPrincipalFromCodexAuth(persistedAuth);
+      if (principal === null) return undefined;
+      return createHash('sha256')
+        .update(`${principal.userId}\0${principal.accountId}`)
+        .digest('hex');
+    } catch {
+      return undefined;
+    }
+  }
+
+  #takeRendererResponseWaiters(
+    appServerRequestId: JsonRpcId,
+    metadata: RendererRequestMetadata | undefined,
+  ): RendererRequestMetadata[] {
+    const key = metadata?.responseCacheKey;
+    if (key === undefined) return [];
+    const inFlight = this.#rendererResponseInFlight.get(key);
+    if (inFlight?.appServerRequestId !== appServerRequestId) return [];
+    this.#rendererResponseInFlight.delete(key);
+    return inFlight.waiters;
+  }
+
+  #releaseRendererResponseInFlight(
+    appServerRequestId: JsonRpcId,
+    metadata: RendererRequestMetadata,
+    error: unknown,
+  ): void {
+    const waiters = this.#takeRendererResponseWaiters(appServerRequestId, metadata);
+    const message = error instanceof Error ? error.message : 'app-server request failed';
+    for (const waiter of waiters) {
+      this.#emitRendererMessage(
+        {
+          type: 'mcp-response',
+          hostId: 'local',
+          message: {
+            id: waiter.rendererRequestId,
+            error: { code: -32_098, message },
+          },
+        },
+        waiter.browserSessionId,
+      );
     }
   }
 
@@ -2175,6 +2606,25 @@ function decodeJwtClaims(token: string): Record<string, unknown> | null {
   } catch {
     return null;
   }
+}
+
+function historySnapshotPrincipalFromAccessToken(token: string): HistorySnapshotPrincipal | null {
+  const claims = decodeJwtClaims(token);
+  const auth = recordValue(claims, 'https://api.openai.com/auth');
+  const accountId = stringValue(auth, 'chatgpt_account_id');
+  const userId = stringValue(auth, 'chatgpt_user_id');
+  return accountId === null || userId === null ? null : { accountId, userId };
+}
+
+export function historySnapshotPrincipalFromCodexAuth(
+  value: unknown,
+): HistorySnapshotPrincipal | null {
+  if (value === null || typeof value !== 'object' || Array.isArray(value)) return null;
+  const auth = value as Record<string, unknown>;
+  if (auth.auth_mode !== 'chatgpt') return null;
+  const tokens = recordValue(auth, 'tokens');
+  const accessToken = stringValue(tokens, 'access_token');
+  return accessToken === null ? null : historySnapshotPrincipalFromAccessToken(accessToken);
 }
 
 function localProjectRecords(value: unknown): Record<string, Record<string, unknown>> {

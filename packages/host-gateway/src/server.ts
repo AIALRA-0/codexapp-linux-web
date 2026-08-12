@@ -114,11 +114,12 @@ const CSP = [
   "connect-src 'self' https://ab.chatgpt.com https://api.mapbox.com https://cdn.openai.com https://events.mapbox.com wss://chatgpt.com wss://ws.chatgpt-staging.com wss://ws.chatgpt.com",
 ].join('; ');
 
-const BROWSER_BRIDGE_MODULES = [
+export const BROWSER_BRIDGE_MODULES = [
   'browser-file-picker.js',
   'file-protocol.js',
   'index.js',
   'navigation.js',
+  'official-feature-gates.js',
   'ordered-buffer.js',
   'reconnect.js',
   'remote-webview.js',
@@ -210,7 +211,9 @@ export async function createGateway(config: GatewayConfig): Promise<FastifyInsta
       const record =
         details !== null && typeof details === 'object' ? (details as Record<string, unknown>) : {};
       const durationMs = typeof record.durationMs === 'number' ? record.durationMs : 0;
-      if (durationMs >= 250) {
+      const importantCacheHit =
+        record.kind === 'official-cache' && record.method === 'thread/resume';
+      if (durationMs >= 250 || importantCacheHit) {
         app.log.info({ details: record }, 'renderer request latency');
       } else {
         app.log.debug({ details: record }, 'renderer request latency');
@@ -493,7 +496,17 @@ export async function createGateway(config: GatewayConfig): Promise<FastifyInsta
                 socket.close(4429, 'session capacity exceeded');
                 return;
               }
-              const runtime = await runtimes.acquire(identity);
+              // Attach the official renderer to the persisted AppHost state
+              // immediately. Codex, MCP, plugins, and browser services keep
+              // warming in parallel; renderer requests that need them already
+              // await UserRuntime.start() at their capability boundary.
+              const runtime = await runtimes.acquireBootstrap(identity);
+              void runtime.start().catch((error: unknown) => {
+                app.log.error(
+                  { err: error, auditUserKey: runtime.userKey },
+                  'bridge runtime warmup failed',
+                );
+              });
               observeRuntime(runtime);
               entry = {
                 session: new BrowserSession(ticket.sessionId, runtime),
@@ -752,10 +765,19 @@ export async function createGateway(config: GatewayConfig): Promise<FastifyInsta
       }
     }
     if (shouldServeRendererIndex(requested, request.headers.accept)) {
+      const rendererIndex = rendererInitialRouteForRequest(
+        requested,
+        request.raw.url,
+        config.publicOrigin,
+      );
       return reply
         .header('cache-control', 'private, no-store')
         .type('text/html; charset=utf-8')
-        .send(renderedIndex);
+        .send(
+          rendererIndex === null
+            ? renderedIndex
+            : injectInitialRouteMeta(renderedIndex, rendererIndex),
+        );
     }
     return sendOfficialAsset(requested, config.officialRoot, reply);
   });
@@ -838,6 +860,35 @@ export function shouldServeRendererIndex(
       ?.split(',')
       .some((value) => value.trim().split(';', 1)[0]?.toLowerCase() === 'text/html') === true
   );
+}
+
+export function rendererInitialRouteForRequest(
+  requested: string,
+  rawUrl: string | undefined,
+  publicOrigin: string,
+): string | null {
+  if (requested === '' || requested === 'index.html' || rawUrl === undefined) return null;
+  const url = new URL(rawUrl, publicOrigin);
+  if (url.searchParams.has('initialRoute')) return null;
+  return `${url.pathname}${url.search}`;
+}
+
+export function injectInitialRouteMeta(index: string, initialRoute: string): string {
+  const headNeedle = '<head>';
+  const headPosition = index.indexOf(headNeedle);
+  if (
+    headPosition < 0 ||
+    index.indexOf(headNeedle, headPosition + headNeedle.length) >= 0 ||
+    /<meta\s+name=["']initial-route["']/iu.test(index)
+  ) {
+    throw new Error('official index initial route marker changed');
+  }
+  const escapedRoute = initialRoute
+    .replaceAll('&', '&amp;')
+    .replaceAll('"', '&quot;')
+    .replaceAll('<', '&lt;')
+    .replaceAll('>', '&gt;');
+  return `${index.slice(0, headPosition + headNeedle.length)}\n    <meta name="initial-route" content="${escapedRoute}">${index.slice(headPosition + headNeedle.length)}`;
 }
 
 export function terminateWebsocketClients(clients: Iterable<{ terminate: () => void }>): void {

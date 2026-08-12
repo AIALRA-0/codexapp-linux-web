@@ -8,6 +8,7 @@ import {
 } from './browser-file-picker.js';
 import { browserFileResourceUrl, rewriteOfficialResourceAttribute } from './file-protocol.js';
 import { officialExternalNavigationUrl } from './navigation.js';
+import { installOfficialHistorySnapshotGate } from './official-feature-gates.js';
 import { OrderedBuffer } from './ordered-buffer.js';
 import { isReloadBridgeCloseCode, isTerminalBridgeCloseCode } from './reconnect.js';
 import { installRemoteWebviewAdapter } from './remote-webview.js';
@@ -452,6 +453,7 @@ function installBridge(): void {
     throw new Error('official renderer browser bootstrap is missing');
   }
 
+  installOfficialHistorySnapshotGate(window as unknown as Record<string, unknown>);
   installOfficialFileProtocolAdapter();
   const preloadStartedAt = performance.timeOrigin;
   const transport = new BrowserHostTransport(bootstrap);

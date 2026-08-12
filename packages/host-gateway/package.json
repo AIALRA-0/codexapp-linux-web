@@ -12,6 +12,7 @@
     "@codexapp/contracts": "0.1.0",
     "@codexapp/official-package": "0.1.0",
     "@fastify/websocket": "11.3.0",
+    "better-sqlite3": "12.9.0",
     "capnweb": "0.10.0",
     "fastify": "5.10.0",
     "node-pty": "1.1.0",

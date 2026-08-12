@@ -71,8 +71,32 @@ port_is_listening() {
   ss -H -ltn | awk -v suffix=":${port}" '$4 ~ suffix "$" { found = 1 } END { exit !found }'
 }
 
+wait_for_production_ready() {
+  for attempt in $(seq 1 45); do
+    if curl -fsS --max-time 2 "http://127.0.0.1:$production_port/readyz" >/dev/null; then
+      production_stopped=0
+      return 0
+    fi
+    sleep 1
+  done
+  return 1
+}
+
+recover_production() {
+  if [[ "$production_stopped" -ne 1 ]]; then
+    return 0
+  fi
+  systemctl start "$production_service" >/dev/null 2>&1 || true
+  if wait_for_production_ready; then
+    return 0
+  fi
+  systemctl restart "$production_service" >/dev/null 2>&1 || true
+  wait_for_production_ready
+}
+
 cleanup() {
   local exit_code=$?
+  local recovery_failed=0
   trap - EXIT
   systemctl stop "$temporary_service" >/dev/null 2>&1 || true
   systemctl reset-failed "$temporary_service" >/dev/null 2>&1 || true
@@ -81,11 +105,15 @@ cleanup() {
     nginx -t >/dev/null 2>&1 && systemctl reload nginx >/dev/null 2>&1 || true
   fi
   rm -f -- "$identity_file"
-  if [[ "$production_stopped" -eq 1 ]]; then
-    systemctl start "$production_service" >/dev/null 2>&1 || true
+  if ! recover_production; then
+    recovery_failed=1
+    systemctl status "$production_service" --no-pager -l >&2 || true
   fi
   if (( exit_code != 0 )); then
     journalctl -u "$temporary_service" --no-pager -n 100 >&2 || true
+  fi
+  if (( recovery_failed != 0 && exit_code == 0 )); then
+    exit_code=1
   fi
   exit "$exit_code"
 }
@@ -117,15 +145,27 @@ if ! jq -e '.ok == true and .active == false' <<<"$background_snapshot" >/dev/nu
   exit 75
 fi
 
-while IFS=$'\t' read -r subject username email; do
-  if [[ "$(printf '%s' "$subject" | sha256sum | cut -d' ' -f1)" == "$user_key" ]]; then
-    printf '%s\t%s\t%s\n' "$subject" "$username" "$email" >"$identity_file"
-    break
+explicit_subject="${SMOKE_IDENTITY_SUBJECT:-}"
+explicit_username="${SMOKE_IDENTITY_USERNAME:-}"
+explicit_email="${SMOKE_IDENTITY_EMAIL:-}"
+if [[ -n "$explicit_subject" || -n "$explicit_username" || -n "$explicit_email" ]]; then
+  if [[ -z "$explicit_subject" || -z "$explicit_username" || -z "$explicit_email" ]] ||
+    [[ "$(printf '%s' "$explicit_subject" | sha256sum | cut -d' ' -f1)" != "$user_key" ]]; then
+    echo "explicit smoke identity is incomplete or does not match the requested user" >&2
+    exit 65
   fi
-done < <(
-  sqlite3 -separator $'\t' "$auth_database" \
-    'select subject,username,email from sessions order by last_seen_at desc;'
-)
+  printf '%s\t%s\t%s\n' "$explicit_subject" "$explicit_username" "$explicit_email" >"$identity_file"
+else
+  while IFS=$'\t' read -r subject username email; do
+    if [[ "$(printf '%s' "$subject" | sha256sum | cut -d' ' -f1)" == "$user_key" ]]; then
+      printf '%s\t%s\t%s\n' "$subject" "$username" "$email" >"$identity_file"
+      break
+    fi
+  done < <(
+    sqlite3 -separator $'\t' "$auth_database" \
+      'select subject,username,email from sessions order by last_seen_at desc;'
+  )
+fi
 if [[ ! -s "$identity_file" ]]; then
   echo "no active authenticated session matches the requested user" >&2
   exit 65
@@ -168,6 +208,7 @@ systemd-run \
   "BROWSER_BRIDGE_SCRIPT=$application_root/packages/browser-bridge/dist/index.js" \
   "ELECTRON_NET_WORKER=$application_root/scripts/electron-net-worker.cjs" \
   "ELECTRON_NET_USER_DATA_DIR=$runtime_root/electron-network" \
+  "LOG_LEVEL=${SMOKE_LOG_LEVEL:-info}" \
   /usr/bin/node "$application_root/apps/host/dist/main.js"
 
 for attempt in $(seq 1 45); do
@@ -190,16 +231,26 @@ systemctl reload nginx
 
 (
   cd "$application_root"
-  SMOKE_BASE_URL="http://127.0.0.1:$proxy_port" \
-    BROWSER_EXECUTABLE="$browser_executable" \
-    SMOKE_RENDERER_VERSION="$renderer_version" \
-    SMOKE_SCREENSHOT_PATH="$screenshot_path" \
-    SMOKE_INITIAL_PATH="/local/$thread_id" \
-    SMOKE_EXPECTED_TEXT="$expected_text" \
-    SMOKE_SUBJECT="$subject" \
-    SMOKE_USERNAME="$username" \
-    SMOKE_EMAIL="$email" \
-    node "$ui_smoke_script"
+  for smoke_attempt in $(seq 1 "${SMOKE_REPEAT_COUNT:-1}"); do
+    SMOKE_BASE_URL="http://127.0.0.1:$proxy_port" \
+      BROWSER_EXECUTABLE="$browser_executable" \
+      SMOKE_RENDERER_VERSION="$renderer_version" \
+      SMOKE_SCREENSHOT_PATH="$screenshot_path" \
+      SMOKE_INITIAL_PATH="${SMOKE_INITIAL_PATH:-/local/$thread_id}" \
+      SMOKE_EXPECTED_TEXT="${SMOKE_EXPECTED_TEXT:-$expected_text}" \
+      SMOKE_CLICK_TEXT="${SMOKE_CLICK_TEXT:-}" \
+      SMOKE_AFTER_CLICK_TEXT="${SMOKE_AFTER_CLICK_TEXT:-}" \
+      SMOKE_EXPECTED_LOCALE="${SMOKE_EXPECTED_LOCALE:-}" \
+      SMOKE_WAIT_FOR_TEXT_GONE="${SMOKE_WAIT_FOR_TEXT_GONE:-}" \
+      SMOKE_POST_ASSERT_WAIT_MS="${SMOKE_POST_ASSERT_WAIT_MS:-0}" \
+      SMOKE_SUBJECT="$subject" \
+      SMOKE_USERNAME="$username" \
+      SMOKE_EMAIL="$email" \
+      SMOKE_ATTEMPT="$smoke_attempt" \
+      SMOKE_INSPECT_SETTINGS_MENU="${SMOKE_INSPECT_SETTINGS_MENU:-}" \
+      timeout --signal=TERM --kill-after=10s "${SMOKE_BROWSER_TIMEOUT_SECONDS:-300}s" \
+      node "$ui_smoke_script"
+  done
 )
 
 systemctl stop "$temporary_service"
@@ -207,18 +258,10 @@ rm -- "$nginx_target"
 proxy_enabled=0
 nginx -t
 systemctl reload nginx
-systemctl start "$production_service"
-production_stopped=0
-for attempt in $(seq 1 45); do
-  if curl -fsS --max-time 2 "http://127.0.0.1:$production_port/readyz" >/dev/null; then
-    break
-  fi
-  if [[ "$attempt" -eq 45 ]]; then
-    echo "production service did not recover after the UI smoke" >&2
-    exit 1
-  fi
-  sleep 1
-done
+if ! recover_production; then
+  echo "production service did not recover after the UI smoke" >&2
+  exit 1
+fi
 
 printf '{"ok":true,"exactProductionState":true,"threadId":"%s","expectedTextVisible":true,"screenshotPath":"%s"}\n' \
   "$thread_id" "$screenshot_path"

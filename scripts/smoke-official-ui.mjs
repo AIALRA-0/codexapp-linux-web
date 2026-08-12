@@ -6,13 +6,19 @@ const browserExecutable = process.env.BROWSER_EXECUTABLE;
 const proxySecret = process.env.SMOKE_PROXY_SECRET;
 const screenshotPath = process.env.SMOKE_SCREENSHOT_PATH;
 const initialPath = process.env.SMOKE_INITIAL_PATH ?? '/';
-const expectedText = process.env.SMOKE_EXPECTED_TEXT;
-const clickText = process.env.SMOKE_CLICK_TEXT;
-const afterClickText = process.env.SMOKE_AFTER_CLICK_TEXT;
+const expectedText = optionalEnvironmentValue('SMOKE_EXPECTED_TEXT');
+const clickText = optionalEnvironmentValue('SMOKE_CLICK_TEXT');
+const afterClickText = optionalEnvironmentValue('SMOKE_AFTER_CLICK_TEXT');
+const expectedLocale = optionalEnvironmentValue('SMOKE_EXPECTED_LOCALE');
+const waitForTextGone = optionalEnvironmentValue('SMOKE_WAIT_FOR_TEXT_GONE');
+const postAssertWaitMs = Number(process.env.SMOKE_POST_ASSERT_WAIT_MS ?? '0');
+const contentTimeoutMs = Number(process.env.SMOKE_CONTENT_TIMEOUT_MS ?? '120000');
 const smokeSubject = process.env.SMOKE_SUBJECT ?? 'official-ui-smoke-subject';
 const smokeUsername = process.env.SMOKE_USERNAME ?? 'official-ui-smoke';
 const smokeEmail = process.env.SMOKE_EMAIL ?? 'official-ui-smoke@example.invalid';
 const expectedRendererVersion = process.env.SMOKE_RENDERER_VERSION ?? '26.730.61639';
+const smokeAttempt = Number(process.env.SMOKE_ATTEMPT ?? '1');
+const inspectSettingsMenu = process.env.SMOKE_INSPECT_SETTINGS_MENU ?? '';
 if (baseUrl === undefined || browserExecutable === undefined) {
   throw new Error('SMOKE_BASE_URL and BROWSER_EXECUTABLE are required');
 }
@@ -36,12 +42,30 @@ const context = await browser.newContext({
 const page = await context.newPage();
 const pageErrors = [];
 const failedLocalRequests = [];
+const loadedLocaleAssets = [];
 let bridgeConnected = false;
 let bridgeReady = false;
 let clickedHref;
+const startedAtMs = Date.now();
+let domContentLoadedAtMs;
+let bridgeReadyAtMs;
+let rendererMountedAtMs;
+let expectedTextVisibleAtMs;
+let clickTargetVisibleAtMs;
+let clickedAtMs;
+let afterClickTextVisibleAtMs;
+let waitedTextGoneAtMs;
+let settingsMenuInspection;
 
 page.on('pageerror', (error) => pageErrors.push(error.message));
 page.on('response', (response) => {
+  if (
+    /\/assets\/(?:zh-CN|zh-TW|zh-HK|ja-JP|ko-KR|fr-FR|de-DE|es-(?:ES|419))-[^/]+\.js$/u.test(
+      response.url(),
+    )
+  ) {
+    loadedLocaleAssets.push(response.url().split('/').pop());
+  }
   if (response.url().startsWith(baseUrl) && response.status() >= 400) {
     failedLocalRequests.push({ status: response.status(), url: response.url() });
   }
@@ -55,6 +79,9 @@ page.on('websocket', (socket) => {
         ? event.payload
         : Buffer.from(event.payload).toString('utf8');
     if (value.includes('"type":"ready"')) bridgeReady = true;
+    if (value.includes('"type":"ready"') && bridgeReadyAtMs === undefined) {
+      bridgeReadyAtMs = Date.now();
+    }
   });
 });
 
@@ -66,6 +93,8 @@ try {
   if (response === null || !response.ok()) {
     throw new Error(`official renderer navigation failed: ${String(response?.status())}`);
   }
+  domContentLoadedAtMs = Date.now();
+  reportProgress('dom-content-loaded');
   await page.waitForFunction(
     (version) =>
       window.__CODEX_BROWSER_BOOTSTRAP__?.rendererVersion === version &&
@@ -73,7 +102,10 @@ try {
     expectedRendererVersion,
     { timeout: 120_000 },
   );
+  rendererMountedAtMs = Date.now();
+  reportProgress('renderer-mounted');
   await waitFor(() => bridgeReady, 30_000);
+  reportProgress('bridge-ready');
   await page.waitForFunction(
     () => {
       const root = document.querySelector('#root');
@@ -93,14 +125,43 @@ try {
     undefined,
     { timeout: 120_000 },
   );
+  reportProgress('visible-shell');
   if (expectedText !== undefined) {
     await page.waitForFunction((text) => document.body.innerText.includes(text), expectedText, {
-      timeout: 120_000,
+      timeout: contentTimeoutMs,
     });
+    expectedTextVisibleAtMs = Date.now();
+    reportProgress('expected-text-visible');
+  }
+
+  if (expectedLocale !== undefined) {
+    await page.waitForFunction(
+      (locale) => document.documentElement.lang === locale,
+      expectedLocale,
+      { timeout: 30_000 },
+    );
+    await waitFor(
+      () => loadedLocaleAssets.some((asset) => asset?.startsWith(`${expectedLocale}-`)),
+      30_000,
+    );
+    reportProgress('locale-ready');
+  }
+
+  if (waitForTextGone !== undefined) {
+    await page.waitForFunction((text) => !document.body.innerText.includes(text), waitForTextGone, {
+      timeout: 180_000,
+    });
+    waitedTextGoneAtMs = Date.now();
+    reportProgress('waited-text-gone');
+  }
+  if (Number.isFinite(postAssertWaitMs) && postAssertWaitMs > 0) {
+    await page.waitForTimeout(Math.min(postAssertWaitMs, 180_000));
+    reportProgress('post-assert-wait-completed');
   }
 
   const renderer = await page.evaluate(() => ({
     bootstrapVersion: window.__CODEX_BROWSER_BOOTSTRAP__?.rendererVersion,
+    documentLocale: document.documentElement.lang,
     bodyTextLength: document.body.innerText.length,
     elementCount: document.querySelectorAll('*').length,
     rootHtmlLength:
@@ -116,6 +177,36 @@ try {
       visibility: getComputedStyle(document.body).visibility,
     },
     rootPreview: (document.querySelector('#root')?.innerHTML ?? '').slice(0, 2_000),
+    historySnapshotGate: (() => {
+      const statsig = window.__STATSIG__;
+      if (statsig === null || typeof statsig !== 'object') {
+        return { available: false, type: typeof statsig };
+      }
+      const instances = statsig.instances;
+      const clients = [
+        statsig.firstInstance,
+        ...(instances instanceof Map
+          ? Array.from(instances.values())
+          : instances !== null && typeof instances === 'object'
+            ? Object.values(instances)
+            : []),
+      ].filter((client) => client !== null && typeof client === 'object');
+      return {
+        available: true,
+        globalKeys: Reflect.ownKeys(statsig).map(String).sort(),
+        instancesType: instances?.constructor?.name ?? typeof instances,
+        clients: clients.map((client) => ({
+          keys: Reflect.ownKeys(client).map(String).sort(),
+          overrideKeys:
+            client.overrideAdapter !== null && typeof client.overrideAdapter === 'object'
+              ? Reflect.ownKeys(client.overrideAdapter).map(String).sort()
+              : [],
+          overrideMarker: client.overrideAdapter?.__codexLinuxHistorySnapshotOverride === true,
+          checkedValue:
+            typeof client.checkGate === 'function' ? client.checkGate('416252813') : null,
+        })),
+      };
+    })(),
     visibleElements: Array.from(document.querySelectorAll('body *'))
       .map((element) => {
         const rect = element.getBoundingClientRect();
@@ -155,15 +246,62 @@ try {
   if (clickText !== undefined) {
     const target = page.getByText(clickText, { exact: false }).first();
     await target.waitFor({ state: 'visible', timeout: 120_000 });
+    clickTargetVisibleAtMs = Date.now();
+    reportProgress('click-target-visible');
     clickedHref = await target.evaluate(
       (element) => element.closest('a')?.getAttribute('href') ?? undefined,
     );
     await target.click();
+    clickedAtMs = Date.now();
+    reportProgress('click-completed');
   }
   if (afterClickText !== undefined) {
     await page.waitForFunction((text) => document.body.innerText.includes(text), afterClickText, {
-      timeout: 180_000,
+      timeout: Math.max(contentTimeoutMs, 180_000),
     });
+    afterClickTextVisibleAtMs = Date.now();
+    reportProgress('after-click-text-visible');
+  }
+  if (inspectSettingsMenu.length > 0) {
+    const inspectInteractiveElements = () =>
+      page.evaluate(() => ({
+        bodyText: document.body.innerText.slice(-4_000),
+        interactiveElements: Array.from(
+          document.querySelectorAll(
+            'button, [role="button"], [role="menuitem"], [role="option"], [role="tab"], [role="dialog"]',
+          ),
+        )
+          .map((element) => {
+            const rect = element.getBoundingClientRect();
+            const style = getComputedStyle(element);
+            return {
+              ariaLabel: element.getAttribute('aria-label'),
+              role: element.getAttribute('role'),
+              tagName: element.tagName,
+              text: (element.textContent ?? '').trim().slice(0, 300),
+              visible:
+                rect.width > 0 &&
+                rect.height > 0 &&
+                style.display !== 'none' &&
+                style.visibility !== 'hidden' &&
+                style.opacity !== '0',
+            };
+          })
+          .filter((element) => element.visible),
+      }));
+    const beforeOpen = await inspectInteractiveElements();
+    let afterOpen;
+    if (inspectSettingsMenu === 'open') {
+      const accountButton = page
+        .locator('button, [role="button"]')
+        .filter({ hasText: /Lucas Ding|22aialra22@gmail\.com/u })
+        .last();
+      await accountButton.waitFor({ state: 'visible', timeout: 20_000 });
+      await accountButton.click();
+      await page.waitForTimeout(500);
+      afterOpen = await inspectInteractiveElements();
+    }
+    settingsMenuInspection = { beforeOpen, afterOpen };
   }
   const screenshot = await page.screenshot({
     ...(screenshotPath === undefined ? {} : { path: screenshotPath }),
@@ -185,7 +323,11 @@ try {
   process.stdout.write(
     `${JSON.stringify({
       ok: true,
+      smokeAttempt,
       rendererVersion: renderer.bootstrapVersion,
+      historySnapshotGate: renderer.historySnapshotGate,
+      documentLocale: renderer.documentLocale,
+      loadedLocaleAssets,
       bridgeConnected,
       bridgeReady,
       clickedHref,
@@ -194,15 +336,82 @@ try {
       bodyTextLength: renderer.bodyTextLength,
       expectedTextAsserted: expectedText !== undefined,
       afterClickTextAsserted: afterClickText !== undefined,
+      waitedTextGone: waitForTextGone === undefined ? null : true,
+      settingsMenuInspection,
       screenshotBytes: screenshot.length,
       screenshotMaximumChannelDeviation: Math.round(maximumChannelDeviation * 100) / 100,
       localAssetFailures: failedLocalRequests.length,
       pageErrors: pageErrors.length,
+      timingsMs: {
+        domContentLoaded: elapsed(domContentLoadedAtMs),
+        bridgeReady: elapsed(bridgeReadyAtMs),
+        rendererMounted: elapsed(rendererMountedAtMs),
+        expectedTextVisible: elapsed(expectedTextVisibleAtMs),
+        clickTargetVisible: elapsed(clickTargetVisibleAtMs),
+        clicked: elapsed(clickedAtMs),
+        afterClickTextVisible: elapsed(afterClickTextVisibleAtMs),
+        waitedTextGone: elapsed(waitedTextGoneAtMs),
+        clickToContent:
+          clickedAtMs === undefined || afterClickTextVisibleAtMs === undefined
+            ? null
+            : afterClickTextVisibleAtMs - clickedAtMs,
+      },
     })}\n`,
   );
+} catch (error) {
+  const failureScreenshotPath =
+    screenshotPath === undefined ? undefined : screenshotPath.replace(/\.png$/u, '-failure.png');
+  const failureState = await page
+    .evaluate(() => ({
+      bodyTextLength: document.body.innerText.length,
+      bodyTextTail: document.body.innerText.slice(-4_000),
+      documentLocale: document.documentElement.lang,
+      elementCount: document.querySelectorAll('*').length,
+      title: document.title,
+      url: location.href,
+    }))
+    .catch(() => undefined);
+  if (failureScreenshotPath !== undefined) {
+    await page.screenshot({ path: failureScreenshotPath, type: 'png' }).catch(() => undefined);
+  }
+  process.stderr.write(
+    `${JSON.stringify({
+      ok: false,
+      smokeAttempt,
+      stage: 'failure-diagnostics',
+      error: error instanceof Error ? error.message : String(error),
+      failureScreenshotPath,
+      failureState,
+      localAssetFailures: failedLocalRequests,
+      pageErrors,
+      timingsMs: {
+        domContentLoaded: elapsed(domContentLoadedAtMs),
+        bridgeReady: elapsed(bridgeReadyAtMs),
+        rendererMounted: elapsed(rendererMountedAtMs),
+        expectedTextVisible: elapsed(expectedTextVisibleAtMs),
+        waitedTextGone: elapsed(waitedTextGoneAtMs),
+      },
+    })}\n`,
+  );
+  throw error;
 } finally {
   await context.close().catch(() => undefined);
   await browser.close().catch(() => undefined);
+}
+
+function elapsed(timestampMs) {
+  return timestampMs === undefined ? null : timestampMs - startedAtMs;
+}
+
+function optionalEnvironmentValue(name) {
+  const value = process.env[name];
+  return value === undefined || value.length === 0 ? undefined : value;
+}
+
+function reportProgress(stage) {
+  process.stdout.write(
+    `${JSON.stringify({ progress: true, smokeAttempt, stage, elapsedMs: Date.now() - startedAtMs })}\n`,
+  );
 }
 
 async function waitFor(predicate, timeoutMs) {

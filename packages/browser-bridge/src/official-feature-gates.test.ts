@@ -1,0 +1,85 @@
+import { describe, expect, it, vi } from 'vitest';
+
+import { installOfficialHistorySnapshotGate } from './official-feature-gates.js';
+
+describe('official history snapshot gate', () => {
+  it('enables only the official history snapshot gate on the first Statsig client', () => {
+    const scope: Record<string, unknown> = {};
+    const restore = installOfficialHistorySnapshotGate(scope);
+    const statsig = {} as { firstInstance?: { overrideAdapter?: Record<string, unknown> } };
+    scope.__STATSIG__ = statsig;
+    statsig.firstInstance = {};
+
+    const override = statsig.firstInstance.overrideAdapter?.getGateOverride as (
+      gate: Record<string, unknown>,
+    ) => Record<string, unknown>;
+    expect(override({ name: '416252813', value: false, details: { reason: 'Network' } })).toEqual({
+      name: '416252813',
+      value: true,
+      details: { reason: 'LocalOverride' },
+    });
+    expect(override({ name: 'unrelated', value: false })).toEqual({
+      name: 'unrelated',
+      value: false,
+    });
+
+    restore();
+    expect('__STATSIG__' in scope).toBe(false);
+  });
+
+  it('preserves an existing official override adapter', () => {
+    const originalOverride = vi.fn((gate: Record<string, unknown>) => ({
+      ...gate,
+      value: gate.name === 'official-gate',
+    }));
+    const client = { overrideAdapter: { getGateOverride: originalOverride, marker: 'official' } };
+    const scope: Record<string, unknown> = {
+      __STATSIG__: { firstInstance: client },
+    };
+    installOfficialHistorySnapshotGate(scope);
+
+    const override = client.overrideAdapter.getGateOverride;
+    expect(override({ name: 'official-gate', value: false })).toMatchObject({ value: true });
+    expect(override({ name: '416252813', value: false })).toMatchObject({ value: true });
+    expect(client.overrideAdapter.marker).toBe('official');
+    expect(originalOverride).toHaveBeenCalledTimes(2);
+  });
+
+  it('decorates clients registered through the instances collection', () => {
+    const client: { overrideAdapter?: Record<string, unknown> } = {};
+    const scope: Record<string, unknown> = {};
+    installOfficialHistorySnapshotGate(scope);
+    scope.__STATSIG__ = { instances: { web: client } };
+
+    expect(typeof client.overrideAdapter?.getGateOverride).toBe('function');
+  });
+
+  it('decorates clients added later to the Statsig instances map', () => {
+    const instances = new Map<string, { overrideAdapter?: Record<string, unknown> }>();
+    const scope: Record<string, unknown> = {};
+    installOfficialHistorySnapshotGate(scope);
+    scope.__STATSIG__ = { instances };
+    const client: { overrideAdapter?: Record<string, unknown> } = {};
+
+    instances.set('web', client);
+
+    const override = client.overrideAdapter?.getGateOverride as (
+      gate: Record<string, unknown>,
+    ) => Record<string, unknown>;
+    expect(override({ name: '416252813', value: false })).toMatchObject({ value: true });
+  });
+
+  it('decorates an instances collection assigned after the global object', () => {
+    const scope: Record<string, unknown> = {};
+    installOfficialHistorySnapshotGate(scope);
+    const statsig: {
+      instances?: Map<string, { overrideAdapter?: Record<string, unknown> }>;
+    } = {};
+    scope.__STATSIG__ = statsig;
+    const client: { overrideAdapter?: Record<string, unknown> } = {};
+
+    statsig.instances = new Map([['web', client]]);
+
+    expect(typeof client.overrideAdapter?.getGateOverride).toBe('function');
+  });
+});
