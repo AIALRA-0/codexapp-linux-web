@@ -8,6 +8,8 @@ import {
   officialWebStaticDesktopResponse,
   rendererRequestFingerprint,
   rendererRequestShape,
+  rendererNotificationThreadId,
+  rendererNotificationShouldWaitForResume,
   rendererPersistentResponseCacheKey,
   rendererThreadResumeId,
   rendererThreadHistoryRefreshId,
@@ -29,6 +31,49 @@ function accessToken(authClaims: Record<string, unknown>): string {
 }
 
 describe('renderer request diagnostics', () => {
+  it('finds the owning thread for resume lifecycle notifications', () => {
+    expect(
+      rendererNotificationThreadId({
+        method: 'thread/status/changed',
+        params: { threadId: 'thread-1', status: { type: 'idle' } },
+      }),
+    ).toBe('thread-1');
+    expect(
+      rendererNotificationThreadId({
+        method: 'thread/started',
+        params: { thread: { id: 'thread-2', status: { type: 'idle' } } },
+      }),
+    ).toBe('thread-2');
+    expect(rendererNotificationThreadId({ method: 'account/updated', params: {} })).toBeNull();
+    expect(
+      rendererNotificationShouldWaitForResume(
+        {
+          method: 'thread/status/changed',
+          params: { threadId: 'thread-1', status: { type: 'idle' } },
+        },
+        new Set(['thread-1']),
+      ),
+    ).toBe(true);
+    expect(
+      rendererNotificationShouldWaitForResume(
+        {
+          method: 'turn/completed',
+          params: { threadId: 'thread-1' },
+        },
+        new Set(['thread-1']),
+      ),
+    ).toBe(false);
+    expect(
+      rendererNotificationShouldWaitForResume(
+        {
+          method: 'thread/status/changed',
+          params: { threadId: 'thread-2', status: { type: 'idle' } },
+        },
+        new Set(['thread-1']),
+      ),
+    ).toBe(false);
+  });
+
   it('keeps unrelated cache namespaces independent while a slow read is in flight', () => {
     const generations = new Map([
       ['mcpServerStatus/', 4],
