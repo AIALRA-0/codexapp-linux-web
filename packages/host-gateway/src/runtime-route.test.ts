@@ -14,6 +14,7 @@ import {
   rendererThreadResumeRefreshShouldReplace,
   rendererNotificationCacheInvalidationPrefixes,
   rendererResponseCanBeCached,
+  rendererResponseCacheCanPersist,
   rendererResponseCacheGenerationForKey,
   rendererResponseCacheGenerationCanStore,
   rendererResponseCacheKey,
@@ -105,6 +106,8 @@ describe('renderer request diagnostics', () => {
         developerInstructions: 'different',
       }),
     );
+    expect(rendererResponseCacheCanPersist('thread/resume')).toBe(false);
+    expect(rendererResponseCacheCanPersist('thread/turns/list')).toBe(true);
   });
 
   it('caches only idle bounded thread resume responses', () => {

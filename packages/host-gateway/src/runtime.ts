@@ -256,6 +256,15 @@ export function rendererPersistentResponseCacheKey(method: string, params: unkno
   return `${method}:${rendererRequestFingerprint(params)}`;
 }
 
+export function rendererResponseCacheCanPersist(method: string): boolean {
+  // A thread/resume response is not merely content: the real request also
+  // attaches the thread to the current App Server process. Replaying that
+  // response after a host or App Server restart creates a readable-looking
+  // shell whose next turn fails with "thread not found". Keep resume results
+  // only in memory for the lifetime of the process that performed the resume.
+  return method !== 'thread/resume';
+}
+
 export function rendererRequestShape(
   method: string,
   params: unknown,
@@ -989,7 +998,9 @@ export class UserRuntime extends EventEmitter {
             }
             this.#rendererResponseCache.delete(responseCacheKey);
           }
-          responseCachePrincipalKey = await this.#readDiscoveryResponseCachePrincipalKey();
+          responseCachePrincipalKey = rendererResponseCacheCanPersist(prepared.request.method)
+            ? await this.#readDiscoveryResponseCachePrincipalKey()
+            : undefined;
           if (responseCachePrincipalKey !== undefined) {
             try {
               const persistentCacheKey = rendererPersistentResponseCacheKey(
@@ -1960,13 +1971,15 @@ export class UserRuntime extends EventEmitter {
           : {}),
         result,
       });
-      this.#discoveryResponseCacheStore.write(
-        principalKey,
-        rendererPersistentResponseCacheKey(method, params),
-        method,
-        ttlMs,
-        result,
-      );
+      if (rendererResponseCacheCanPersist(method)) {
+        this.#discoveryResponseCacheStore.write(
+          principalKey,
+          rendererPersistentResponseCacheKey(method, params),
+          method,
+          ttlMs,
+          result,
+        );
+      }
       this.#pruneRendererResponseCache(receivedAtMs);
       this.emit('performance', {
         kind: 'official-cache-refresh',
