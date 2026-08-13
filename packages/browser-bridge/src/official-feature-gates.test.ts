@@ -2,8 +2,8 @@ import { describe, expect, it, vi } from 'vitest';
 
 import { installOfficialHistorySnapshotGate } from './official-feature-gates.js';
 
-describe('official history snapshot gate', () => {
-  it('enables only the official history snapshot gate on the first Statsig client', () => {
+describe('official renderer feature overrides', () => {
+  it('keeps the experimental history snapshot path off and enables official locales', () => {
     const scope: Record<string, unknown> = {};
     const restore = installOfficialHistorySnapshotGate(scope);
     const statsig = {} as { firstInstance?: { overrideAdapter?: Record<string, unknown> } };
@@ -13,9 +13,9 @@ describe('official history snapshot gate', () => {
     const override = statsig.firstInstance.overrideAdapter?.getGateOverride as (
       gate: Record<string, unknown>,
     ) => Record<string, unknown>;
-    expect(override({ name: '416252813', value: false, details: { reason: 'Network' } })).toEqual({
+    expect(override({ name: '416252813', value: true, details: { reason: 'Network' } })).toEqual({
       name: '416252813',
-      value: true,
+      value: false,
       details: { reason: 'LocalOverride' },
     });
     expect(override({ name: 'unrelated', value: false })).toEqual({
@@ -68,7 +68,7 @@ describe('official history snapshot gate', () => {
 
     const override = client.overrideAdapter.getGateOverride;
     expect(override({ name: 'official-gate', value: false })).toMatchObject({ value: true });
-    expect(override({ name: '416252813', value: false })).toMatchObject({ value: true });
+    expect(override({ name: '416252813', value: true })).toMatchObject({ value: false });
     expect(
       client.overrideAdapter.getLayerOverride({
         name: '72216192',
@@ -101,7 +101,7 @@ describe('official history snapshot gate', () => {
     const override = client.overrideAdapter?.getGateOverride as (
       gate: Record<string, unknown>,
     ) => Record<string, unknown>;
-    expect(override({ name: '416252813', value: false })).toMatchObject({ value: true });
+    expect(override({ name: '416252813', value: false })).toMatchObject({ value: false });
   });
 
   it('decorates an instances collection assigned after the global object', () => {
