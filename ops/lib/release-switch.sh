@@ -9,6 +9,188 @@ codexapp_service_name="codexapp-official-web-host.service"
 codexapp_service_user="codexappweb"
 codexapp_health_url="http://127.0.0.1:13014/readyz"
 codexapp_background_work_url="http://127.0.0.1:13014/ops/background-work"
+codexapp_controller_health_url="http://127.0.0.1:13024/readyz"
+codexapp_controller_background_work_url="http://127.0.0.1:13024/ops/background-work"
+codexapp_state_root="/srv/aialra/state/codexapp-official"
+codexapp_backup_root="/srv/aialra/backups/codexapp-b-upgrades"
+
+codexapp_pressure_avg60() {
+  local resource="$1"
+  awk '/^full / {
+    for (index = 1; index <= NF; index += 1) {
+      if ($index ~ /^avg60=/) {
+        split($index, value, "=")
+        print value[2]
+        exit
+      }
+    }
+  }' "/proc/pressure/$resource"
+}
+
+codexapp_assert_controller_safe() {
+  local snapshot
+  local memory_pressure
+  local io_pressure
+  curl -fsS --max-time 5 "$codexapp_controller_health_url" >/dev/null || {
+    echo "stable A controller is not ready; B release refused" >&2
+    return 75
+  }
+  snapshot="$(curl -fsS --max-time 5 "$codexapp_controller_background_work_url")" || {
+    echo "cannot inspect stable A controller work; B release refused" >&2
+    return 75
+  }
+  if ! jq -e \
+    '.ok == true and .pendingServerRequestCount == 0 and .activeTurnCount <= 1' \
+    <<<"$snapshot" >/dev/null; then
+    jq -c '{activeTurnCount,pendingServerRequestCount,oldestStartedAtMs}' <<<"$snapshot" >&2
+    echo "stable A controller is busy; B release refused" >&2
+    return 75
+  fi
+  memory_pressure="$(codexapp_pressure_avg60 memory)"
+  io_pressure="$(codexapp_pressure_avg60 io)"
+  if ! awk -v value="$memory_pressure" 'BEGIN { exit !(value < 1) }' ||
+    ! awk -v value="$io_pressure" 'BEGIN { exit !(value < 2) }'; then
+    printf 'memory_full_avg60=%s io_full_avg60=%s\n' "$memory_pressure" "$io_pressure" >&2
+    echo "shared host pressure is too high; B release refused" >&2
+    return 75
+  fi
+}
+
+codexapp_wait_for_controller_safe() {
+  local samples="${1:-11}"
+  local interval_seconds="${2:-30}"
+  local previous_swap_in
+  local previous_swap_out
+  local current_swap_in
+  local current_swap_out
+  local swap_in_delta
+  local swap_out_delta
+
+  previous_swap_in="$(awk '$1 == "pswpin" { print $2 }' /proc/vmstat)"
+  previous_swap_out="$(awk '$1 == "pswpout" { print $2 }' /proc/vmstat)"
+  for sample in $(seq 1 "$samples"); do
+    codexapp_assert_controller_safe
+    current_swap_in="$(awk '$1 == "pswpin" { print $2 }' /proc/vmstat)"
+    current_swap_out="$(awk '$1 == "pswpout" { print $2 }' /proc/vmstat)"
+    if (( sample > 1 )); then
+      swap_in_delta=$((current_swap_in - previous_swap_in))
+      swap_out_delta=$((current_swap_out - previous_swap_out))
+      if (( swap_in_delta > 256 || swap_out_delta > 256 )); then
+        printf 'swap_in_pages=%s swap_out_pages=%s\n' "$swap_in_delta" "$swap_out_delta" >&2
+        echo "shared host is actively swapping; B release refused" >&2
+        return 75
+      fi
+    fi
+    previous_swap_in="$current_swap_in"
+    previous_swap_out="$current_swap_out"
+    if (( sample < samples )); then
+      sleep "$interval_seconds"
+    fi
+  done
+}
+
+codexapp_prepare_state_snapshot() {
+  local release_id="$1"
+  local stamp
+  local snapshot_root
+  local state_bytes
+  local available_bytes
+  local required_bytes
+
+  if [[ ! -d "$codexapp_state_root" || -L "$codexapp_state_root" ]]; then
+    echo "B production state root is missing or symbolic" >&2
+    return 1
+  fi
+  stamp="$(date -u +%Y%m%dT%H%M%SZ)"
+  snapshot_root="$codexapp_backup_root/$stamp-before-$release_id"
+  mkdir -p "$codexapp_backup_root"
+  chmod 0700 "$codexapp_backup_root"
+  if [[ -e "$snapshot_root" || -L "$snapshot_root" ]]; then
+    echo "B production snapshot path already exists" >&2
+    return 1
+  fi
+  state_bytes="$(du -sx --block-size=1 "$codexapp_state_root" | awk '{print $1}')"
+  available_bytes="$(df -PB1 "$codexapp_backup_root" | awk 'NR == 2 {print $4}')"
+  required_bytes=$((state_bytes + 30 * 1024 * 1024 * 1024))
+  if (( available_bytes < required_bytes )); then
+    printf 'state_bytes=%s available_bytes=%s required_bytes=%s\n' \
+      "$state_bytes" "$available_bytes" "$required_bytes" >&2
+    echo "not enough space for a verified B production snapshot" >&2
+    return 1
+  fi
+  mkdir -p "$snapshot_root/state"
+  chmod 0700 "$snapshot_root" "$snapshot_root/state"
+  ionice -c3 nice -n 15 rsync -aHAXx --numeric-ids \
+    "$codexapp_state_root/" "$snapshot_root/state/"
+  CODEXAPP_PREPARED_SNAPSHOT_ROOT="$snapshot_root"
+}
+
+codexapp_finalize_state_snapshot() {
+  local snapshot_root="$1"
+  local previous_target="$2"
+  local previous_official_target="$3"
+  local release_id="$4"
+  local manifest="$snapshot_root/SNAPSHOT.json"
+
+  ionice -c3 nice -n 15 rsync -aHAXx --delete --numeric-ids \
+    "$codexapp_state_root/" "$snapshot_root/state/"
+  cp -a -- "$codexapp_environment_file" "$snapshot_root/environment"
+  (
+    cd "$snapshot_root/state"
+    ionice -c3 nice -n 15 find . -type f -print0 \
+      | sort -z \
+      | ionice -c3 nice -n 15 xargs -0 -r sha256sum >"$snapshot_root/STATE-SHA256SUMS"
+  )
+  (
+    cd "$snapshot_root/state"
+    sha256sum -c --quiet "$snapshot_root/STATE-SHA256SUMS"
+  )
+  jq -n \
+    --arg createdAt "$(date -u +%FT%TZ)" \
+    --arg targetRelease "$release_id" \
+    --arg previousApplication "$previous_target" \
+    --arg previousOfficial "$previous_official_target" \
+    --arg environmentSha256 "$(sha256sum "$snapshot_root/environment" | cut -d' ' -f1)" \
+    --arg stateManifestSha256 "$(sha256sum "$snapshot_root/STATE-SHA256SUMS" | cut -d' ' -f1)" \
+    '{
+      formatVersion: 1,
+      createdAt: $createdAt,
+      targetRelease: $targetRelease,
+      previousApplication: $previousApplication,
+      previousOfficial: $previousOfficial,
+      environmentSha256: $environmentSha256,
+      stateManifestSha256: $stateManifestSha256,
+      cleanShutdown: true,
+      verified: true
+    }' >"$manifest"
+  chmod -R go-rwx "$snapshot_root"
+  CODEXAPP_FINALIZED_SNAPSHOT_ROOT="$snapshot_root"
+}
+
+codexapp_restore_state_snapshot() {
+  local snapshot_root="$1"
+  local expected_manifest_sha
+  local actual_manifest_sha
+
+  if [[ ! -d "$snapshot_root/state" || -L "$snapshot_root/state" ]] ||
+    [[ ! -f "$snapshot_root/SNAPSHOT.json" || -L "$snapshot_root/SNAPSHOT.json" ]] ||
+    [[ ! -f "$snapshot_root/STATE-SHA256SUMS" || -L "$snapshot_root/STATE-SHA256SUMS" ]]; then
+    echo "verified B production snapshot is incomplete" >&2
+    return 1
+  fi
+  expected_manifest_sha="$(jq -er '.stateManifestSha256' "$snapshot_root/SNAPSHOT.json")"
+  actual_manifest_sha="$(sha256sum "$snapshot_root/STATE-SHA256SUMS" | cut -d' ' -f1)"
+  if [[ "$expected_manifest_sha" != "$actual_manifest_sha" ]]; then
+    echo "B production snapshot manifest changed" >&2
+    return 1
+  fi
+  (
+    cd "$snapshot_root/state"
+    sha256sum -c --quiet "$snapshot_root/STATE-SHA256SUMS"
+  )
+  ionice -c3 nice -n 15 rsync -aHAXx --delete --numeric-ids \
+    "$snapshot_root/state/" "$codexapp_state_root/"
+}
 
 codexapp_assert_no_background_work() {
   local snapshot
@@ -218,6 +400,30 @@ codexapp_set_expected_official_version() {
       { print }
     ' \
     "$codexapp_environment_file" >"$temporary"
+  chown --reference="$codexapp_environment_file" "$temporary"
+  chmod --reference="$codexapp_environment_file" "$temporary"
+  mv -f -- "$temporary" "$codexapp_environment_file"
+}
+
+codexapp_set_operational_limits() {
+  local temporary
+  if [[ "$(grep -c '^MAX_SESSIONS=' "$codexapp_environment_file")" -ne 1 ]] ||
+    [[ "$(grep -c '^MAX_SESSIONS_PER_USER=' "$codexapp_environment_file")" -ne 1 ]]; then
+    echo "B production session settings are not unique" >&2
+    return 1
+  fi
+  temporary="$(mktemp "$(dirname -- "$codexapp_environment_file")/.codexapp-limits.XXXXXXXX")"
+  awk '
+    /^MAX_SESSIONS=/ {
+      print "MAX_SESSIONS=10"
+      next
+    }
+    /^MAX_SESSIONS_PER_USER=/ {
+      print "MAX_SESSIONS_PER_USER=4"
+      next
+    }
+    { print }
+  ' "$codexapp_environment_file" >"$temporary"
   chown --reference="$codexapp_environment_file" "$temporary"
   chmod --reference="$codexapp_environment_file" "$temporary"
   mv -f -- "$temporary" "$codexapp_environment_file"

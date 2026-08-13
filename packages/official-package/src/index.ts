@@ -444,7 +444,16 @@ function walkFiles(root: string, include: (path: string) => boolean = () => true
     }
   };
   visit(root);
-  return output;
+  // ASAR manifests are hashed in globally sorted path order. Recursive
+  // directory traversal is deterministic, but it is not the same ordering
+  // when one entry is a prefix of another (for example `pkg-linux/` and
+  // `pkg/`). Normalize the extracted tree to the same global order before
+  // hashing so identical package bytes cannot be rejected after extraction.
+  return output.sort((left, right) => {
+    const leftPath = relative(root, left).split(sep).join('/');
+    const rightPath = relative(root, right).split(sep).join('/');
+    return leftPath < rightPath ? -1 : leftPath > rightPath ? 1 : 0;
+  });
 }
 
 export function locateAsar(applicationOrAsarPath: string): string {

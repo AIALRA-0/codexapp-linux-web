@@ -105,7 +105,13 @@ interface RendererRequestMetadata {
   requestFingerprint?: string;
   requestShape?: Record<string, unknown>;
   startedAtMs: number;
+  threadId?: string;
   trace?: unknown;
+}
+
+interface DeferredResumeNotification {
+  notification: { method: string; params?: unknown };
+  suppressPrewarmedThread: boolean;
 }
 
 interface RendererResponseCacheEntry {
@@ -161,6 +167,32 @@ function recordOrNull(value: unknown): Record<string, unknown> | null {
   return value !== null && typeof value === 'object' && !Array.isArray(value)
     ? (value as Record<string, unknown>)
     : null;
+}
+
+export function rendererNotificationThreadId(notification: {
+  method: string;
+  params?: unknown;
+}): string | null {
+  const params = recordOrNull(notification.params);
+  if (notification.method === 'thread/started') {
+    const thread = recordOrNull(params?.thread);
+    return typeof thread?.id === 'string' && thread.id.length > 0 ? thread.id : null;
+  }
+  return typeof params?.threadId === 'string' && params.threadId.length > 0
+    ? params.threadId
+    : null;
+}
+
+export function rendererNotificationShouldWaitForResume(
+  notification: { method: string; params?: unknown },
+  pendingThreadIds: ReadonlySet<string>,
+): boolean {
+  const threadId = rendererNotificationThreadId(notification);
+  return (
+    notification.method === 'thread/status/changed' &&
+    threadId !== null &&
+    pendingThreadIds.has(threadId)
+  );
 }
 
 interface RendererMessage {
@@ -254,6 +286,15 @@ export function rendererPersistentResponseCacheKey(method: string, params: unkno
   // later browser can never inherit a model, cwd, permission, or instruction
   // override from a different resume request.
   return `${method}:${rendererRequestFingerprint(params)}`;
+}
+
+export function rendererResponseCacheCanPersist(method: string): boolean {
+  // A thread/resume response is not merely content: the real request also
+  // attaches the thread to the current App Server process. Replaying that
+  // response after a host or App Server restart creates a readable-looking
+  // shell whose next turn fails with "thread not found". Keep resume results
+  // only in memory for the lifetime of the process that performed the resume.
+  return method !== 'thread/resume';
 }
 
 export function rendererRequestShape(
@@ -426,6 +467,7 @@ export class UserRuntime extends EventEmitter {
   #appServerRestartAttempt = 0;
   #stopping = false;
   #rendererRequests = new Map<JsonRpcId, RendererRequestMetadata>();
+  #deferredResumeNotifications = new Map<string, DeferredResumeNotification[]>();
   #rendererResponseCache = new Map<string, RendererResponseCacheEntry>();
   #rendererResponseInFlight = new Map<string, RendererResponseInFlight>();
   #rendererResponseCacheGeneration = 0;
@@ -795,6 +837,7 @@ export class UserRuntime extends EventEmitter {
     this.#pendingAppServerRequests.clear();
     this.#rendererResponseCache.clear();
     this.#rendererResponseInFlight.clear();
+    this.#deferredResumeNotifications.clear();
     for (const timer of this.#threadResumeRefreshTimers.values()) clearTimeout(timer);
     this.#threadResumeRefreshTimers.clear();
     this.#threadResumeRefreshParams.clear();
@@ -989,7 +1032,9 @@ export class UserRuntime extends EventEmitter {
             }
             this.#rendererResponseCache.delete(responseCacheKey);
           }
-          responseCachePrincipalKey = await this.#readDiscoveryResponseCachePrincipalKey();
+          responseCachePrincipalKey = rendererResponseCacheCanPersist(prepared.request.method)
+            ? await this.#readDiscoveryResponseCachePrincipalKey()
+            : undefined;
           if (responseCachePrincipalKey !== undefined) {
             try {
               const persistentCacheKey = rendererPersistentResponseCacheKey(
@@ -1041,6 +1086,10 @@ export class UserRuntime extends EventEmitter {
           }
         }
         const requestShape = rendererRequestShape(prepared.request.method, prepared.request.params);
+        const resumeThreadId =
+          prepared.request.method === 'thread/resume'
+            ? rendererThreadResumeId(prepared.request.params)
+            : null;
         const metadata: RendererRequestMetadata = {
           ...(browserSessionId === undefined ? {} : { browserSessionId }),
           method: prepared.request.method,
@@ -1056,6 +1105,7 @@ export class UserRuntime extends EventEmitter {
           ...(responseCacheTtlMs === null ? {} : { responseCacheTtlMs }),
           ...(requestShape === undefined ? {} : { requestShape }),
           startedAtMs,
+          ...(resumeThreadId === null ? {} : { threadId: resumeThreadId }),
           ...(prepared.request.trace === undefined ? {} : { trace: prepared.request.trace }),
         };
         this.#invalidateRendererResponseCache(prepared.request.method);
@@ -1591,6 +1641,9 @@ export class UserRuntime extends EventEmitter {
           waiter.browserSessionId,
         );
       }
+      if (metadata?.method === 'thread/resume' && metadata.threadId !== undefined) {
+        this.#releaseDeferredResumeNotifications(metadata.threadId);
+      }
     });
     client.on('notification', (notification: unknown) => {
       const parsedNotification = jsonRpcNotificationSchema.parse(notification);
@@ -1718,6 +1771,7 @@ export class UserRuntime extends EventEmitter {
     }
     this.#rendererRequests.clear();
     this.#rendererResponseInFlight.clear();
+    this.#deferredResumeNotifications.clear();
     this.#invalidateRendererResponseCachePrefixes(THREAD_CONTENT_CACHE_PREFIXES);
     this.#prewarmedThreads.clear();
     this.#turnLatency.clear();
@@ -1726,6 +1780,23 @@ export class UserRuntime extends EventEmitter {
   #deliverAppServerNotification(
     parsedNotification: { method: string; params?: unknown },
     suppressPrewarmedThread = true,
+  ): void {
+    const threadId = rendererNotificationThreadId(parsedNotification);
+    if (
+      threadId !== null &&
+      rendererNotificationShouldWaitForResume(parsedNotification, this.#pendingThreadResumeIds())
+    ) {
+      const deferred = this.#deferredResumeNotifications.get(threadId) ?? [];
+      deferred.push({ notification: parsedNotification, suppressPrewarmedThread });
+      this.#deferredResumeNotifications.set(threadId, deferred);
+      return;
+    }
+    this.#deliverAppServerNotificationNow(parsedNotification, suppressPrewarmedThread);
+  }
+
+  #deliverAppServerNotificationNow(
+    parsedNotification: { method: string; params?: unknown },
+    suppressPrewarmedThread: boolean,
   ): void {
     this.#invalidateRendererResponseCacheForNotification(parsedNotification.method);
     this.#turnLatency.observeNotification(parsedNotification);
@@ -1768,6 +1839,33 @@ export class UserRuntime extends EventEmitter {
       });
     const message = toOfficialRendererNotification(parsedNotification);
     this.emit('view-message', message);
+  }
+
+  #hasPendingThreadResume(threadId: string): boolean {
+    for (const metadata of this.#rendererRequests.values()) {
+      if (metadata.method === 'thread/resume' && metadata.threadId === threadId) return true;
+    }
+    return false;
+  }
+
+  #pendingThreadResumeIds(): Set<string> {
+    const threadIds = new Set<string>();
+    for (const metadata of this.#rendererRequests.values()) {
+      if (metadata.method === 'thread/resume' && metadata.threadId !== undefined) {
+        threadIds.add(metadata.threadId);
+      }
+    }
+    return threadIds;
+  }
+
+  #releaseDeferredResumeNotifications(threadId: string): void {
+    if (this.#hasPendingThreadResume(threadId)) return;
+    const deferred = this.#deferredResumeNotifications.get(threadId);
+    if (deferred === undefined) return;
+    this.#deferredResumeNotifications.delete(threadId);
+    for (const entry of deferred) {
+      this.#deliverAppServerNotificationNow(entry.notification, entry.suppressPrewarmedThread);
+    }
   }
 
   #emitRendererMessage(message: unknown, browserSessionId?: string): void {
@@ -1960,13 +2058,15 @@ export class UserRuntime extends EventEmitter {
           : {}),
         result,
       });
-      this.#discoveryResponseCacheStore.write(
-        principalKey,
-        rendererPersistentResponseCacheKey(method, params),
-        method,
-        ttlMs,
-        result,
-      );
+      if (rendererResponseCacheCanPersist(method)) {
+        this.#discoveryResponseCacheStore.write(
+          principalKey,
+          rendererPersistentResponseCacheKey(method, params),
+          method,
+          ttlMs,
+          result,
+        );
+      }
       this.#pruneRendererResponseCache(receivedAtMs);
       this.emit('performance', {
         kind: 'official-cache-refresh',

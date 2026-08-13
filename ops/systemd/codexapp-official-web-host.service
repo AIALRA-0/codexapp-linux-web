@@ -8,6 +8,7 @@ Wants=network-online.target codexapp-official-browser-display.service codexapp-o
 Type=simple
 User=codexappweb
 Group=codexappweb
+SupplementaryGroups=codexappsecrets
 WorkingDirectory=/srv/aialra/apps/codexapp-official-web-host/current
 EnvironmentFile=/srv/aialra/config/secrets/codexapp-official-web-host.env
 Environment=HOME=/srv/aialra/state/codexapp-official/service-home
@@ -20,8 +21,15 @@ RestartSec=3
 TimeoutStopSec=20s
 KillMode=mixed
 UMask=0077
-TasksMax=2048
-MemoryMax=6G
+# B may use more memory for a large official conversation, but it remains
+# subordinate to the stable A controller on the shared 24 GiB host.
+TasksMax=1024
+MemoryHigh=6G
+MemoryMax=8G
+MemorySwapMax=2G
+CPUQuota=400%
+CPUWeight=100
+IOWeight=50
 
 NoNewPrivileges=true
 PrivateTmp=true

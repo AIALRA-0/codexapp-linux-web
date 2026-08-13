@@ -28,6 +28,21 @@ if ! getent passwd codexappweb >/dev/null || ! getent group codexappweb >/dev/nu
   echo "codexappweb service account is missing" >&2
   exit 1
 fi
+if ! getent group codexappsecrets >/dev/null; then
+  groupadd --system codexappsecrets
+fi
+
+for secret_path in \
+  /srv/aialra/config/secrets/codexapp-official-web-host.env \
+  /srv/aialra/config/secrets/codexapp-official-session.key \
+  /srv/aialra/config/secrets/codexapp-official-proxy-secret; do
+  if [[ ! -f "$secret_path" || -L "$secret_path" ]]; then
+    echo "B production secret is missing or symbolic: $secret_path" >&2
+    exit 1
+  fi
+  chown root:codexappsecrets "$secret_path"
+  chmod 0640 "$secret_path"
+done
 
 install -d -o codexappweb -g codexappweb -m 0700 \
   "$service_home" \
@@ -36,6 +51,7 @@ install -d -o codexappweb -g codexappweb -m 0700 \
   "$service_home/.local" \
   "$service_home/.local/share" \
   "$service_home/.local/share/applications"
+systemd-analyze verify "$source_unit"
 install -o root -g root -m 0644 "$source_unit" "$target_unit"
 install -d -o root -g root -m 0755 "$target_drop_in_directory"
 install -o root -g root -m 0644 "$source_drop_in" "$target_drop_in"

@@ -109,4 +109,5 @@ if [[ "$activate" == "--stage" ]]; then
 fi
 
 trap - EXIT
+APPLICATION_ROOT="$target" "$target/ops/install-host-service.sh"
 exec "$target/ops/promote-release.sh" "$release_id"
