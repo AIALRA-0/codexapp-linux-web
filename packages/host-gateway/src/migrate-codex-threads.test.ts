@@ -54,7 +54,26 @@ describe('existing thread synchronization', () => {
     const targetRollout = join(targetHome, 'sessions', 'target.jsonl');
     await mkdir(dirname(sourceRollout), { recursive: true });
     await mkdir(dirname(targetRollout), { recursive: true });
-    await writeFile(sourceRollout, '{"type":"source"}\n', 'utf8');
+    await writeFile(
+      sourceRollout,
+      [
+        JSON.stringify({
+          type: 'turn_context',
+          payload: {
+            cwd: join(root, 'local-workspace'),
+            workspace_roots: [join(root, 'local-workspace')],
+          },
+        }),
+        JSON.stringify({
+          type: 'response_item',
+          payload: {
+            type: 'function_call',
+            arguments: JSON.stringify({ workdir: join(root, 'local-workspace') }),
+          },
+        }),
+      ].join('\n') + '\n',
+      'utf8',
+    );
     await writeFile(targetRollout, '{"type":"target"}\n', 'utf8');
 
     const sourceDatabase = new Database(join(sourceHome, 'state_5.sqlite'));
@@ -91,7 +110,18 @@ describe('existing thread synchronization', () => {
       backupRoot,
     ]);
     expect(JSON.parse(stdout)).toMatchObject({ ok: true, mode: 'sync-existing' });
-    expect(await readFile(targetRollout, 'utf8')).toBe('{"type":"source"}\n');
+    const normalizedRollout = await readFile(targetRollout, 'utf8');
+    const normalizedLines = normalizedRollout
+      .trimEnd()
+      .split('\n')
+      .map((line) => JSON.parse(line) as unknown);
+    expect(normalizedLines[0]).toMatchObject({
+      payload: {
+        cwd: join(root, 'server-workspace'),
+        workspace_roots: [join(root, 'server-workspace')],
+      },
+    });
+    expect(normalizedRollout).toContain(join(root, 'local-workspace'));
     expect(await readFile(join(backupRoot, 'rollout.jsonl'), 'utf8')).toBe('{"type":"target"}\n');
 
     const verifiedTarget = new Database(join(targetHome, 'state_5.sqlite'), {

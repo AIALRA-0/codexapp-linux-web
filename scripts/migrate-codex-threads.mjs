@@ -1,5 +1,7 @@
 import { createHash } from 'node:crypto';
-import { createReadStream } from 'node:fs';
+import { once } from 'node:events';
+import { createReadStream, createWriteStream } from 'node:fs';
+import { createInterface } from 'node:readline';
 import {
   chown,
   chmod,
@@ -231,14 +233,16 @@ async function syncExistingRecord(values) {
     await copyFile(targetDatabasePath, backupDatabase);
     const targetBefore = await fileDigest(targetRollout);
     const targetMetadata = await stat(targetRollout);
+    const targetDatabaseMetadata = await stat(targetDatabasePath);
 
     const temporaryRollout = `${targetRollout}.sync-${process.pid}`;
-    await copyFile(sourceRollout, temporaryRollout);
+    const normalizedWorkspacePaths = await normalizeRolloutWorkspacePaths(
+      sourceRollout,
+      temporaryRollout,
+      requiredString(sourceRow.cwd, 'source workspace'),
+      requiredString(targetRow.cwd, 'target workspace'),
+    );
     const copiedDigest = await fileDigest(temporaryRollout);
-    if (copiedDigest.sha256 !== sourceDigest.sha256 || copiedDigest.bytes !== sourceDigest.bytes) {
-      await rm(temporaryRollout, { force: true });
-      throw new Error('temporary rollout digest differs from the source');
-    }
     await chmod(temporaryRollout, targetMetadata.mode);
     await chown(temporaryRollout, targetMetadata.uid, targetMetadata.gid);
     await rename(temporaryRollout, targetRollout);
@@ -271,10 +275,11 @@ async function syncExistingRecord(values) {
       throw error;
     }
     targetDatabase.pragma('wal_checkpoint(TRUNCATE)');
+    await restoreDatabaseOwnership(targetDatabasePath, targetDatabaseMetadata);
 
     const finalDigest = await fileDigest(targetRollout);
-    if (finalDigest.sha256 !== sourceDigest.sha256 || finalDigest.bytes !== sourceDigest.bytes) {
-      throw new Error('final target rollout digest differs from the source');
+    if (finalDigest.sha256 !== copiedDigest.sha256 || finalDigest.bytes !== copiedDigest.bytes) {
+      throw new Error('final target rollout digest differs from the normalized copy');
     }
     process.stdout.write(
       `${JSON.stringify({
@@ -285,6 +290,7 @@ async function syncExistingRecord(values) {
         source: sourceDigest,
         targetBefore,
         targetAfter: finalDigest,
+        normalizedWorkspacePaths,
         preservedTargetFields: [...immutableTargetColumns].sort(),
         updatedColumns,
       })}\n`,
@@ -292,6 +298,113 @@ async function syncExistingRecord(values) {
   } finally {
     sourceDatabase.close();
     targetDatabase.close();
+  }
+}
+
+async function normalizeRolloutWorkspacePaths(
+  sourcePath,
+  targetPath,
+  sourceWorkspace,
+  targetWorkspace,
+) {
+  if (resolve(sourceWorkspace) === resolve(targetWorkspace)) {
+    await copyFile(sourcePath, targetPath);
+    return 0;
+  }
+  const input = createReadStream(sourcePath, { encoding: 'utf8' });
+  const lines = createInterface({ input, crlfDelay: Infinity });
+  const output = createWriteStream(targetPath, { encoding: 'utf8', flags: 'wx', mode: 0o600 });
+  let normalized = 0;
+  try {
+    for await (const line of lines) {
+      if (!line.includes(sourceWorkspace)) {
+        if (!output.write(`${line}\n`)) await once(output, 'drain');
+        continue;
+      }
+      const record = JSON.parse(line);
+      normalized += rewriteStructuredWorkspacePaths(record, sourceWorkspace, targetWorkspace);
+      if (!output.write(`${JSON.stringify(record)}\n`)) await once(output, 'drain');
+    }
+    output.end();
+    await once(output, 'finish');
+    return normalized;
+  } catch (error) {
+    output.destroy();
+    await rm(targetPath, { force: true });
+    throw error;
+  }
+}
+
+function rewriteStructuredWorkspacePaths(value, sourceWorkspace, targetWorkspace, parentKey = '') {
+  if (value === null || typeof value !== 'object') return 0;
+  let normalized = 0;
+  if (Array.isArray(value)) {
+    for (let index = 0; index < value.length; index += 1) {
+      const entry = value[index];
+      if (
+        parentKey === 'workspace_roots' &&
+        typeof entry === 'string' &&
+        isWorkspacePath(entry, sourceWorkspace)
+      ) {
+        value[index] = rewriteWorkspacePath(entry, sourceWorkspace, targetWorkspace);
+        normalized += 1;
+      } else {
+        normalized += rewriteStructuredWorkspacePaths(
+          entry,
+          sourceWorkspace,
+          targetWorkspace,
+          parentKey,
+        );
+      }
+    }
+    return normalized;
+  }
+
+  for (const [key, entry] of Object.entries(value)) {
+    if (
+      ['cwd', 'workdir', 'path', 'move_path'].includes(key) &&
+      typeof entry === 'string' &&
+      isWorkspacePath(entry, sourceWorkspace)
+    ) {
+      value[key] = rewriteWorkspacePath(entry, sourceWorkspace, targetWorkspace);
+      normalized += 1;
+      continue;
+    }
+    if (key === 'filesystem' && typeof entry === 'string' && entry.includes(sourceWorkspace)) {
+      value[key] = entry.replaceAll(sourceWorkspace, targetWorkspace);
+      normalized += 1;
+      continue;
+    }
+    if (key === 'changes' && entry !== null && typeof entry === 'object' && !Array.isArray(entry)) {
+      for (const changePath of Object.keys(entry)) {
+        if (!isWorkspacePath(changePath, sourceWorkspace)) continue;
+        const targetChangePath = rewriteWorkspacePath(changePath, sourceWorkspace, targetWorkspace);
+        entry[targetChangePath] = entry[changePath];
+        delete entry[changePath];
+        normalized += 1;
+      }
+    }
+    normalized += rewriteStructuredWorkspacePaths(entry, sourceWorkspace, targetWorkspace, key);
+  }
+  return normalized;
+}
+
+function isWorkspacePath(value, workspace) {
+  return value === workspace || value.startsWith(`${workspace}/`);
+}
+
+function rewriteWorkspacePath(value, sourceWorkspace, targetWorkspace) {
+  return `${targetWorkspace}${value.slice(sourceWorkspace.length)}`;
+}
+
+async function restoreDatabaseOwnership(databasePath, metadata) {
+  for (const path of [databasePath, `${databasePath}-wal`, `${databasePath}-shm`]) {
+    try {
+      await chmod(path, metadata.mode);
+      await chown(path, metadata.uid, metadata.gid);
+    } catch (error) {
+      if (error?.code !== 'ENOENT') throw error;
+    }
   }
 }
 

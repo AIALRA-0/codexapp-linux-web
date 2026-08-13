@@ -126,6 +126,17 @@ export function rendererResponseCacheGenerationCanStore(
   return requestGeneration !== undefined && requestGeneration === currentGeneration;
 }
 
+export function rendererResponseCacheGenerationForKey(
+  cacheKey: string,
+  prefixGenerations: ReadonlyMap<string, number>,
+): number {
+  let generation = 0;
+  for (const [prefix, prefixGeneration] of prefixGenerations) {
+    if (cacheKey.startsWith(prefix)) generation = Math.max(generation, prefixGeneration);
+  }
+  return generation;
+}
+
 function rendererResponseInFlightKey(cacheKey: string, generation: number): string {
   return `${String(generation)}:${cacheKey}`;
 }
@@ -393,6 +404,7 @@ export class UserRuntime extends EventEmitter {
   #rendererResponseCache = new Map<string, RendererResponseCacheEntry>();
   #rendererResponseInFlight = new Map<string, RendererResponseInFlight>();
   #rendererResponseCacheGeneration = 0;
+  #rendererResponseCachePrefixGenerations = new Map<string, number>();
   #modelProviderCapabilities: unknown;
   #fetchControllers = new Map<string, AbortController>();
   #browserDownloads = new Map<string, BrowserDownload & { expiresAt: number }>();
@@ -882,7 +894,9 @@ export class UserRuntime extends EventEmitter {
             ? undefined
             : rendererResponseCacheKey(prepared.request.method, prepared.request.params);
         const responseCacheGeneration =
-          responseCacheKey === undefined ? undefined : this.#rendererResponseCacheGeneration;
+          responseCacheKey === undefined
+            ? undefined
+            : this.#rendererResponseCacheGenerationForKey(responseCacheKey);
         const responseCacheOverrideFingerprint =
           prepared.request.method === 'thread/resume'
             ? threadResumeOverrideFingerprint(prepared.request.params)
@@ -1424,7 +1438,7 @@ export class UserRuntime extends EventEmitter {
         metadata.responseCacheTtlMs !== undefined &&
         rendererResponseCacheGenerationCanStore(
           metadata.responseCacheGeneration,
-          this.#rendererResponseCacheGeneration,
+          this.#rendererResponseCacheGenerationForKey(metadata.responseCacheKey),
         ) &&
         parsed.error === undefined &&
         rendererResponseCanBeCached(metadata.method, parsed.result)
@@ -1785,7 +1799,20 @@ export class UserRuntime extends EventEmitter {
   #invalidateRendererResponseCachePrefixes(prefixes: readonly string[]): void {
     if (prefixes.length === 0) return;
     this.#rendererResponseCacheGeneration += 1;
+    for (const prefix of prefixes) {
+      this.#rendererResponseCachePrefixGenerations.set(
+        prefix,
+        this.#rendererResponseCacheGeneration,
+      );
+    }
     this.#deleteRendererResponseCachePrefixes(prefixes);
+  }
+
+  #rendererResponseCacheGenerationForKey(cacheKey: string): number {
+    return rendererResponseCacheGenerationForKey(
+      cacheKey,
+      this.#rendererResponseCachePrefixGenerations,
+    );
   }
 
   async #readDiscoveryResponseCachePrincipalKey(): Promise<string | undefined> {

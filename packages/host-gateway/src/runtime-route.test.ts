@@ -11,6 +11,7 @@ import {
   rendererPersistentResponseCacheKey,
   rendererNotificationCacheInvalidationPrefixes,
   rendererResponseCanBeCached,
+  rendererResponseCacheGenerationForKey,
   rendererResponseCacheGenerationCanStore,
   rendererResponseCacheKey,
   rendererResponseCacheInvalidationPrefixes,
@@ -24,6 +25,17 @@ function accessToken(authClaims: Record<string, unknown>): string {
 }
 
 describe('renderer request diagnostics', () => {
+  it('keeps unrelated cache namespaces independent while a slow read is in flight', () => {
+    const generations = new Map([
+      ['mcpServerStatus/', 4],
+      ['plugin/', 7],
+      ['thread/resume:', 2],
+    ]);
+    expect(rendererResponseCacheGenerationForKey('thread/resume:large', generations)).toBe(2);
+    expect(rendererResponseCacheGenerationForKey('thread/turns/list:large', generations)).toBe(0);
+    expect(rendererResponseCacheGenerationForKey('mcpServerStatus/list:all', generations)).toBe(4);
+  });
+
   it('identifies equal parameter records without logging their values', () => {
     const first = rendererRequestFingerprint({ cwds: ['/workspace'], marketplaceKinds: null });
     const reordered = rendererRequestFingerprint({ marketplaceKinds: null, cwds: ['/workspace'] });
