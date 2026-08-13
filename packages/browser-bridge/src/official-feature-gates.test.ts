@@ -22,6 +22,24 @@ describe('official history snapshot gate', () => {
       name: 'unrelated',
       value: false,
     });
+    const layerOverride = statsig.firstInstance.overrideAdapter?.getLayerOverride as (
+      layer: Record<string, unknown>,
+    ) => Record<string, unknown>;
+    expect(
+      layerOverride({
+        name: '72216192',
+        __value: { enable_i18n: false, locale_source: 'IDE' },
+        details: { reason: 'Network' },
+      }),
+    ).toEqual({
+      name: '72216192',
+      __value: { enable_i18n: true, locale_source: 'IDE' },
+      details: { reason: 'LocalOverride' },
+    });
+    expect(layerOverride({ name: 'unrelated', __value: { enabled: false } })).toEqual({
+      name: 'unrelated',
+      __value: { enabled: false },
+    });
 
     restore();
     expect('__STATSIG__' in scope).toBe(false);
@@ -32,7 +50,17 @@ describe('official history snapshot gate', () => {
       ...gate,
       value: gate.name === 'official-gate',
     }));
-    const client = { overrideAdapter: { getGateOverride: originalOverride, marker: 'official' } };
+    const originalLayerOverride = vi.fn((layer: Record<string, unknown>) => ({
+      ...layer,
+      __value: { official: true },
+    }));
+    const client = {
+      overrideAdapter: {
+        getGateOverride: originalOverride,
+        getLayerOverride: originalLayerOverride,
+        marker: 'official',
+      },
+    };
     const scope: Record<string, unknown> = {
       __STATSIG__: { firstInstance: client },
     };
@@ -41,8 +69,15 @@ describe('official history snapshot gate', () => {
     const override = client.overrideAdapter.getGateOverride;
     expect(override({ name: 'official-gate', value: false })).toMatchObject({ value: true });
     expect(override({ name: '416252813', value: false })).toMatchObject({ value: true });
+    expect(
+      client.overrideAdapter.getLayerOverride({
+        name: '72216192',
+        __value: { enable_i18n: false },
+      }),
+    ).toMatchObject({ __value: { enable_i18n: true, official: true } });
     expect(client.overrideAdapter.marker).toBe('official');
     expect(originalOverride).toHaveBeenCalledTimes(2);
+    expect(originalLayerOverride).toHaveBeenCalledTimes(1);
   });
 
   it('decorates clients registered through the instances collection', () => {

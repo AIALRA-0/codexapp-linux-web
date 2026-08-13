@@ -7,6 +7,7 @@ const proxySecret = process.env.SMOKE_PROXY_SECRET;
 const screenshotPath = process.env.SMOKE_SCREENSHOT_PATH;
 const initialPath = process.env.SMOKE_INITIAL_PATH ?? '/';
 const expectedText = optionalEnvironmentValue('SMOKE_EXPECTED_TEXT');
+const expectedConversationText = optionalEnvironmentValue('SMOKE_EXPECTED_CONVERSATION_TEXT');
 const clickText = optionalEnvironmentValue('SMOKE_CLICK_TEXT');
 const afterClickText = optionalEnvironmentValue('SMOKE_AFTER_CLICK_TEXT');
 const expectedLocale = optionalEnvironmentValue('SMOKE_EXPECTED_LOCALE');
@@ -75,11 +76,7 @@ page.on('response', (response) => {
     const contentLength = Number(response.headers()['content-length']);
     mainAssetTransferBytes = Number.isFinite(contentLength) ? contentLength : undefined;
   }
-  if (
-    /\/assets\/(?:zh-CN|zh-TW|zh-HK|ja-JP|ko-KR|fr-FR|de-DE|es-(?:ES|419))-[^/]+\.js$/u.test(
-      response.url(),
-    )
-  ) {
+  if (/\/assets\/[a-z]{2,3}(?:-[A-Z0-9]{2,4})+-[^/]+\.js$/u.test(response.url())) {
     loadedLocaleAssets.push(response.url().split('/').pop());
   }
   if (response.url().startsWith(baseUrl) && response.status() >= 400) {
@@ -148,6 +145,36 @@ try {
     });
     expectedTextVisibleAtMs = Date.now();
     reportProgress('expected-text-visible');
+  }
+  if (expectedConversationText !== undefined) {
+    await page.waitForFunction(
+      (text) =>
+        Array.from(document.querySelectorAll('body *')).some((element) => {
+          if (!(element instanceof HTMLElement)) return false;
+          const ownText = (element.innerText ?? '').trim();
+          if (!ownText.includes(text)) return false;
+          if (
+            Array.from(element.children).some((child) => (child.textContent ?? '').includes(text))
+          ) {
+            return false;
+          }
+          const rect = element.getBoundingClientRect();
+          const style = getComputedStyle(element);
+          return (
+            rect.width > 0 &&
+            rect.height > 0 &&
+            rect.left >= 275 &&
+            rect.bottom > 100 &&
+            rect.top < innerHeight &&
+            style.display !== 'none' &&
+            style.visibility !== 'hidden' &&
+            style.opacity !== '0'
+          );
+        }),
+      expectedConversationText,
+      { timeout: contentTimeoutMs },
+    );
+    reportProgress('conversation-text-visible');
   }
 
   if (expectedLocale !== undefined) {
@@ -220,6 +247,13 @@ try {
           overrideMarker: client.overrideAdapter?.__codexLinuxHistorySnapshotOverride === true,
           checkedValue:
             typeof client.checkGate === 'function' ? client.checkGate('416252813') : null,
+          internationalizationOverride:
+            typeof client.overrideAdapter?.getLayerOverride === 'function'
+              ? client.overrideAdapter.getLayerOverride({
+                  name: '72216192',
+                  __value: { enable_i18n: false },
+                })?.__value?.enable_i18n
+              : null,
         })),
       };
     })(),
@@ -457,6 +491,7 @@ try {
       elementCount: renderer.elementCount,
       bodyTextLength: renderer.bodyTextLength,
       expectedTextAsserted: expectedText !== undefined,
+      expectedConversationTextAsserted: expectedConversationText !== undefined,
       afterClickTextAsserted: afterClickText !== undefined,
       waitedTextGone: waitForTextGone === undefined ? null : true,
       settingsMenuInspection,

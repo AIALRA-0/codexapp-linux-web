@@ -99,6 +99,7 @@ interface RendererRequestMetadata {
   responseCacheGeneration?: number;
   responseCacheKey?: string;
   responseCacheOverrideFingerprint?: string;
+  responseCachePersistentKey?: string;
   responseCachePrincipalKey?: string;
   responseCacheTtlMs?: number;
   requestFingerprint?: string;
@@ -211,6 +212,14 @@ export function rendererResponseCacheKey(method: string, params: unknown): strin
   return `${THREAD_RESUME_CACHE_PREFIX}${rendererRequestFingerprint(locator)}`;
 }
 
+export function rendererPersistentResponseCacheKey(method: string, params: unknown): string {
+  // A persisted entry survives the process which established its safety
+  // context. Use every request field, including thread resume overrides, so a
+  // later browser can never inherit a model, cwd, permission, or instruction
+  // override from a different resume request.
+  return `${method}:${rendererRequestFingerprint(params)}`;
+}
+
 export function rendererRequestShape(
   method: string,
   params: unknown,
@@ -247,7 +256,7 @@ export function rendererResponseCacheTtlMs(method: string, params?: unknown): nu
   // invalidate the affected namespace immediately below.
   if (method === 'plugin/list' || method === 'plugin/installed') return 6 * 60 * 60 * 1_000;
   if (method === 'app/installed') return 5 * 60 * 1_000;
-  if (method === 'mcpServerStatus/list') return 5 * 60 * 1_000;
+  if (method === 'mcpServerStatus/list') return 24 * 60 * 60 * 1_000;
   if (method === 'thread/turns/list' || method === 'thread/items/list') {
     return THREAD_HISTORY_CACHE_TTL_MS;
   }
@@ -295,6 +304,7 @@ const THREAD_READ_ONLY_METHODS = new Set([
   'thread/resume',
   'thread/search',
   'thread/searchOccurrences',
+  'thread/settings/update',
   'thread/turns/list',
 ]);
 
@@ -310,7 +320,8 @@ export function rendererResponseCacheInvalidationPrefixes(method: string): strin
     method === 'config/value/write' ||
     method === 'config/batchWrite' ||
     method.startsWith('mcpServer/oauth/') ||
-    method === 'mcpServer/reload'
+    method === 'mcpServer/reload' ||
+    method === 'config/mcpServer/reload'
   ) {
     return ['mcpServerStatus/'];
   }
@@ -325,6 +336,7 @@ export function rendererResponseCacheInvalidationPrefixes(method: string): strin
 }
 
 export function rendererNotificationCacheInvalidationPrefixes(method: string): string[] {
+  if (method.startsWith('mcpServer/')) return ['mcpServerStatus/'];
   if (method === 'turn/started' || method === 'turn/completed' || method === 'thread/deleted') {
     return [...THREAD_CONTENT_CACHE_PREFIXES];
   }
@@ -876,6 +888,7 @@ export class UserRuntime extends EventEmitter {
             ? threadResumeOverrideFingerprint(prepared.request.params)
             : undefined;
         let responseCacheReadEligible = responseCacheKey !== undefined;
+        let responseCachePersistentKey: string | undefined;
         let responseCachePrincipalKey: string | undefined;
         if (responseCacheKey !== undefined) {
           let cached = this.#rendererResponseCache.get(responseCacheKey);
@@ -914,18 +927,25 @@ export class UserRuntime extends EventEmitter {
             }
             this.#rendererResponseCache.delete(responseCacheKey);
           }
-          responseCachePrincipalKey = prepared.request.method.startsWith('thread/')
-            ? undefined
-            : await this.#readDiscoveryResponseCachePrincipalKey();
+          responseCachePrincipalKey = await this.#readDiscoveryResponseCachePrincipalKey();
           if (responseCachePrincipalKey !== undefined) {
             try {
+              const persistentCacheKey = rendererPersistentResponseCacheKey(
+                prepared.request.method,
+                prepared.request.params,
+              );
               const persisted = this.#discoveryResponseCacheStore.read(
                 responseCachePrincipalKey,
-                responseCacheKey,
+                persistentCacheKey,
               );
               if (persisted !== null) {
                 const receivedAtMs = Date.now();
-                this.#rendererResponseCache.set(responseCacheKey, persisted);
+                this.#rendererResponseCache.set(responseCacheKey, {
+                  ...persisted,
+                  ...(responseCacheOverrideFingerprint === undefined
+                    ? {}
+                    : { resumeOverrideFingerprint: responseCacheOverrideFingerprint }),
+                });
                 this.emit('performance', {
                   kind: 'official-persistent-cache',
                   method: prepared.request.method,
@@ -948,6 +968,7 @@ export class UserRuntime extends EventEmitter {
                 );
                 return undefined;
               }
+              responseCachePersistentKey = persistentCacheKey;
             } catch (error) {
               this.emit('capability-error', {
                 requestType: 'discovery-response-cache-read',
@@ -968,6 +989,7 @@ export class UserRuntime extends EventEmitter {
           ...(responseCacheOverrideFingerprint === undefined
             ? {}
             : { responseCacheOverrideFingerprint }),
+          ...(responseCachePersistentKey === undefined ? {} : { responseCachePersistentKey }),
           ...(responseCachePrincipalKey === undefined ? {} : { responseCachePrincipalKey }),
           ...(responseCacheTtlMs === null ? {} : { responseCacheTtlMs }),
           ...(requestShape === undefined ? {} : { requestShape }),
@@ -1414,11 +1436,14 @@ export class UserRuntime extends EventEmitter {
             : { resumeOverrideFingerprint: metadata.responseCacheOverrideFingerprint }),
           result: parsed.result,
         });
-        if (metadata.responseCachePrincipalKey !== undefined) {
+        if (
+          metadata.responseCachePrincipalKey !== undefined &&
+          metadata.responseCachePersistentKey !== undefined
+        ) {
           try {
             this.#discoveryResponseCacheStore.write(
               metadata.responseCachePrincipalKey,
-              metadata.responseCacheKey,
+              metadata.responseCachePersistentKey,
               metadata.method,
               metadata.responseCacheTtlMs,
               parsed.result,
@@ -1640,9 +1665,7 @@ export class UserRuntime extends EventEmitter {
     parsedNotification: { method: string; params?: unknown },
     suppressPrewarmedThread = true,
   ): void {
-    this.#invalidateRendererResponseCachePrefixes(
-      rendererNotificationCacheInvalidationPrefixes(parsedNotification.method),
-    );
+    this.#invalidateRendererResponseCacheForNotification(parsedNotification.method);
     this.#turnLatency.observeNotification(parsedNotification);
     this.#backgroundWork.observeNotification(parsedNotification);
     this.#observePendingRequestNotification(parsedNotification);
@@ -1724,10 +1747,24 @@ export class UserRuntime extends EventEmitter {
   #invalidateRendererResponseCache(method: string): void {
     const prefixes = rendererResponseCacheInvalidationPrefixes(method);
     this.#invalidateRendererResponseCachePrefixes(prefixes);
-    const persistentPrefixes = prefixes.filter((prefix) => !prefix.startsWith('thread/'));
-    if (persistentPrefixes.length === 0) return;
+    if (prefixes.length === 0) return;
     try {
-      this.#discoveryResponseCacheStore.invalidate(persistentPrefixes);
+      this.#discoveryResponseCacheStore.invalidate(prefixes);
+    } catch (error) {
+      this.emit('capability-error', {
+        requestType: 'discovery-response-cache-invalidate',
+        method,
+        error: error instanceof Error ? error.message : 'discovery cache invalidation failed',
+      });
+    }
+  }
+
+  #invalidateRendererResponseCacheForNotification(method: string): void {
+    const prefixes = rendererNotificationCacheInvalidationPrefixes(method);
+    this.#invalidateRendererResponseCachePrefixes(prefixes);
+    if (prefixes.length === 0) return;
+    try {
+      this.#discoveryResponseCacheStore.invalidate(prefixes);
     } catch (error) {
       this.emit('capability-error', {
         requestType: 'discovery-response-cache-invalidate',

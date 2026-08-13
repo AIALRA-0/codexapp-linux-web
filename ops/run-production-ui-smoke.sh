@@ -57,6 +57,19 @@ read_environment_value() {
   ' "$environment_file"
 }
 
+proxy_secret_header="$(read_environment_value AUTH_PROXY_SECRET_HEADER)"
+proxy_secret_file="$(read_environment_value AUTH_PROXY_SECRET_FILE)"
+if [[ -z "$proxy_secret_header" || ! "$proxy_secret_header" =~ ^[A-Za-z0-9-]+$ ]] ||
+  [[ -z "$proxy_secret_file" || ! -f "$proxy_secret_file" || -L "$proxy_secret_file" ]]; then
+  echo "production UI smoke proxy proof configuration is invalid" >&2
+  exit 65
+fi
+proxy_secret="$(tr -d '\r\n' <"$proxy_secret_file")"
+if [[ ! "$proxy_secret" =~ ^[0-9A-Fa-f]{64,}$ ]]; then
+  echo "production UI smoke proxy proof is invalid" >&2
+  exit 65
+fi
+
 pinned_official_environment=()
 if [[ "${CODEXAPP_USE_ENVIRONMENT_OFFICIAL:-0}" == "1" ]]; then
   renderer_version="$(read_environment_value EXPECTED_RENDERER_VERSION)"
@@ -222,7 +235,10 @@ for attempt in $(seq 1 45); do
   sleep 1
 done
 
-sed "s/__CODEXAPP_SMOKE_SUBJECT__/$subject/g" "$nginx_source" >"$nginx_target"
+sed \
+  -e "s/__CODEXAPP_SMOKE_SUBJECT__/$subject/g" \
+  -e "/include \/srv\/aialra\/config\/nginx\/snippets\/codexapp-official-proxy-secret.conf;/c\\        proxy_set_header $proxy_secret_header \"$proxy_secret\";" \
+  "$nginx_source" >"$nginx_target"
 chown root:root "$nginx_target"
 chmod 0600 "$nginx_target"
 proxy_enabled=1
@@ -238,6 +254,7 @@ systemctl reload nginx
       SMOKE_SCREENSHOT_PATH="$screenshot_path" \
       SMOKE_INITIAL_PATH="${SMOKE_INITIAL_PATH:-/local/$thread_id}" \
       SMOKE_EXPECTED_TEXT="${SMOKE_EXPECTED_TEXT:-$expected_text}" \
+      SMOKE_EXPECTED_CONVERSATION_TEXT="${SMOKE_EXPECTED_CONVERSATION_TEXT:-}" \
       SMOKE_CLICK_TEXT="${SMOKE_CLICK_TEXT:-}" \
       SMOKE_AFTER_CLICK_TEXT="${SMOKE_AFTER_CLICK_TEXT:-}" \
       SMOKE_EXPECTED_LOCALE="${SMOKE_EXPECTED_LOCALE:-}" \

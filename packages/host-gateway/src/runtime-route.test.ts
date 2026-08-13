@@ -8,6 +8,7 @@ import {
   officialWebStaticDesktopResponse,
   rendererRequestFingerprint,
   rendererRequestShape,
+  rendererPersistentResponseCacheKey,
   rendererNotificationCacheInvalidationPrefixes,
   rendererResponseCanBeCached,
   rendererResponseCacheGenerationCanStore,
@@ -63,7 +64,7 @@ describe('renderer request diagnostics', () => {
     expect(rendererResponseCacheTtlMs('plugin/list')).toBe(6 * 60 * 60 * 1_000);
     expect(rendererResponseCacheTtlMs('plugin/installed')).toBe(6 * 60 * 60 * 1_000);
     expect(rendererResponseCacheTtlMs('app/installed')).toBe(5 * 60 * 1_000);
-    expect(rendererResponseCacheTtlMs('mcpServerStatus/list')).toBe(5 * 60 * 1_000);
+    expect(rendererResponseCacheTtlMs('mcpServerStatus/list')).toBe(24 * 60 * 60 * 1_000);
     expect(rendererResponseCacheTtlMs('thread/turns/list')).toBe(24 * 60 * 60 * 1_000);
     expect(rendererResponseCacheTtlMs('thread/items/list')).toBe(24 * 60 * 60 * 1_000);
     expect(
@@ -75,6 +76,20 @@ describe('renderer request diagnostics', () => {
     expect(rendererResponseCacheTtlMs('thread/resume', { excludeTurns: false })).toBeNull();
     expect(rendererResponseCacheTtlMs('thread/list')).toBeNull();
     expect(rendererResponseCacheTtlMs('turn/start')).toBeNull();
+  });
+
+  it('persists thread responses only for an exact request shape', () => {
+    const base = {
+      threadId: 'thread-1',
+      excludeTurns: true,
+      initialTurnsPage: { limit: 5, itemsView: 'full', sortDirection: 'desc' },
+    };
+    expect(rendererPersistentResponseCacheKey('thread/resume', base)).not.toBe(
+      rendererPersistentResponseCacheKey('thread/resume', {
+        ...base,
+        developerInstructions: 'different',
+      }),
+    );
   });
 
   it('caches only idle bounded thread resume responses', () => {
@@ -171,6 +186,9 @@ describe('renderer request diagnostics', () => {
     expect(rendererResponseCacheInvalidationPrefixes('mcpServer/oauth/login')).toEqual([
       'mcpServerStatus/',
     ]);
+    expect(rendererResponseCacheInvalidationPrefixes('config/mcpServer/reload')).toEqual([
+      'mcpServerStatus/',
+    ]);
     expect(rendererResponseCacheInvalidationPrefixes('account/login/start')).toEqual(['']);
     expect(rendererResponseCacheInvalidationPrefixes('account/logout')).toEqual(['']);
     expect(rendererResponseCacheInvalidationPrefixes('turn/start')).toEqual([
@@ -185,6 +203,7 @@ describe('renderer request diagnostics', () => {
     ]);
     expect(rendererResponseCacheInvalidationPrefixes('thread/read')).toEqual([]);
     expect(rendererResponseCacheInvalidationPrefixes('thread/resume')).toEqual([]);
+    expect(rendererResponseCacheInvalidationPrefixes('thread/settings/update')).toEqual([]);
     expect(rendererResponseCacheInvalidationPrefixes('thread/unsubscribe')).toEqual([
       'thread/resume:',
       'thread/turns/list:',
@@ -194,6 +213,9 @@ describe('renderer request diagnostics', () => {
   });
 
   it('does not discard a completed resume cache for status-only notifications', () => {
+    expect(
+      rendererNotificationCacheInvalidationPrefixes('mcpServer/startupStatus/updated'),
+    ).toEqual(['mcpServerStatus/']);
     expect(rendererNotificationCacheInvalidationPrefixes('thread/status/changed')).toEqual([]);
     expect(rendererNotificationCacheInvalidationPrefixes('thread/started')).toEqual([]);
     expect(rendererNotificationCacheInvalidationPrefixes('turn/started')).toEqual([

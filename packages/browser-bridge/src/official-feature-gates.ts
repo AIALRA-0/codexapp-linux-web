@@ -1,4 +1,5 @@
 const APP_SERVER_HISTORY_SNAPSHOTS_GATE = '416252813';
+const INTERNATIONALIZATION_LAYER = '72216192';
 
 interface FeatureGate {
   details?: Record<string, unknown>;
@@ -13,6 +14,18 @@ interface OverrideAdapter {
     user?: unknown,
     options?: unknown,
   ) => FeatureGate | null | undefined;
+  getLayerOverride?: (
+    layer: FeatureLayer,
+    user?: unknown,
+    options?: unknown,
+  ) => FeatureLayer | null | undefined;
+  [key: string]: unknown;
+}
+
+interface FeatureLayer {
+  __value?: Record<string, unknown>;
+  details?: Record<string, unknown>;
+  name?: string;
   [key: string]: unknown;
 }
 
@@ -32,7 +45,9 @@ type StatsigScope = Record<string, unknown>;
  * The unchanged official renderer already contains its recent-history snapshot
  * implementation, but OpenAI currently protects it with a remote rollout gate.
  * The Linux browser host supplies the matching official AppHost service, so it
- * opts that single renderer path in through Statsig's own override-adapter seam.
+ * opts that renderer path in through Statsig's own override-adapter seam. The
+ * same official seam enables the renderer's bundled locale catalogs: without
+ * it, a saved locale changes document.lang but leaves every label in English.
  */
 export function installOfficialHistorySnapshotGate(scope: StatsigScope): () => void {
   const existingDescriptor = Object.getOwnPropertyDescriptor(scope, '__STATSIG__');
@@ -155,6 +170,21 @@ function decorateStatsigClient(client: StatsigClient | undefined): void {
         reason: 'LocalOverride',
       },
       value: true,
+    };
+  };
+  adapter.getLayerOverride = (layer, user, options) => {
+    const officialOverride = previous?.getLayerOverride?.(layer, user, options) ?? layer;
+    if (officialOverride.name !== INTERNATIONALIZATION_LAYER) return officialOverride;
+    return {
+      ...officialOverride,
+      __value: {
+        ...officialOverride.__value,
+        enable_i18n: true,
+      },
+      details: {
+        ...officialOverride.details,
+        reason: 'LocalOverride',
+      },
     };
   };
   client.overrideAdapter = adapter;
