@@ -30,7 +30,7 @@ declined_marker="$workspace_root/approval-declined.txt"
 source "$application_root/ops/lib/systemd-host-hardening.sh"
 source "$application_root/ops/lib/pinned-official-release.sh"
 codexapp_load_pinned_official_release "$application_root"
-codexapp_prepare_host_hardening "$runtime_root"
+codexapp_prepare_host_hardening "$runtime_root" "$service_user" "$service_group"
 
 read_environment_value() {
   local key="$1"
