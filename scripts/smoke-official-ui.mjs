@@ -382,7 +382,7 @@ try {
         if (inspectSettingsMenu === 'language') {
           const languageButton = page
             .locator('button')
-            .filter({ hasText: /^(?:简体中文|English|繁體中文|日本語|Français)/u })
+            .filter({ hasText: /^(?:简体中文|English|繁體中文|日本語|Français)/iu })
             .last();
           await languageButton.waitFor({ state: 'visible', timeout: 20_000 });
           await languageButton.click();
