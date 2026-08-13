@@ -21,6 +21,7 @@ import {
   officialGitExportNames,
   readQualifiedOfficialVersion,
 } from './official-export-contract.js';
+import { loadQualifiedLocalExecutionHostRpc } from './official-main-contract.js';
 import { resolveOfficialSharedModulePath } from './official-shared-module.js';
 
 interface OfficialRpcSession {
@@ -377,12 +378,19 @@ export class OfficialGitWorker extends EventEmitter {
 function loadOfficialGitModule(sourceRoot: string): Partial<OfficialSharedModule> {
   const sharedPath = resolveOfficialSharedModulePath(sourceRoot);
   const raw = require(sharedPath) as Record<string, unknown>;
-  const names = officialGitExportNames(readQualifiedOfficialVersion(sourceRoot));
+  const version = readQualifiedOfficialVersion(sourceRoot);
+  const names = officialGitExportNames(version);
+  const localExecutionHostRpc =
+    version === '26.810.41047'
+      ? loadQualifiedLocalExecutionHostRpc(sourceRoot)
+      : names.localExecutionHostRpc === null
+        ? undefined
+        : raw[names.localExecutionHostRpc];
   return {
     At: raw[names.attachRpc] as OfficialSharedModule['At'],
     D: raw[names.githubService] as OfficialSharedModule['D'],
     F: raw[names.gitManager] as OfficialSharedModule['F'],
-    I: raw[names.localExecutionHostRpc] as OfficialSharedModule['I'],
+    I: localExecutionHostRpc as OfficialSharedModule['I'],
   };
 }
 

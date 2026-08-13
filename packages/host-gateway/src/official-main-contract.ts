@@ -1,6 +1,7 @@
 import { readFileSync, readdirSync } from 'node:fs';
-import { resolve } from 'node:path';
-import { runInNewContext } from 'node:vm';
+import { createRequire } from 'node:module';
+import { dirname, resolve } from 'node:path';
+import { runInNewContext, runInThisContext } from 'node:vm';
 
 export interface OfficialProjectlessInstructionsInput {
   cwd: string;
@@ -11,6 +12,66 @@ export interface OfficialProjectlessInstructionsInput {
 export type OfficialProjectlessInstructions = (
   input: OfficialProjectlessInstructionsInput,
 ) => string;
+
+export type OfficialLocalExecutionHostRpc = new (
+  getExecutionHost: (hostId: string) => unknown,
+) => unknown;
+
+export function loadQualifiedLocalExecutionHostRpc(
+  sourceRoot: string,
+): OfficialLocalExecutionHostRpc {
+  const source = readQualifiedMainSource(sourceRoot);
+  const marker =
+    'getExecutionHost;targetsByHostId=new Map;constructor(e){super(),this.getExecutionHost=e}getHost(e)';
+  const markerIndex = source.indexOf(marker);
+  if (
+    markerIndex < 0 ||
+    source.indexOf(marker, markerIndex + marker.length) >= 0 ||
+    markerIndex > 500_000
+  ) {
+    throw new Error('qualified official local execution host RPC changed');
+  }
+  const classPrefix = source.slice(Math.max(0, markerIndex - 200), markerIndex);
+  const classMatch =
+    /([A-Za-z_$][A-Za-z0-9_$]*)=class extends [A-Za-z_$][A-Za-z0-9_$]*\.Ct\{$/u.exec(classPrefix);
+  const className = classMatch?.[1];
+  if (className === undefined) {
+    throw new Error('qualified official local execution host RPC name changed');
+  }
+  const statementEnd = source.indexOf(';var ', markerIndex);
+  if (statementEnd < 0 || statementEnd - markerIndex > 250_000) {
+    throw new Error('qualified official local execution host RPC dependency boundary changed');
+  }
+
+  const mainPath = resolve(sourceRoot, '.vite', 'build', 'qualified-main.js');
+  const realRequire = createRequire(mainPath);
+  const inertModule = createInertModule();
+  const qualifiedRequire = (request: string): unknown => {
+    if (request === 'electron') return inertModule;
+    if (request.startsWith('./') && !/^\.\/src-[A-Za-z0-9_-]+\.js$/u.test(request)) {
+      return inertModule;
+    }
+    return realRequire(request);
+  };
+  const moduleValue: { exports: Record<string, unknown> } = { exports: {} };
+  const qualifiedSource = `${source.slice(0, statementEnd + 1)}\n;module.exports.__qualifiedLocalExecutionHostRpc=${className};`;
+  const evaluate = runInThisContext(
+    `(function(require,module,exports,__dirname,__filename){${qualifiedSource}\n})`,
+    { filename: mainPath, timeout: 5_000 },
+  ) as (...args: unknown[]) => void;
+  evaluate(qualifiedRequire, moduleValue, moduleValue.exports, dirname(mainPath), mainPath);
+  const candidate = moduleValue.exports.__qualifiedLocalExecutionHostRpc;
+  if (typeof candidate !== 'function') {
+    throw new Error('qualified official local execution host RPC did not load');
+  }
+  const instance = new (candidate as OfficialLocalExecutionHostRpc)(() => ({})) as {
+    getHost?: unknown;
+  };
+  if (typeof instance.getHost !== 'function') {
+    throw new Error('qualified official local execution host RPC behavior changed');
+  }
+  return candidate as OfficialLocalExecutionHostRpc;
+}
 
 export function loadQualifiedProjectlessInstructions(
   sourceRoot: string,
@@ -104,4 +165,20 @@ function extractFunctionSource(source: string, start: number): string {
     if (depth === 0) return source.slice(start, index + 1);
   }
   throw new Error('qualified official function body changed');
+}
+
+function createInertModule(): unknown {
+  const callable = function inertOfficialModule(): unknown {
+    return inert;
+  };
+  const inert: unknown = new Proxy(callable, {
+    apply: () => inert,
+    construct: () => inert as object,
+    get: (_target, property) => {
+      if (property === 'then') return undefined;
+      if (property === Symbol.toPrimitive) return () => '';
+      return inert;
+    },
+  });
+  return inert;
 }

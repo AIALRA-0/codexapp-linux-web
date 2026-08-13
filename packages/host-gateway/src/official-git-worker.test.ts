@@ -136,12 +136,13 @@ describeQualified('official Git worker runtime', () => {
     worker.on('error', () => undefined);
     workers.push(worker);
 
-    await expect(
-      worker.request('stable-metadata', {
-        cwd: repository,
-        operationSource: 'qualification',
-      }),
-    ).resolves.toMatchObject({ root: canonicalRepository });
+    const stableMetadata = await worker.request('stable-metadata', {
+      cwd: repository,
+      operationSource: 'qualification',
+    });
+    expect(stableMetadata, JSON.stringify(processDiagnostics)).toMatchObject({
+      root: canonicalRepository,
+    });
     await expect(
       worker.request('current-branch-snapshot', {
         root: repository,

@@ -1,0 +1,20 @@
+{
+  "product": "ChatGPT",
+  "package": "chatgpt",
+  "platform": "linux",
+  "architecture": "amd64",
+  "version": "26.810.41047",
+  "buildNumber": "6570",
+  "electron": "42.3.0",
+  "vite": "8.1.5",
+  "codexCli": "0.148.0-alpha.9",
+  "debBytes": 391786694,
+  "debSha256": "78715fa3cd136ff67070daa76819adaecc5b42e99851559659645dce1fbf2af3",
+  "asarBytes": 280620042,
+  "asarSha256": "75b341a8e19dcf420090a51389bb90688036ca29cfa65847a65932f0aa898278",
+  "codexBinarySha256": "86a4286b2451c69d4c00ad1772fcee5170013f2924e7d257ad2d4f19290c2a20",
+  "repositoryFingerprint": "3BFA0E4AE8B8CC16A2D9BA684A3B4A566C4660E4",
+  "repositoryFilename": "pool/main/c/chatgpt/chatgpt_26.810.41047_amd64.deb",
+  "source": "https://persistent.oaistatic.com/codex-app-prod/linux/deb",
+  "redistributable": false
+}
