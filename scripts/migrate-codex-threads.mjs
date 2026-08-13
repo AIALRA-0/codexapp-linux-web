@@ -277,6 +277,8 @@ async function syncExistingRecord(values) {
     targetDatabase.pragma('wal_checkpoint(TRUNCATE)');
     await restoreDatabaseOwnership(targetDatabasePath, targetDatabaseMetadata);
 
+    const invalidatedCaches = invalidateMigratedThreadCaches(targetHome, threadId);
+
     const finalDigest = await fileDigest(targetRollout);
     if (finalDigest.sha256 !== copiedDigest.sha256 || finalDigest.bytes !== copiedDigest.bytes) {
       throw new Error('final target rollout digest differs from the normalized copy');
@@ -291,6 +293,7 @@ async function syncExistingRecord(values) {
         targetBefore,
         targetAfter: finalDigest,
         normalizedWorkspacePaths,
+        invalidatedCaches,
         preservedTargetFields: [...immutableTargetColumns].sort(),
         updatedColumns,
       })}\n`,
@@ -299,6 +302,48 @@ async function syncExistingRecord(values) {
     sourceDatabase.close();
     targetDatabase.close();
   }
+}
+
+function invalidateMigratedThreadCaches(targetHome, threadId) {
+  const targetRoot = resolve(targetHome, '..');
+  const invalidated = { discoveryResponses: 0, historySnapshots: 0 };
+  const discoveryDatabasePath = join(targetRoot, 'codex-discovery-responses.db');
+  const historyDatabasePath = join(targetRoot, 'codex-history-snapshots.db');
+
+  try {
+    const database = new Database(discoveryDatabasePath, { fileMustExist: true });
+    try {
+      invalidated.discoveryResponses = Number(
+        database
+          .prepare(
+            `DELETE FROM renderer_discovery_cache
+             WHERE method IN ('thread/resume', 'thread/turns/list', 'thread/items/list')`,
+          )
+          .run().changes,
+      );
+    } finally {
+      database.close();
+    }
+  } catch (error) {
+    if (error?.code !== 'SQLITE_CANTOPEN') throw error;
+  }
+
+  try {
+    const database = new Database(historyDatabasePath, { fileMustExist: true });
+    try {
+      invalidated.historySnapshots = Number(
+        database
+          .prepare('DELETE FROM app_server_history_snapshots WHERE thread_id = ?')
+          .run(threadId).changes,
+      );
+    } finally {
+      database.close();
+    }
+  } catch (error) {
+    if (error?.code !== 'SQLITE_CANTOPEN') throw error;
+  }
+
+  return invalidated;
 }
 
 async function normalizeRolloutWorkspacePaths(

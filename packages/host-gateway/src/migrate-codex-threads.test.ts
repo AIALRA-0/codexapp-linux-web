@@ -92,6 +92,26 @@ describe('existing thread synchronization', () => {
     sourceDatabase.close();
     targetDatabase.close();
 
+    const discoveryDatabase = new Database(join(root, 'codex-discovery-responses.db'));
+    discoveryDatabase.exec(`
+      CREATE TABLE renderer_discovery_cache (
+        method TEXT NOT NULL,
+        cache_key TEXT NOT NULL
+      );
+      INSERT INTO renderer_discovery_cache VALUES ('thread/resume', 'stale-thread');
+      INSERT INTO renderer_discovery_cache VALUES ('plugin/list', 'keep-plugin');
+    `);
+    discoveryDatabase.close();
+    const historyDatabase = new Database(join(root, 'codex-history-snapshots.db'));
+    historyDatabase.exec(`
+      CREATE TABLE app_server_history_snapshots (
+        thread_id TEXT NOT NULL
+      );
+      INSERT INTO app_server_history_snapshots VALUES ('thread-1');
+      INSERT INTO app_server_history_snapshots VALUES ('thread-2');
+    `);
+    historyDatabase.close();
+
     const expectedDigest = createHash('sha256')
       .update(await readFile(sourceRollout))
       .digest('hex');
@@ -109,7 +129,11 @@ describe('existing thread synchronization', () => {
       '--backup-root',
       backupRoot,
     ]);
-    expect(JSON.parse(stdout)).toMatchObject({ ok: true, mode: 'sync-existing' });
+    expect(JSON.parse(stdout)).toMatchObject({
+      ok: true,
+      mode: 'sync-existing',
+      invalidatedCaches: { discoveryResponses: 1, historySnapshots: 1 },
+    });
     const normalizedRollout = await readFile(targetRollout, 'utf8');
     const normalizedLines = normalizedRollout
       .trimEnd()
@@ -135,5 +159,20 @@ describe('existing thread synchronization', () => {
       title: 'new title',
     });
     verifiedTarget.close();
+
+    const verifiedDiscovery = new Database(join(root, 'codex-discovery-responses.db'), {
+      readonly: true,
+    });
+    expect(verifiedDiscovery.prepare('SELECT method FROM renderer_discovery_cache').get()).toEqual({
+      method: 'plugin/list',
+    });
+    verifiedDiscovery.close();
+    const verifiedHistory = new Database(join(root, 'codex-history-snapshots.db'), {
+      readonly: true,
+    });
+    expect(
+      verifiedHistory.prepare('SELECT thread_id FROM app_server_history_snapshots').get(),
+    ).toEqual({ thread_id: 'thread-2' });
+    verifiedHistory.close();
   });
 });
