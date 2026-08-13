@@ -9,6 +9,8 @@ import {
   rendererRequestFingerprint,
   rendererRequestShape,
   rendererPersistentResponseCacheKey,
+  rendererThreadResumeId,
+  rendererThreadResumeRefreshShouldReplace,
   rendererNotificationCacheInvalidationPrefixes,
   rendererResponseCanBeCached,
   rendererResponseCacheGenerationForKey,
@@ -180,6 +182,27 @@ describe('renderer request diagnostics', () => {
     );
     expect(threadResumeOverrideFingerprint(first)).not.toBe(
       threadResumeOverrideFingerprint({ ...first, personality: 'concise' }),
+    );
+  });
+
+  it('retains the richest known resume shape for a post-turn cache refresh', () => {
+    const locatorOnly = {
+      threadId: 'thread-1',
+      cwd: '/workspace',
+      excludeTurns: true,
+      initialTurnsPage: { limit: 5, itemsView: 'full', sortDirection: 'desc' },
+    };
+    const officialRendererShape = {
+      ...locatorOnly,
+      developerInstructions: 'current instructions',
+      config: { feature: true },
+    };
+    expect(rendererThreadResumeId(locatorOnly)).toBe('thread-1');
+    expect(rendererThreadResumeId({ cwd: '/workspace' })).toBeNull();
+    expect(rendererThreadResumeRefreshShouldReplace(undefined, locatorOnly)).toBe(true);
+    expect(rendererThreadResumeRefreshShouldReplace(locatorOnly, officialRendererShape)).toBe(true);
+    expect(rendererThreadResumeRefreshShouldReplace(officialRendererShape, locatorOnly)).toBe(
+      false,
     );
   });
 

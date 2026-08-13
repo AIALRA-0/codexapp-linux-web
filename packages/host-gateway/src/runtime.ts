@@ -214,6 +214,21 @@ export function threadResumeOverrideFingerprint(params: unknown): string {
   return rendererRequestFingerprint(overrides);
 }
 
+export function rendererThreadResumeId(params: unknown): string | null {
+  const request = recordOrNull(params);
+  return typeof request?.threadId === 'string' && request.threadId.length > 0
+    ? request.threadId
+    : null;
+}
+
+export function rendererThreadResumeRefreshShouldReplace(
+  existing: unknown,
+  candidate: unknown,
+): boolean {
+  if (existing === undefined) return true;
+  return threadResumeHasMaterialOverrides(candidate) || !threadResumeHasMaterialOverrides(existing);
+}
+
 export function rendererResponseCacheKey(method: string, params: unknown): string {
   if (method !== 'thread/resume') return `${method}:${rendererRequestFingerprint(params)}`;
   const request = recordOrNull(params) ?? {};
@@ -405,6 +420,8 @@ export class UserRuntime extends EventEmitter {
   #rendererResponseInFlight = new Map<string, RendererResponseInFlight>();
   #rendererResponseCacheGeneration = 0;
   #rendererResponseCachePrefixGenerations = new Map<string, number>();
+  #threadResumeRefreshParams = new Map<string, unknown>();
+  #threadResumeRefreshTimers = new Map<string, NodeJS.Timeout>();
   #modelProviderCapabilities: unknown;
   #fetchControllers = new Map<string, AbortController>();
   #browserDownloads = new Map<string, BrowserDownload & { expiresAt: number }>();
@@ -764,6 +781,9 @@ export class UserRuntime extends EventEmitter {
     this.#pendingAppServerRequests.clear();
     this.#rendererResponseCache.clear();
     this.#rendererResponseInFlight.clear();
+    for (const timer of this.#threadResumeRefreshTimers.values()) clearTimeout(timer);
+    this.#threadResumeRefreshTimers.clear();
+    this.#threadResumeRefreshParams.clear();
     await this.#gitWorker?.stop();
     this.#gitWorker = undefined;
     this.#pendingGitRequests.clear();
@@ -901,6 +921,9 @@ export class UserRuntime extends EventEmitter {
           prepared.request.method === 'thread/resume'
             ? threadResumeOverrideFingerprint(prepared.request.params)
             : undefined;
+        if (prepared.request.method === 'thread/resume' && responseCacheTtlMs !== null) {
+          this.#rememberThreadResumeRefreshParams(prepared.request.params);
+        }
         let responseCacheReadEligible = responseCacheKey !== undefined;
         let responseCachePersistentKey: string | undefined;
         let responseCachePrincipalKey: string | undefined;
@@ -1692,6 +1715,13 @@ export class UserRuntime extends EventEmitter {
           : {};
       if (typeof params.threadId === 'string') {
         this.#prewarmedThreads.stopTracking(params.threadId);
+        this.#forgetThreadResumeRefresh(params.threadId);
+      }
+    }
+    if (parsedNotification.method === 'turn/completed') {
+      const params = recordOrNull(parsedNotification.params);
+      if (typeof params?.threadId === 'string') {
+        this.#scheduleThreadResumeRefresh(params.threadId);
       }
     }
     if (
@@ -1813,6 +1843,84 @@ export class UserRuntime extends EventEmitter {
       cacheKey,
       this.#rendererResponseCachePrefixGenerations,
     );
+  }
+
+  #rememberThreadResumeRefreshParams(params: unknown): void {
+    const threadId = rendererThreadResumeId(params);
+    if (threadId === null) return;
+    const existing = this.#threadResumeRefreshParams.get(threadId);
+    if (!rendererThreadResumeRefreshShouldReplace(existing, params)) return;
+    this.#threadResumeRefreshParams.set(threadId, structuredClone(params));
+  }
+
+  #forgetThreadResumeRefresh(threadId: string): void {
+    this.#threadResumeRefreshParams.delete(threadId);
+    const timer = this.#threadResumeRefreshTimers.get(threadId);
+    if (timer !== undefined) clearTimeout(timer);
+    this.#threadResumeRefreshTimers.delete(threadId);
+  }
+
+  #scheduleThreadResumeRefresh(threadId: string): void {
+    if (!this.#threadResumeRefreshParams.has(threadId) || this.#stopping) return;
+    const previous = this.#threadResumeRefreshTimers.get(threadId);
+    if (previous !== undefined) clearTimeout(previous);
+    const timer = setTimeout(() => {
+      this.#threadResumeRefreshTimers.delete(threadId);
+      void this.#refreshThreadResumeCache(threadId);
+    }, 500);
+    timer.unref();
+    this.#threadResumeRefreshTimers.set(threadId, timer);
+  }
+
+  async #refreshThreadResumeCache(threadId: string): Promise<void> {
+    const params = this.#threadResumeRefreshParams.get(threadId);
+    if (params === undefined || this.#stopping || this.#appServer?.ready !== true) return;
+    const method = 'thread/resume';
+    const ttlMs = rendererResponseCacheTtlMs(method, params);
+    if (ttlMs === null) return;
+    const cacheKey = rendererResponseCacheKey(method, params);
+    const generation = this.#rendererResponseCacheGenerationForKey(cacheKey);
+    const principalKey = await this.#readDiscoveryResponseCachePrincipalKey();
+    if (principalKey === undefined) return;
+    const startedAtMs = Date.now();
+    try {
+      const result = await this.#requireAppServer().request(method, params, 300_000);
+      if (
+        !rendererResponseCacheGenerationCanStore(
+          generation,
+          this.#rendererResponseCacheGenerationForKey(cacheKey),
+        ) ||
+        !rendererResponseCanBeCached(method, result)
+      ) {
+        return;
+      }
+      const receivedAtMs = Date.now();
+      this.#rendererResponseCache.set(cacheKey, {
+        expiresAtMs: receivedAtMs + ttlMs,
+        resumeOverrideFingerprint: threadResumeOverrideFingerprint(params),
+        result,
+      });
+      this.#discoveryResponseCacheStore.write(
+        principalKey,
+        rendererPersistentResponseCacheKey(method, params),
+        method,
+        ttlMs,
+        result,
+      );
+      this.#pruneRendererResponseCache(receivedAtMs);
+      this.emit('performance', {
+        kind: 'official-cache-refresh',
+        method,
+        durationMs: receivedAtMs - startedAtMs,
+        threadId,
+      });
+    } catch (error) {
+      this.emit('capability-error', {
+        requestType: 'thread-resume-cache-refresh',
+        threadId,
+        error: error instanceof Error ? error.message : 'thread resume cache refresh failed',
+      });
+    }
   }
 
   async #readDiscoveryResponseCachePrincipalKey(): Promise<string | undefined> {
