@@ -229,6 +229,16 @@ export function rendererThreadResumeRefreshShouldReplace(
   return threadResumeHasMaterialOverrides(candidate) || !threadResumeHasMaterialOverrides(existing);
 }
 
+export function rendererThreadHistoryRefreshId(method: string, params: unknown): string | null {
+  if (method === 'thread/resume') return rendererThreadResumeId(params);
+  if (method !== 'thread/turns/list' && method !== 'thread/items/list') return null;
+  const request = recordOrNull(params);
+  if (request?.cursor !== null && request?.cursor !== undefined) return null;
+  return typeof request?.threadId === 'string' && request.threadId.length > 0
+    ? request.threadId
+    : null;
+}
+
 export function rendererResponseCacheKey(method: string, params: unknown): string {
   if (method !== 'thread/resume') return `${method}:${rendererRequestFingerprint(params)}`;
   const request = recordOrNull(params) ?? {};
@@ -421,6 +431,10 @@ export class UserRuntime extends EventEmitter {
   #rendererResponseCacheGeneration = 0;
   #rendererResponseCachePrefixGenerations = new Map<string, number>();
   #threadResumeRefreshParams = new Map<string, unknown>();
+  #threadLatestPageRefreshParams = new Map<
+    string,
+    Map<'thread/items/list' | 'thread/turns/list', unknown>
+  >();
   #threadResumeRefreshTimers = new Map<string, NodeJS.Timeout>();
   #modelProviderCapabilities: unknown;
   #fetchControllers = new Map<string, AbortController>();
@@ -784,6 +798,7 @@ export class UserRuntime extends EventEmitter {
     for (const timer of this.#threadResumeRefreshTimers.values()) clearTimeout(timer);
     this.#threadResumeRefreshTimers.clear();
     this.#threadResumeRefreshParams.clear();
+    this.#threadLatestPageRefreshParams.clear();
     await this.#gitWorker?.stop();
     this.#gitWorker = undefined;
     this.#pendingGitRequests.clear();
@@ -923,6 +938,16 @@ export class UserRuntime extends EventEmitter {
             : undefined;
         if (prepared.request.method === 'thread/resume' && responseCacheTtlMs !== null) {
           this.#rememberThreadResumeRefreshParams(prepared.request.params);
+        }
+        if (
+          (prepared.request.method === 'thread/turns/list' ||
+            prepared.request.method === 'thread/items/list') &&
+          responseCacheTtlMs !== null
+        ) {
+          this.#rememberThreadLatestPageRefreshParams(
+            prepared.request.method,
+            prepared.request.params,
+          );
         }
         let responseCacheReadEligible = responseCacheKey !== undefined;
         let responseCachePersistentKey: string | undefined;
@@ -1855,13 +1880,20 @@ export class UserRuntime extends EventEmitter {
 
   #forgetThreadResumeRefresh(threadId: string): void {
     this.#threadResumeRefreshParams.delete(threadId);
+    this.#threadLatestPageRefreshParams.delete(threadId);
     const timer = this.#threadResumeRefreshTimers.get(threadId);
     if (timer !== undefined) clearTimeout(timer);
     this.#threadResumeRefreshTimers.delete(threadId);
   }
 
   #scheduleThreadResumeRefresh(threadId: string): void {
-    if (!this.#threadResumeRefreshParams.has(threadId) || this.#stopping) return;
+    if (
+      (!this.#threadResumeRefreshParams.has(threadId) &&
+        !this.#threadLatestPageRefreshParams.has(threadId)) ||
+      this.#stopping
+    ) {
+      return;
+    }
     const previous = this.#threadResumeRefreshTimers.get(threadId);
     if (previous !== undefined) clearTimeout(previous);
     const timer = setTimeout(() => {
@@ -1874,8 +1906,34 @@ export class UserRuntime extends EventEmitter {
 
   async #refreshThreadResumeCache(threadId: string): Promise<void> {
     const params = this.#threadResumeRefreshParams.get(threadId);
-    if (params === undefined || this.#stopping || this.#appServer?.ready !== true) return;
-    const method = 'thread/resume';
+    const latestPages = [...(this.#threadLatestPageRefreshParams.get(threadId)?.entries() ?? [])];
+    if ((params === undefined && latestPages.length === 0) || this.#stopping) return;
+    if (params !== undefined) await this.#refreshThreadReadCache(threadId, 'thread/resume', params);
+    for (const [method, pageParams] of latestPages) {
+      if (this.#stopping) return;
+      await this.#refreshThreadReadCache(threadId, method, pageParams);
+    }
+  }
+
+  #rememberThreadLatestPageRefreshParams(
+    method: 'thread/items/list' | 'thread/turns/list',
+    params: unknown,
+  ): void {
+    const threadId = rendererThreadHistoryRefreshId(method, params);
+    if (threadId === null) return;
+    const pages =
+      this.#threadLatestPageRefreshParams.get(threadId) ??
+      new Map<'thread/items/list' | 'thread/turns/list', unknown>();
+    pages.set(method, structuredClone(params));
+    this.#threadLatestPageRefreshParams.set(threadId, pages);
+  }
+
+  async #refreshThreadReadCache(
+    threadId: string,
+    method: 'thread/items/list' | 'thread/resume' | 'thread/turns/list',
+    params: unknown,
+  ): Promise<void> {
+    if (this.#stopping || this.#appServer?.ready !== true) return;
     const ttlMs = rendererResponseCacheTtlMs(method, params);
     if (ttlMs === null) return;
     const cacheKey = rendererResponseCacheKey(method, params);
@@ -1897,7 +1955,9 @@ export class UserRuntime extends EventEmitter {
       const receivedAtMs = Date.now();
       this.#rendererResponseCache.set(cacheKey, {
         expiresAtMs: receivedAtMs + ttlMs,
-        resumeOverrideFingerprint: threadResumeOverrideFingerprint(params),
+        ...(method === 'thread/resume'
+          ? { resumeOverrideFingerprint: threadResumeOverrideFingerprint(params) }
+          : {}),
         result,
       });
       this.#discoveryResponseCacheStore.write(
@@ -1916,9 +1976,10 @@ export class UserRuntime extends EventEmitter {
       });
     } catch (error) {
       this.emit('capability-error', {
-        requestType: 'thread-resume-cache-refresh',
+        requestType: 'thread-history-cache-refresh',
+        method,
         threadId,
-        error: error instanceof Error ? error.message : 'thread resume cache refresh failed',
+        error: error instanceof Error ? error.message : 'thread history cache refresh failed',
       });
     }
   }

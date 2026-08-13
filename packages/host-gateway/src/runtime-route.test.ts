@@ -10,6 +10,7 @@ import {
   rendererRequestShape,
   rendererPersistentResponseCacheKey,
   rendererThreadResumeId,
+  rendererThreadHistoryRefreshId,
   rendererThreadResumeRefreshShouldReplace,
   rendererNotificationCacheInvalidationPrefixes,
   rendererResponseCanBeCached,
@@ -204,6 +205,19 @@ describe('renderer request diagnostics', () => {
     expect(rendererThreadResumeRefreshShouldReplace(officialRendererShape, locatorOnly)).toBe(
       false,
     );
+    expect(
+      rendererThreadHistoryRefreshId('thread/turns/list', {
+        threadId: 'thread-1',
+        cursor: null,
+      }),
+    ).toBe('thread-1');
+    expect(
+      rendererThreadHistoryRefreshId('thread/turns/list', {
+        threadId: 'thread-1',
+        cursor: 'older-page',
+      }),
+    ).toBeNull();
+    expect(rendererThreadHistoryRefreshId('thread/read', { threadId: 'thread-1' })).toBeNull();
   });
 
   it('invalidates discovery caches for official mutations and account changes', () => {
