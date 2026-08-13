@@ -1,0 +1,974 @@
+{
+  "meta": {
+    "contract_version": "1.0",
+    "title": "CodexApp B 全阶段升级与发布审计",
+    "mode": "deep",
+    "as_of": "2026-08-14",
+    "status": "ready_for_external_gate",
+    "scope": "A 保持不变；在现有 VPS 上为 B 准备 26.803 稳定性修复和官方 Linux 26.810 引擎升级，并定义可恢复发布与真实用户验收门槛。",
+    "exclusions": [
+      "不扩容服务器",
+      "不修改、重启或回滚 A",
+      "不重启 A/B 共享的 Xvfb、WARP 或 OpenAI 出口代理",
+      "未取得 root 和登录浏览器证据前不声称生产 B 已完成"
+    ]
+  },
+  "decision_problem": {
+    "project_classification": "高风险、可回滚的内部生产客户端升级",
+    "risk_level": "high",
+    "decision_owner": "AIALRA 项目所有者；root 发布和最终登录验收仍需外部门禁",
+    "desired_outcome": "B 使用官方界面与最新合格引擎，Trillium Note 可稳定继续，加载、发送、语言、后台执行、Skills、MCP、Apps 和 Plugins 均有真实证据，且 A 不受影响。",
+    "current_state": "B1 与 B2 候选已构建并通过有限自动化和隔离协议测试；生产 B 尚未执行真实状态恢复、root 切换和认证后浏览器验收。",
+    "decision": "是否把 B1、再把 B2 依次送入生产 B，以及每一步必须满足什么停止和回滚条件。",
+    "success_metrics": [
+      "A 全程 readyz=200、无重启、用户任务不受影响",
+      "真实 B 快照在隔离目录恢复后可由新旧 CLI list/read/resume，Trillium 末尾哨兵和文件哈希一致",
+      "登录后热普通对话正文 p95 不超过 3 秒，Trillium 热正文不超过 15 秒、冷正文不超过 60 秒",
+      "发送接受 p95 不超过 1 秒，消息无重复、消失、旧状态或白屏",
+      "en-US、zh-CN、zh-TW、ja-JP、fr-FR 实际翻译并在刷新、重连、新会话后保持",
+      "页面关闭或网络断开后后台任务继续，恢复后事件无 gap 或 duplicate",
+      "必需 Skills、MCP、Apps、Plugins 均完成发现、认证和真实低风险调用",
+      "B 测试窗口没有 OOM、memory.events max 增量或持续 swap-in/out"
+    ],
+    "constraints": [
+      "不升级服务器硬件",
+      "严格复用官方 renderer 和 preload，不自造网页界面",
+      "A 是当前权威对话且必须持续可用",
+      "B 正式数据只保留 Trillium Note，清理必须发生在已验证备份之后",
+      "所有重操作仅在资源门槛为绿时以 nice 15、ionice idle、并发不超过 2 执行"
+    ],
+    "irreversible_actions": [
+      "没有可恢复快照时让新 app-server 写入生产 B 状态",
+      "在未确认目标身份前删除 B 对话或 synthetic user",
+      "在未分离 secret group 前轮换共享密钥或修改 A 依赖"
+    ],
+    "research_budget": {
+      "overall_limit": "持续到候选、回滚和验收矩阵均有可复核证据；遇到 A 活动、资源红线、root 或登录浏览器门禁时停止生产动作。",
+      "parallel_capacity": 3,
+      "paid_or_private_access": [
+        "VPS 本地只读运行状态",
+        "官方签名 Debian 仓库和软件包",
+        "项目 Git 仓库",
+        "当前服务身份不具备 root、B state、B journal 和登录浏览器控制权限"
+      ],
+      "cutoff_policy": "任何门槛失败都降级为继续可逆准备或回滚；不得用自动化测试代替生产证据。"
+    },
+    "reversal_evidence": [
+      "提交 ef5d3ae 提供 B state 快照、代码/环境/状态区分回滚和 A 守卫",
+      "B1 和 B2 使用不同不可变 release ID，可单独切换",
+      "生产切换前必须完成真实 B 快照校验和隔离恢复"
+    ]
+  },
+  "questions": [
+    {
+      "id": "Q1",
+      "question": "候选是否可由唯一 Git 提交和已验证官方包重建？",
+      "critical": true,
+      "internal_probe": "对账不可变 A release、Git 提交、manifest、构建和测试结果。",
+      "external_probe": "核对官方签名仓库、Debian 包、ASAR、CLI 版本和上游协议。",
+      "internal_status": "answered",
+      "external_status": "answered",
+      "internal_source_ids": ["S2", "S3", "S5"],
+      "external_source_ids": ["S9", "S11", "S12"],
+      "internal_gap": "",
+      "external_gap": ""
+    },
+    {
+      "id": "Q2",
+      "question": "B 能否在不影响 A 的前提下切换并在失败时恢复？",
+      "critical": true,
+      "internal_probe": "检查 A/B 路径隔离、后台任务、cgroup 历史、共享依赖和发布脚本。",
+      "external_probe": "核对 app-server 的传输、健康、队列和生命周期合同。",
+      "internal_status": "answered",
+      "external_status": "answered",
+      "internal_source_ids": ["S2", "S4", "S7"],
+      "external_source_ids": ["S9", "S14"],
+      "internal_gap": "",
+      "external_gap": ""
+    },
+    {
+      "id": "Q3",
+      "question": "官方 26.810 能否在不修改官方 GUI 的情况下接入当前 Host？",
+      "critical": true,
+      "internal_probe": "比较 preload、schema、压缩导出映射并运行真实行为测试。",
+      "external_probe": "核对官方 app-server v2、版本特定 schema 和官方签名 Linux 包。",
+      "internal_status": "answered",
+      "external_status": "answered",
+      "internal_source_ids": ["S2", "S5", "S8"],
+      "external_source_ids": ["S9", "S11", "S12"],
+      "internal_gap": "",
+      "external_gap": ""
+    },
+    {
+      "id": "Q4",
+      "question": "现有证据是否足以宣称生产 B 已经稳定完成？",
+      "critical": true,
+      "internal_probe": "比较用户真实观察、过去 Trillium 指标、当前权限和候选测试边界。",
+      "external_probe": "核对上游线程恢复、MCP/插件认证和已报告恢复故障类型。",
+      "internal_status": "answered",
+      "external_status": "answered",
+      "internal_source_ids": ["S1", "S4", "S5", "S6"],
+      "external_source_ids": ["S9", "S10", "S13"],
+      "internal_gap": "",
+      "external_gap": ""
+    },
+    {
+      "id": "Q5",
+      "question": "升级后 Skills、MCP、Apps 和 Plugins 是否有受控的功能保持方案？",
+      "critical": true,
+      "internal_probe": "检查版本化 capability manifest 和 49 个必需 Skill 清单。",
+      "external_probe": "核对官方 Skills、Apps、Plugins、MCP 权限和重新认证要求。",
+      "internal_status": "answered",
+      "external_status": "answered",
+      "internal_source_ids": ["S2", "S5"],
+      "external_source_ids": ["S9", "S10"],
+      "internal_gap": "",
+      "external_gap": ""
+    }
+  ],
+  "source_map": [
+    {
+      "id": "M1I",
+      "question_ids": ["Q1"],
+      "origin": "internal",
+      "channel": "Git 与 immutable release",
+      "target": "A 修复、B1/B2 提交和候选构建",
+      "decision_use": "证明可重现来源",
+      "priority": "high",
+      "access_status": "searched"
+    },
+    {
+      "id": "M1E",
+      "question_ids": ["Q1"],
+      "origin": "external",
+      "channel": "官方签名仓库与协议",
+      "target": "26.810 Debian 包、CLI 和 schema",
+      "decision_use": "证明上游来源与版本",
+      "priority": "high",
+      "access_status": "searched"
+    },
+    {
+      "id": "M2I",
+      "question_ids": ["Q2"],
+      "origin": "internal",
+      "channel": "VPS 只读运维检查",
+      "target": "A/B 服务、cgroup、PSI、共享依赖和发布脚本",
+      "decision_use": "定义发布和回滚硬门槛",
+      "priority": "high",
+      "access_status": "searched"
+    },
+    {
+      "id": "M2E",
+      "question_ids": ["Q2"],
+      "origin": "external",
+      "channel": "OpenAI 官方 GitHub",
+      "target": "app-server 生命周期与远程控制合同",
+      "decision_use": "约束 Host 生命周期实现",
+      "priority": "high",
+      "access_status": "searched"
+    },
+    {
+      "id": "M3I",
+      "question_ids": ["Q3"],
+      "origin": "internal",
+      "channel": "资格校验与行为测试",
+      "target": "26.810 映射、preload、Git、thread 和 CLI",
+      "decision_use": "判断新版兼容性",
+      "priority": "high",
+      "access_status": "searched"
+    },
+    {
+      "id": "M3E",
+      "question_ids": ["Q3"],
+      "origin": "external",
+      "channel": "官方包与 app-server 文档",
+      "target": "版本化 schema、API 和签名二进制",
+      "decision_use": "避免依赖过时记忆",
+      "priority": "high",
+      "access_status": "searched"
+    },
+    {
+      "id": "M4I",
+      "question_ids": ["Q4"],
+      "origin": "internal",
+      "channel": "用户观察与测试边界",
+      "target": "白屏、延迟、语言和缺失的生产验证",
+      "decision_use": "防止过早完成声明",
+      "priority": "high",
+      "access_status": "searched"
+    },
+    {
+      "id": "M4E",
+      "question_ids": ["Q4"],
+      "origin": "external",
+      "channel": "官方文档与公开故障记录",
+      "target": "线程恢复、MCP OAuth 和插件权限",
+      "decision_use": "建立反例和验收项目",
+      "priority": "high",
+      "access_status": "searched"
+    },
+    {
+      "id": "M5I",
+      "question_ids": ["Q5"],
+      "origin": "internal",
+      "channel": "capability manifest",
+      "target": "必需 Skills、MCP、Apps 与 Plugins",
+      "decision_use": "建立 fail-closed 功能门槛",
+      "priority": "high",
+      "access_status": "searched"
+    },
+    {
+      "id": "M5E",
+      "question_ids": ["Q5"],
+      "origin": "external",
+      "channel": "OpenAI 官方帮助与 app-server 文档",
+      "target": "插件、App、权限和 OAuth 生命周期",
+      "decision_use": "定义真实连接测试",
+      "priority": "high",
+      "access_status": "searched"
+    }
+  ],
+  "sources": [
+    {
+      "id": "S1",
+      "origin": "internal",
+      "title": "用户对 A/B 网页的真实观察",
+      "location": "conversation:codexapp-b-upgrade-2026-08-14",
+      "source_type": "behavioral-data",
+      "retrieval_method": "读取本任务中用户逐项报告和截图",
+      "observed_content": "用户报告登录后总加载 30–50 秒、项目和对话分段迟到、点击后标题白屏、发送约半分钟、部分语言无反应和对话状态不一致。",
+      "date": "2026-08-14",
+      "accessed_at": "2026-08-14",
+      "applicability": "直接定义生产体验故障和验收反例",
+      "limitations": "观察不是统一网络条件下的统计样本",
+      "direct": true,
+      "independence_group": "project-owner-observation"
+    },
+    {
+      "id": "S2",
+      "origin": "internal",
+      "title": "B1/B2 可重现 Git 提交",
+      "location": "git:ef5d3ae,67050a8",
+      "source_type": "source-code",
+      "retrieval_method": "检查 Git diff、提交对象、manifest、脚本和测试",
+      "observed_content": "ef5d3ae 恢复 A 稳定性修复并强化发布；67050a8 增加官方 26.810 资格校验、映射、能力清单和安装脚本。",
+      "date": "2026-08-14",
+      "accessed_at": "2026-08-14",
+      "applicability": "候选代码和发布控制的直接来源",
+      "limitations": "提交本身不证明生产切换成功",
+      "direct": true,
+      "independence_group": "codexapp-repository"
+    },
+    {
+      "id": "S3",
+      "origin": "internal",
+      "title": "A 不可变生产 release 对账",
+      "location": "/srv/aialra/releases/codexapp-official-web-host/20260814.0020-a-resume-notification-order",
+      "source_type": "internal-artifact",
+      "retrieval_method": "逐文件 diff 和 SHA-256 对账",
+      "observed_content": "A runtime 中关键恢复、完成后刷新和通知排序修复原先缺失于 Git HEAD，已按 release 恢复。",
+      "date": "2026-08-14",
+      "accessed_at": "2026-08-14",
+      "applicability": "防止 B1 构建丢失 A 已验证修复",
+      "limitations": "A 的生产结果不能直接外推到 B2",
+      "direct": true,
+      "independence_group": "a-production-release"
+    },
+    {
+      "id": "S4",
+      "origin": "internal",
+      "title": "A/B 服务和主机资源只读观测",
+      "location": "tool:local-vps-health-cgroup-psi-2026-08-14",
+      "source_type": "behavioral-data",
+      "retrieval_method": "读取 readyz、background-work、systemd cgroup、vmstat、PSI 和磁盘状态",
+      "observed_content": "A/B 健康入口为毫秒级；B 历史 6 GiB 上限触顶 1553 次且发生大量回收；主机曾出现高 swap 与 PSI，磁盘约 134 GiB 可用。",
+      "date": "2026-08-14",
+      "accessed_at": "2026-08-14",
+      "applicability": "定义 A 优先、资源门槛和 B cgroup 上限",
+      "limitations": "当前身份不能读取 B journal 和生产 state",
+      "direct": true,
+      "independence_group": "vps-runtime"
+    },
+    {
+      "id": "S5",
+      "origin": "internal",
+      "title": "B1、B2 和官方包测试观察",
+      "location": "docs/audits/2026-08-13-b-end-to-end/test-observations.md",
+      "source_type": "test-observation",
+      "retrieval_method": "运行 build、CI、官方 source 合同、audit、shell、systemd 和隔离 CLI 探针",
+      "observed_content": "B1 与 B2 均通过 52 个测试文件、276 个测试，1 个跳过；26.810 签名包和 CLI 0.148 隔离协议探针通过。",
+      "date": "2026-08-14",
+      "accessed_at": "2026-08-14",
+      "applicability": "允许候选进入生产外部门禁",
+      "limitations": "没有读取真实 B state，也没有认证后浏览器",
+      "direct": true,
+      "independence_group": "candidate-test-run"
+    },
+    {
+      "id": "S6",
+      "origin": "internal",
+      "title": "独立证据与可重现性审查",
+      "location": "docs/audits/2026-08-13-b-end-to-end/perspective-evidence.md",
+      "source_type": "agent-artifact",
+      "retrieval_method": "隔离子代理检查仓库、release、测试、旧验收和权限边界",
+      "observed_content": "建议 reframe；先恢复可重现源码和真实数据回滚能力，再依次发布 B1/B2。",
+      "date": "2026-08-14",
+      "accessed_at": "2026-08-14",
+      "applicability": "独立挑战完成声明和证据覆盖",
+      "limitations": "不是 root 操作或真实登录验收",
+      "direct": true,
+      "independence_group": "subagent-evidence-audit"
+    },
+    {
+      "id": "S7",
+      "origin": "internal",
+      "title": "独立运维与安全审查",
+      "location": "docs/audits/2026-08-13-b-end-to-end/perspective-operations.md",
+      "source_type": "agent-artifact",
+      "retrieval_method": "隔离子代理检查 systemd、网络、认证、cgroup、PSI、备份和权限",
+      "observed_content": "A 必须优先；定义资源硬门槛、B 8 GiB/2 GiB swap 边界、B 专用 secret group 和 root 恢复顺序。",
+      "date": "2026-08-14",
+      "accessed_at": "2026-08-14",
+      "applicability": "发布安全和资源隔离",
+      "limitations": "没有 root 和 B 生产 state 访问权",
+      "direct": true,
+      "independence_group": "subagent-ops-security"
+    },
+    {
+      "id": "S8",
+      "origin": "internal",
+      "title": "独立上游兼容性审查",
+      "location": "docs/audits/2026-08-13-b-end-to-end/perspective-upstream.md",
+      "source_type": "agent-artifact",
+      "retrieval_method": "隔离子代理比较官方 26.803/26.810 包、preload、schema 和压缩导出",
+      "observed_content": "preload 保持稳定但压缩私有映射变化；26.810 需要版本限定映射和逐行为测试。",
+      "date": "2026-08-14",
+      "accessed_at": "2026-08-14",
+      "applicability": "决定 B2 技术路线和回归边界",
+      "limitations": "私有压缩导出仍可能随未来版本变化",
+      "direct": true,
+      "independence_group": "subagent-upstream-compat"
+    },
+    {
+      "id": "S9",
+      "origin": "external",
+      "title": "OpenAI Codex app-server 官方 README",
+      "location": "https://github.com/openai/codex/blob/main/codex-rs/app-server/README.md",
+      "source_type": "official-doc",
+      "retrieval_method": "打开 OpenAI 官方仓库原始说明",
+      "observed_content": "文档定义 initialize、thread/start/list/read/resume/fork、turn 通知、Skills、Apps、MCP OAuth、版本化 schema、backpressure 和健康端点。",
+      "date": "2026-08-14",
+      "accessed_at": "2026-08-14",
+      "applicability": "Host 与新版 CLI 的协议合同",
+      "limitations": "WebSocket 传输仍标记为 experimental/unsupported；私有桌面导出不在此合同内",
+      "direct": true,
+      "independence_group": "openai-upstream"
+    },
+    {
+      "id": "S10",
+      "origin": "external",
+      "title": "OpenAI Codex Plugins 官方帮助",
+      "location": "https://help.openai.com/en/articles/20001256-plugins-in-codex/",
+      "source_type": "official-doc",
+      "retrieval_method": "打开 OpenAI 官方帮助中心",
+      "observed_content": "插件可包含 Skills、Apps 和模板；真实 App 仍受角色、源系统权限、OAuth 和动作确认控制，启用后应由测试用户执行低风险调用。",
+      "date": "2026-08-14",
+      "accessed_at": "2026-08-14",
+      "applicability": "定义插件与 MCP 不能只检查文件数量的验收要求",
+      "limitations": "不描述本项目自托管 Host 的实现细节",
+      "direct": true,
+      "independence_group": "openai-upstream"
+    },
+    {
+      "id": "S11",
+      "origin": "external",
+      "title": "OpenAI Linux signed APT repository metadata",
+      "location": "https://packages.openai.com/",
+      "source_type": "product-page",
+      "retrieval_method": "校验签名 InRelease 和 Packages 中 26.810.41047 记录",
+      "observed_content": "Debian 包版本、大小、SHA-256 与下载文件一致，签名密钥指纹为 3BFA0E4AE8B8CC16A2D9BA684A3B4A566C4660E4。",
+      "date": "2026-08-14",
+      "accessed_at": "2026-08-14",
+      "applicability": "证明 B2 官方 Linux 包来源与完整性",
+      "limitations": "签名不证明与自托管 Host 兼容",
+      "direct": true,
+      "independence_group": "openai-package-repository"
+    },
+    {
+      "id": "S12",
+      "origin": "external",
+      "title": "官方 ChatGPT Linux 26.810.41047 软件包",
+      "location": "tool:/tmp/codex-linux-package.djYQME/chatgpt_amd64.deb",
+      "source_type": "source-code",
+      "retrieval_method": "下载、校验签名元数据、解包并运行资格和 CLI 探针",
+      "observed_content": "包 SHA-256 为 78715fa3…af3，ASAR 为 75b341a8…278，内置 CLI 为 0.148.0-alpha.9，preload 与 26.803 相同。",
+      "date": "2026-08-14",
+      "accessed_at": "2026-08-14",
+      "applicability": "B2 的具体上游二进制输入",
+      "limitations": "二进制和压缩代码需要版本限定适配测试",
+      "direct": true,
+      "independence_group": "openai-package-repository"
+    },
+    {
+      "id": "S13",
+      "origin": "external",
+      "title": "OpenAI Codex 官方仓库中的线程恢复故障反例",
+      "location": "https://github.com/openai/codex/issues/30916",
+      "source_type": "primary-research",
+      "retrieval_method": "读取公开问题中的复现条件、预期和实际行为",
+      "observed_content": "已持久化且健康的线程可能在运行中出现后无法 resume，直到重启；说明 list/index 正常不等于 renderer 恢复正确。",
+      "date": "2026-07-02",
+      "accessed_at": "2026-08-14",
+      "applicability": "为白屏和只显示旧消息设计恢复验收反例",
+      "limitations": "公开问题版本和部署环境与本项目不同",
+      "direct": true,
+      "independence_group": "openai-github-user-report"
+    },
+    {
+      "id": "S14",
+      "origin": "external",
+      "title": "OpenAI Codex app-server daemon 官方 README",
+      "location": "https://github.com/openai/codex/blob/main/codex-rs/app-server-daemon/README.md",
+      "source_type": "official-doc",
+      "retrieval_method": "打开 OpenAI 官方仓库远程运行说明",
+      "observed_content": "daemon 面向通过 SSH 的远程 Codex，使用独立进程、pidfile 和更新循环；生命周期合同仍是 experimental。",
+      "date": "2026-08-14",
+      "accessed_at": "2026-08-14",
+      "applicability": "比较官方远程后台运行机制与本项目 Host 生命周期",
+      "limitations": "不能直接提供官方桌面 GUI 的网页分发",
+      "direct": true,
+      "independence_group": "openai-upstream"
+    },
+    {
+      "id": "SL-problem",
+      "origin": "external",
+      "title": "问题分支查询记录",
+      "location": "https://github.com/openai/codex/issues/30916",
+      "source_type": "search-log",
+      "retrieval_method": "搜索 OpenAI 官方仓库中的 desktop thread resume loading 故障",
+      "observed_content": "找到线程存在但页面无法恢复的相似失败模式，没有找到可直接替换本项目网页 Host 的官方成品。",
+      "date": "2026-08-14",
+      "accessed_at": "2026-08-14",
+      "applicability": "问题定义和反例枚举",
+      "limitations": "只覆盖官方公开仓库和可索引页面",
+      "direct": true,
+      "independence_group": "search-problem"
+    },
+    {
+      "id": "SL-mechanism",
+      "origin": "external",
+      "title": "机制分支查询记录",
+      "location": "https://github.com/openai/codex/blob/main/codex-rs/app-server/README.md",
+      "source_type": "search-log",
+      "retrieval_method": "搜索并打开 app-server 生命周期、线程和通知机制",
+      "observed_content": "确认 v2 线程/turn/通知、版本化 schema、OAuth 和 backpressure 是主要机制。",
+      "date": "2026-08-14",
+      "accessed_at": "2026-08-14",
+      "applicability": "机制合同",
+      "limitations": "不覆盖桌面私有压缩导出",
+      "direct": true,
+      "independence_group": "search-mechanism"
+    },
+    {
+      "id": "SL-product",
+      "origin": "external",
+      "title": "产品分支查询记录",
+      "location": "https://help.openai.com/en/articles/20001256-plugins-in-codex/",
+      "source_type": "search-log",
+      "retrieval_method": "搜索并打开 Codex Plugins、Apps 和 Skills 的官方产品说明",
+      "observed_content": "确认能力可见性、权限和 OAuth 是独立层，安装文件存在不能证明真实调用可用。",
+      "date": "2026-08-14",
+      "accessed_at": "2026-08-14",
+      "applicability": "功能完整性验收",
+      "limitations": "不包含本项目部署说明",
+      "direct": true,
+      "independence_group": "search-product"
+    },
+    {
+      "id": "SL-research",
+      "origin": "external",
+      "title": "研究分支查询记录",
+      "location": "https://github.com/openai/codex/blob/main/codex-rs/AGENTS.md",
+      "source_type": "search-log",
+      "retrieval_method": "沿官方 app-server 文档引用检查协议开发和 schema 回归规则",
+      "observed_content": "官方要求 v2 命名、可选字段兼容、生成 schema 并运行协议测试。",
+      "date": "2026-08-14",
+      "accessed_at": "2026-08-14",
+      "applicability": "协议兼容测试方法",
+      "limitations": "开发规范不等于生产验收",
+      "direct": true,
+      "independence_group": "search-research"
+    },
+    {
+      "id": "SL-adjacent",
+      "origin": "external",
+      "title": "相邻方案分支查询记录",
+      "location": "https://github.com/openai/codex/blob/main/codex-rs/app-server-daemon/README.md",
+      "source_type": "search-log",
+      "retrieval_method": "搜索官方远程 Codex 和 detached app-server 生命周期方案",
+      "observed_content": "找到官方 experimental daemon 作为相邻后台运行机制，但它不提供官方桌面 GUI 的网页复现。",
+      "date": "2026-08-14",
+      "accessed_at": "2026-08-14",
+      "applicability": "判断是否可放弃自托管 Host",
+      "limitations": "daemon 合同仍实验性",
+      "direct": true,
+      "independence_group": "search-adjacent"
+    },
+    {
+      "id": "SL-failure",
+      "origin": "external",
+      "title": "失败分支查询记录",
+      "location": "https://github.com/openai/codex/issues/29279",
+      "source_type": "search-log",
+      "retrieval_method": "搜索官方仓库中的 MCP OAuth 与活动线程失效模式",
+      "observed_content": "找到 OAuth 成功后现有线程仍要求授权的失败模式，支持把重连后的同线程调用列为硬验收项。",
+      "date": "2026-08-14",
+      "accessed_at": "2026-08-14",
+      "applicability": "MCP 和线程状态失败模式",
+      "limitations": "公开问题未必与 Linux 26.810 相同",
+      "direct": true,
+      "independence_group": "search-failure"
+    },
+    {
+      "id": "SL-code",
+      "origin": "external",
+      "title": "代码分支查询记录",
+      "location": "https://github.com/openai/codex/blob/main/codex-rs/docs/codex_mcp_interface.md",
+      "source_type": "search-log",
+      "retrieval_method": "搜索官方源码中的 thread、turn、approval 和 auth 接口",
+      "observed_content": "确认 v2 接口、通知和 legacy compatibility 的边界。",
+      "date": "2026-08-14",
+      "accessed_at": "2026-08-14",
+      "applicability": "代码接口对照",
+      "limitations": "不覆盖闭源桌面 renderer",
+      "direct": true,
+      "independence_group": "search-code"
+    }
+  ],
+  "claims": [
+    {
+      "id": "C1",
+      "statement": "B1 和 B2 现在可分别由 ef5d3ae 与 67050a8 重建。",
+      "kind": "fact",
+      "impact": "high",
+      "confidence": "high",
+      "support_source_ids": ["S2", "S3", "S5"],
+      "contradict_source_ids": [],
+      "falsifier": "clean checkout 无法用对应 qualified official source 通过同一 CI。"
+    },
+    {
+      "id": "C2",
+      "statement": "26.810 的官方 GUI preload 合同未变，但压缩私有导出映射已经变化。",
+      "kind": "fact",
+      "impact": "high",
+      "confidence": "high",
+      "support_source_ids": ["S5", "S8", "S12"],
+      "contradict_source_ids": [],
+      "falsifier": "逐哈希或行为探针显示 preload 变化，或旧映射在 26.810 全部行为等价。"
+    },
+    {
+      "id": "C3",
+      "statement": "现阶段只能说 B1/B2 候选达到生产门禁，不能说生产 B 已完成。",
+      "kind": "inference",
+      "impact": "high",
+      "confidence": "high",
+      "support_source_ids": ["S1", "S4", "S5", "S6", "S13"],
+      "contradict_source_ids": [],
+      "falsifier": "取得真实 B 状态恢复、root 切换、认证浏览器、功能和性能矩阵的完整通过证据。"
+    },
+    {
+      "id": "C4",
+      "statement": "B 的主要当前资源风险是内存回收和 swap 抖动，不是磁盘容量。",
+      "kind": "fact",
+      "impact": "high",
+      "confidence": "high",
+      "support_source_ids": ["S4", "S7"],
+      "contradict_source_ids": [],
+      "falsifier": "新采样显示内存和 swap 长期为绿而磁盘低于发布所需安全余量。"
+    },
+    {
+      "id": "C5",
+      "statement": "程序回滚不足以覆盖新版 app-server 对状态的潜在写入，发布前必须验证生产状态恢复。",
+      "kind": "inference",
+      "impact": "high",
+      "confidence": "high",
+      "support_source_ids": ["S2", "S6", "S9"],
+      "contradict_source_ids": [],
+      "falsifier": "证明新版完全不写状态，或代码切回后旧 CLI 对实际写入状态全量读写等价。"
+    },
+    {
+      "id": "C6",
+      "statement": "插件、Skills 和 MCP 的文件或清单存在不能证明真实功能可用。",
+      "kind": "fact",
+      "impact": "high",
+      "confidence": "high",
+      "support_source_ids": ["S5", "S9", "S10"],
+      "contradict_source_ids": [],
+      "falsifier": "官方合同明确安装即绕过权限/OAuth，且生产 B 所有调用无需运行时连接。"
+    },
+    {
+      "id": "C7",
+      "statement": "在不扩容前提下，B 可以先尝试受控 8 GiB 上限和低并发，但结果必须由联合资源测试决定。",
+      "kind": "hypothesis",
+      "impact": "high",
+      "confidence": "medium",
+      "support_source_ids": ["S4", "S7"],
+      "contradict_source_ids": [],
+      "falsifier": "B1 或 B2 的 Trillium 测试产生 memory.events max 增量、持续 swap-in/out 或拖慢 A。"
+    }
+  ],
+  "assumptions": [
+    {
+      "id": "A1",
+      "statement": "现有 23 GiB RAM 在 A 优先、B 低并发和 8 GiB 上限下足以承载单用户 B。",
+      "critical": true,
+      "status": "uncertain",
+      "decision_impact": "若不成立，在不扩容约束下必须降低 B 并发或暂停 B2。",
+      "falsifier": "生产副本测试中出现持续 PSI/swap、B memory.max 增量或 A 延迟恶化。",
+      "support_source_ids": ["S4", "S7"],
+      "contradict_source_ids": ["S4"]
+    },
+    {
+      "id": "A2",
+      "statement": "26.810 对真实 B 的 SQLite、JSONL 和配置写入可通过切换前快照完整回滚。",
+      "critical": true,
+      "status": "untested",
+      "decision_impact": "若不成立，禁止 B2 写入生产 B。",
+      "falsifier": "隔离恢复后旧 CLI 不能 list/read/resume 或 Trillium 哨兵/哈希不一致。",
+      "support_source_ids": ["S2", "S5"],
+      "contradict_source_ids": []
+    },
+    {
+      "id": "A3",
+      "statement": "生产 B 中需要保留的唯一真实项目是 Trillium Note，其余可在备份后清理。",
+      "critical": true,
+      "status": "untested",
+      "decision_impact": "若身份或线程清单不符，任何删除都必须暂停。",
+      "falsifier": "root 只读盘点发现其他仅存在于 B 的真实工作或无法唯一识别 Trillium。",
+      "support_source_ids": ["S1"],
+      "contradict_source_ids": []
+    },
+    {
+      "id": "A4",
+      "statement": "官方压缩私有导出可以跨版本直接复用。",
+      "critical": true,
+      "status": "contradicted",
+      "decision_impact": "每个官方版本必须独立资格校验和行为测试。",
+      "falsifier": "未来多个版本的逐导出语义和行为探针长期保持完全相同。",
+      "support_source_ids": [],
+      "contradict_source_ids": ["S5", "S8", "S12"]
+    }
+  ],
+  "search_branches": [
+    { "name": "adjacent", "status": "executed", "reason": "", "round_ids": ["R-adjacent"] },
+    { "name": "code", "status": "executed", "reason": "", "round_ids": ["R-code"] },
+    { "name": "failure", "status": "executed", "reason": "", "round_ids": ["R-failure"] },
+    { "name": "mechanism", "status": "executed", "reason": "", "round_ids": ["R-mechanism"] },
+    {
+      "name": "patent",
+      "status": "not_applicable",
+      "reason": "本轮是内部部署兼容和可靠性决定，不提出可专利性、自由实施或独创性主张。",
+      "round_ids": []
+    },
+    { "name": "problem", "status": "executed", "reason": "", "round_ids": ["R-problem"] },
+    { "name": "product", "status": "executed", "reason": "", "round_ids": ["R-product"] },
+    { "name": "research", "status": "executed", "reason": "", "round_ids": ["R-research"] }
+  ],
+  "search_rounds": [
+    {
+      "id": "R-problem",
+      "branch": "problem",
+      "query": "site:github.com/openai/codex desktop thread resume endless loading",
+      "channel": "OpenAI GitHub issue search",
+      "date": "2026-08-14",
+      "discovery_mode": "failure-signature",
+      "new_candidate_ids": [],
+      "evidence_source_ids": ["S13", "SL-problem"],
+      "search_log_source_id": "SL-problem",
+      "new_high_similarity_count": 0,
+      "new_decision_evidence_count": 0
+    },
+    {
+      "id": "R-mechanism",
+      "branch": "mechanism",
+      "query": "site:github.com/openai/codex app-server protocol thread resume notifications backpressure",
+      "channel": "OpenAI official source documentation",
+      "date": "2026-08-14",
+      "discovery_mode": "protocol-trace",
+      "new_candidate_ids": [],
+      "evidence_source_ids": ["S9", "SL-mechanism"],
+      "search_log_source_id": "SL-mechanism",
+      "new_high_similarity_count": 0,
+      "new_decision_evidence_count": 3
+    },
+    {
+      "id": "R-product",
+      "branch": "product",
+      "query": "site:openai.com Codex plugins apps skills MCP permissions",
+      "channel": "OpenAI Help Center search",
+      "date": "2026-08-14",
+      "discovery_mode": "product-documentation",
+      "new_candidate_ids": [],
+      "evidence_source_ids": ["S10", "SL-product"],
+      "search_log_source_id": "SL-product",
+      "new_high_similarity_count": 0,
+      "new_decision_evidence_count": 2
+    },
+    {
+      "id": "R-research",
+      "branch": "research",
+      "query": "OpenAI Codex app-server v2 schema compatibility testing guidance",
+      "channel": "official repository citation chain",
+      "date": "2026-08-14",
+      "discovery_mode": "citation-chain",
+      "new_candidate_ids": [],
+      "evidence_source_ids": ["S9", "SL-research"],
+      "search_log_source_id": "SL-research",
+      "new_high_similarity_count": 0,
+      "new_decision_evidence_count": 1
+    },
+    {
+      "id": "R-adjacent",
+      "branch": "adjacent",
+      "query": "site:github.com/openai/codex remote app-server daemon SSH web client",
+      "channel": "OpenAI official repository search",
+      "date": "2026-08-14",
+      "discovery_mode": "adjacent-architecture",
+      "new_candidate_ids": ["K4"],
+      "evidence_source_ids": ["S14", "SL-adjacent"],
+      "search_log_source_id": "SL-adjacent",
+      "new_high_similarity_count": 0,
+      "new_decision_evidence_count": 0
+    },
+    {
+      "id": "R-failure",
+      "branch": "failure",
+      "query": "site:github.com/openai/codex MCP OAuth succeeds thread still authorization required",
+      "channel": "OpenAI GitHub failure search",
+      "date": "2026-08-14",
+      "discovery_mode": "adversarial-failure-search",
+      "new_candidate_ids": [],
+      "evidence_source_ids": ["S9", "SL-failure"],
+      "search_log_source_id": "SL-failure",
+      "new_high_similarity_count": 0,
+      "new_decision_evidence_count": 2
+    },
+    {
+      "id": "R-code",
+      "branch": "code",
+      "query": "site:github.com/openai/codex codex_mcp_interface thread turn approval auth",
+      "channel": "OpenAI official code search",
+      "date": "2026-08-14",
+      "discovery_mode": "source-code-trace",
+      "new_candidate_ids": [],
+      "evidence_source_ids": ["S9", "SL-code"],
+      "search_log_source_id": "SL-code",
+      "new_high_similarity_count": 0,
+      "new_decision_evidence_count": 1
+    }
+  ],
+  "candidates": [
+    {
+      "id": "K1",
+      "name": "继续使用当前 B 20260813.0132",
+      "class": "exact",
+      "verified": true,
+      "source_ids": ["S1", "S4"]
+    },
+    {
+      "id": "K2",
+      "name": "B1：26.803 引擎加 A 已验证稳定性修复",
+      "class": "near",
+      "verified": true,
+      "source_ids": ["S2", "S3", "S5"]
+    },
+    {
+      "id": "K3",
+      "name": "B2：官方 Linux 26.810 加版本限定薄适配",
+      "class": "near",
+      "verified": true,
+      "source_ids": ["S2", "S5", "S8", "S11", "S12"]
+    },
+    {
+      "id": "K4",
+      "name": "官方 experimental app-server daemon 远程运行",
+      "class": "adjacent",
+      "verified": true,
+      "source_ids": ["S14"]
+    }
+  ],
+  "novelty": {
+    "applicable": true,
+    "applicability_reason": "需要判断是否已有官方成品能同时满足官方桌面 GUI 网页化、服务器后台执行和现有对话状态要求。",
+    "assessment": "differentiated-combination",
+    "stop_reason": "saturated",
+    "saturation_round_ids": ["R-problem", "R-adjacent"],
+    "languages": ["English", "Chinese"],
+    "regions": [
+      "OpenAI official global documentation",
+      "OpenAI public GitHub repository",
+      "OpenAI signed Linux package repository"
+    ],
+    "access_gaps": [
+      {
+        "resource": "OpenAI 闭源桌面内部设计和未公开测试",
+        "impact": "无法证明私有压缩导出具有未来稳定性，因此每版继续 fail-closed 资格校验。",
+        "critical": false
+      },
+      {
+        "resource": "付费或私有市场数据库",
+        "impact": "本决定不包含市场唯一性或专利结论，因此不影响当前发布路线。",
+        "critical": false
+      }
+    ],
+    "scope_statement": "截至 2026-08-14，仅在 OpenAI 官方文档、官方 GitHub、公开故障记录和签名 Linux 包范围内搜索。未找到同时提供官方桌面 GUI 网页分发和本项目状态/认证要求的官方成品；不外推为开放世界唯一性结论。"
+  },
+  "perspectives": [
+    {
+      "id": "P1",
+      "lens": "证据、可重现性和反完成声明",
+      "producer": "subagent:evidence_audit",
+      "producer_type": "subagent",
+      "producer_reference": "/root/evidence_audit",
+      "independent": true,
+      "context_isolated": true,
+      "provenance_source_id": "S6",
+      "source_ids": ["S2", "S3", "S4", "S5", "S6"],
+      "findings": [
+        "先恢复 A release 到 Git 再构建 B1",
+        "程序回滚必须增加状态恢复",
+        "旧验收不能覆盖 26.810"
+      ],
+      "limitations": "没有 root 和登录浏览器权限"
+    },
+    {
+      "id": "P2",
+      "lens": "运维、安全、资源和最坏失败",
+      "producer": "subagent:ops_security",
+      "producer_type": "subagent",
+      "producer_reference": "/root/ops_security",
+      "independent": true,
+      "context_isolated": true,
+      "provenance_source_id": "S7",
+      "source_ids": ["S4", "S7"],
+      "findings": [
+        "A 优先并禁止共享依赖重启",
+        "B 采用 8 GiB/2 GiB swap 受控边界",
+        "密钥改为 B 专用 group"
+      ],
+      "limitations": "不能执行 root 维护和读取 B state"
+    },
+    {
+      "id": "P3",
+      "lens": "上游包、协议和压缩映射兼容",
+      "producer": "subagent:upstream_compat",
+      "producer_type": "subagent",
+      "producer_reference": "/root/upstream_compat",
+      "independent": true,
+      "context_isolated": true,
+      "provenance_source_id": "S8",
+      "source_ids": ["S5", "S8", "S9", "S12"],
+      "findings": [
+        "资格失败来自路径排序而非内容",
+        "preload 不变但私有导出变化",
+        "必须采用 26.810 专属映射和行为测试"
+      ],
+      "limitations": "不能证明未来官方版本继续兼容"
+    }
+  ],
+  "real_world_validations": [
+    {
+      "id": "V1",
+      "role": "项目所有者和真实网页用户",
+      "participant_reference": "AIALRA 项目所有者",
+      "method": "在真实 A/B 域名登录、打开项目/对话、切换语言和发送消息",
+      "conducted_at": "2026-08-14",
+      "outcome": "观察到 30–50 秒首载、分段迟到、白屏、发送延迟和语言 no-op，证明当前生产体验未达标。",
+      "limitations": "没有统一网络条件和自动计时轨迹",
+      "status": "completed",
+      "evidence_source_ids": ["S1"]
+    },
+    {
+      "id": "V2",
+      "role": "候选集成测试执行者",
+      "participant_reference": "本轮隔离构建环境",
+      "method": "对 B1/B2 运行 build、CI、官方 source 合同、audit 和 CLI 协议探针",
+      "conducted_at": "2026-08-14",
+      "outcome": "两候选达到进入生产门禁的代码与协议基线。",
+      "limitations": "不是生产 B state 或认证浏览器",
+      "status": "completed",
+      "evidence_source_ids": ["S5"]
+    },
+    {
+      "id": "V3",
+      "role": "root 维护执行者",
+      "participant_reference": "VPS root 控制面",
+      "method": "静止快照真实 B、隔离恢复、新旧 CLI 回读和校验 Trillium 哨兵",
+      "conducted_at": "2026-08-14",
+      "outcome": "等待 root 外部门禁。",
+      "limitations": "当前服务身份无权限",
+      "status": "planned",
+      "evidence_source_ids": ["S2", "S7"]
+    },
+    {
+      "id": "V4",
+      "role": "真实认证用户",
+      "participant_reference": "Authentik 后的项目所有者会话",
+      "method": "对 B1 和 B2 各执行全功能、性能、断网、关闭页面、MCP 和五语言矩阵",
+      "conducted_at": "2026-08-14",
+      "outcome": "等待生产候选和可控登录浏览器。",
+      "limitations": "当前无可调用浏览器控制后端",
+      "status": "planned",
+      "evidence_source_ids": ["S1", "S5"]
+    }
+  ],
+  "alignment_questions": [
+    {
+      "id": "L1",
+      "question": "是否允许自主执行全部 B 阶段并调整配置？",
+      "decision_changing": true,
+      "status": "answered",
+      "answer": "用户明确允许。"
+    },
+    {
+      "id": "L2",
+      "question": "是否允许升级服务器硬件？",
+      "decision_changing": true,
+      "status": "answered",
+      "answer": "用户明确要求不考虑服务器升级。"
+    },
+    {
+      "id": "L3",
+      "question": "是否允许修改 A 或共享依赖？",
+      "decision_changing": true,
+      "status": "defaulted",
+      "default_value": "不允许；A 保持不变，B 的任何动作不得重启共享 Xvfb、WARP 或 OpenAI 出口代理。"
+    },
+    {
+      "id": "L4",
+      "question": "是否可以在没有真实状态恢复和登录浏览器证据时宣布完成？",
+      "decision_changing": true,
+      "status": "defaulted",
+      "default_value": "不可以；继续准备，但生产发布停在 root 和真实浏览器门禁。"
+    }
+  ],
+  "recommendation": {
+    "verdict": "reframe",
+    "action": "先由 root 在不触碰 A 的维护窗口完成 B 真实快照和隔离恢复，再依次灰度 B1、运行全矩阵；B1 达标后重新快照并灰度 B2。当前不直接把 B2 写入生产 state，也不宣布完成。",
+    "rationale": "候选代码、官方包和协议已达到可复现基线，但用户已证明当前生产网页存在核心故障；B 资源历史、真实数据不可见和登录浏览器缺失意味着直接切换无法安全验证。",
+    "strongest_counterevidence": "B1/B2 自动化均通过且入口健康很快，但这与用户在认证后看到的白屏、延迟和状态错误并不矛盾；自动化尚未覆盖真实 B state 和完整浏览器路径。",
+    "minimum_test": "真实 B 静止快照可隔离恢复并由新旧 CLI 回读；随后 B1 的 Authentik→Trillium→发送→完成→刷新→关闭页面续跑、五语言和必需 MCP/Skills/Apps/Plugins 全部通过，同时 A 与资源指标保持为绿。",
+    "failure_response": "停止 B、恢复代码/环境；若状态已被候选写入则恢复切换前状态快照。保留 A，不重启共享依赖，记录失败阶段和指标后回到上一候选。",
+    "reversal_condition": "任一白屏、消息缺失/重复/消失、语言 no-op、后台任务中止、B memory.events max 增量、持续 swap-in/out、A 健康或延迟恶化，立即阻止晋级或回滚。",
+    "support_source_ids": ["S2", "S3", "S5", "S6", "S7", "S8", "S9", "S11", "S12"],
+    "counter_source_ids": ["S1", "S4", "S13"]
+  },
+  "review_triggers": [
+    "root 完成真实 B 快照和隔离恢复",
+    "B1 全矩阵验收完成或出现首个硬失败",
+    "B2 第一次对生产状态写入前",
+    "A activeTurnCount 大于 1、readyz 非 200 或重启计数变化",
+    "B memory.events max 增量、持续 swap-in/out 或 PSI 超过门槛",
+    "官方 Linux 包、CLI、preload、schema 或压缩导出发生版本变化"
+  ]
+}
