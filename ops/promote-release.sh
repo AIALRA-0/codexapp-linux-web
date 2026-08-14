@@ -68,7 +68,11 @@ trap rollback EXIT
 
 codexapp_prepare_state_snapshot "$release_id"
 snapshot_root="$CODEXAPP_PREPARED_SNAPSHOT_ROOT"
-codexapp_assert_controller_safe
+# The low-priority pre-copy can raise the 60-second I/O PSI average by itself.
+# Wait for the shared host to settle again before entering the brief stopped-
+# service final sync instead of either bypassing the gate or failing every
+# release with a production-sized state tree.
+codexapp_wait_for_controller_safe
 codexapp_assert_no_background_work
 systemctl stop "$codexapp_service_name"
 switched=1
