@@ -50,6 +50,7 @@ fi
 rsync -a \
   --exclude='/.git/' \
   --exclude='/.git' \
+  --exclude='/node_modules/' \
   --exclude='/.official/' \
   --exclude='/artifacts/' \
   --exclude='/coverage/' \
@@ -62,7 +63,7 @@ rsync -a \
 # prepared with mktemp are intentionally private, so normalize only the release
 # root before making the completed tree immutable.
 chmod 0755 "$incomplete"
-for forbidden_path in .git .official artifacts coverage runtime secrets state; do
+for forbidden_path in .git .official artifacts coverage node_modules runtime secrets state; do
   if [[ -e "$incomplete/$forbidden_path" || -L "$incomplete/$forbidden_path" ]]; then
     echo "forbidden build input entered the release: $forbidden_path" >&2
     exit 1
@@ -89,6 +90,7 @@ done
       and .preloadSourceSha256 == $source[0].preload.sourceSha256
     ' \
     manifests/current-official.json >/dev/null
+  npm ci --include=dev
   npm run ci
   OFFICIAL_TEST_SOURCE_ROOT="$qualified_official_source_root" npm test
   OFFICIAL_SOURCE_ROOT="$qualified_official_source_root" npm run contracts:check
