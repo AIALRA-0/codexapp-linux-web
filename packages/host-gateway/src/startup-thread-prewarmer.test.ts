@@ -4,13 +4,16 @@ import { StartupThreadPrewarmer } from './startup-thread-prewarmer.js';
 
 describe('startup thread prewarmer', () => {
   it('resumes only the configured most recent thread through the official App Server', async () => {
-    const request = vi.fn().mockResolvedValueOnce({
-      thread: {
-        cwd: '/workspace/recent',
-        path: '/rollouts/recent.jsonl',
-        status: { type: 'idle' },
-      },
-    });
+    const request = vi
+      .fn()
+      .mockResolvedValueOnce({
+        thread: {
+          cwd: '/workspace/recent',
+          path: '/rollouts/recent.jsonl',
+          status: { type: 'idle' },
+        },
+      })
+      .mockResolvedValueOnce({ config: { personality: 'friendly' } });
     const resume = vi.fn().mockResolvedValue(true);
     const onComplete = vi.fn();
     const prewarmer = new StartupThreadPrewarmer({
@@ -30,7 +33,8 @@ describe('startup thread prewarmer', () => {
     prewarmer.schedule({ request } as never);
     await prewarmer.waitForThread('recent');
 
-    expect(request).toHaveBeenCalledTimes(1);
+    expect(request).toHaveBeenCalledTimes(2);
+    expect(request).toHaveBeenNthCalledWith(2, 'config/read', {}, 30_000);
     expect(resume).toHaveBeenCalledWith(
       'recent',
       expect.objectContaining({
@@ -38,6 +42,9 @@ describe('startup thread prewarmer', () => {
         path: '/rollouts/recent.jsonl',
         cwd: '/workspace/recent',
         excludeTurns: true,
+        model: null,
+        modelProvider: null,
+        personality: 'friendly',
       }),
       120_000,
     );
@@ -46,9 +53,12 @@ describe('startup thread prewarmer', () => {
 
   it('lets an incoming open wait for an in-progress prewarm instead of duplicating the scan', async () => {
     let finishResume: (() => void) | undefined;
-    const request = vi.fn().mockResolvedValueOnce({
-      thread: { cwd: '/workspace', path: '/rollout.jsonl', status: { type: 'idle' } },
-    });
+    const request = vi
+      .fn()
+      .mockResolvedValueOnce({
+        thread: { cwd: '/workspace', path: '/rollout.jsonl', status: { type: 'idle' } },
+      })
+      .mockResolvedValueOnce({ config: { personality: 'friendly' } });
     const resume = vi.fn(
       () =>
         new Promise<boolean>((resolve) => {
@@ -75,7 +85,7 @@ describe('startup thread prewarmer', () => {
     expect(released).toBe(false);
     finishResume?.();
     await waiting;
-    expect(request).toHaveBeenCalledTimes(1);
+    expect(request).toHaveBeenCalledTimes(2);
     expect(resume).toHaveBeenCalledTimes(1);
   });
 
@@ -117,9 +127,12 @@ describe('startup thread prewarmer', () => {
       onComplete,
       onError,
     });
-    const request = vi.fn().mockResolvedValue({
-      thread: { cwd: '/workspace', path: '/rollout.jsonl', status: { type: 'idle' } },
-    });
+    const request = vi
+      .fn()
+      .mockResolvedValueOnce({
+        thread: { cwd: '/workspace', path: '/rollout.jsonl', status: { type: 'idle' } },
+      })
+      .mockResolvedValueOnce({ config: { personality: 'friendly' } });
 
     prewarmer.schedule({ request } as never);
     await prewarmer.waitForThread('uncacheable');
