@@ -407,6 +407,9 @@ try {
           const currentLanguageLabel = await page.evaluate(() => {
             const locale = document.documentElement.lang;
             const specialLabels = {
+              'en-US': 'English',
+              'fr-FR': 'français (France)',
+              'ja-JP': '日本語',
               'ms-MY': 'Bahasa Melayu',
               'zh-CN': '简体中文',
               'zh-HK': '繁體中文（香港）',
