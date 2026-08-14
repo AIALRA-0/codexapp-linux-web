@@ -89,6 +89,42 @@ codexapp_wait_for_controller_safe() {
   done
 }
 
+codexapp_wait_for_controller_recovery() {
+  local attempts="${1:-21}"
+  local interval_seconds="${2:-30}"
+  local attempt
+
+  for attempt in $(seq 1 "$attempts"); do
+    if codexapp_assert_controller_safe; then
+      codexapp_wait_for_controller_safe 11 30
+      return 0
+    fi
+    if (( attempt < attempts )); then
+      sleep "$interval_seconds"
+    fi
+  done
+  echo "shared host did not recover before the release deadline" >&2
+  return 75
+}
+
+codexapp_discard_unfinalized_snapshot() {
+  local snapshot_root="$1"
+  local release_id="$2"
+
+  if [[ -z "$snapshot_root" || -L "$snapshot_root" || ! -d "$snapshot_root" ]] ||
+    [[ -f "$snapshot_root/SNAPSHOT.json" ]]; then
+    return 0
+  fi
+  case "$snapshot_root" in
+    "$codexapp_backup_root"/*-before-"$release_id") ;;
+    *)
+      echo "refusing to discard an unexpected snapshot path: $snapshot_root" >&2
+      return 1
+      ;;
+  esac
+  find "$snapshot_root" -xdev -depth -delete
+}
+
 codexapp_prepare_state_snapshot() {
   local release_id="$1"
   local stamp
