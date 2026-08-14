@@ -38,6 +38,7 @@ proxy_port="${CODEXAPP_SMOKE_PROXY_PORT:-13018}"
 production_stopped=0
 proxy_enabled=0
 supplementary_group_arguments=()
+smoke_environment_arguments=()
 if [[ -z "$supplementary_groups" ]]; then
   supplementary_groups="$(
     systemctl show --property SupplementaryGroups --value "$production_service"
@@ -45,6 +46,15 @@ if [[ -z "$supplementary_groups" ]]; then
 fi
 if [[ -n "$supplementary_groups" ]]; then
   supplementary_group_arguments=(--property "SupplementaryGroups=$supplementary_groups")
+fi
+if [[ -n "${SMOKE_STARTUP_THREAD_PREWARM_COUNT+x}" ]]; then
+  if [[ ! "$SMOKE_STARTUP_THREAD_PREWARM_COUNT" =~ ^[0-9]+$ ]]; then
+    echo "SMOKE_STARTUP_THREAD_PREWARM_COUNT must be a non-negative integer" >&2
+    exit 64
+  fi
+  smoke_environment_arguments=(
+    "STARTUP_THREAD_PREWARM_COUNT=$SMOKE_STARTUP_THREAD_PREWARM_COUNT"
+  )
 fi
 
 source "$application_root/ops/lib/systemd-host-hardening.sh"
@@ -220,6 +230,7 @@ systemd-run \
   /usr/bin/env \
   "${pinned_official_environment[@]}" \
   "${CODEXAPP_HOST_SERVICE_ENV[@]}" \
+  "${smoke_environment_arguments[@]}" \
   "PORT=$app_port" \
   "PUBLIC_ORIGIN=http://127.0.0.1:$proxy_port" \
   "RUNTIME_ROOT=$runtime_root" \
