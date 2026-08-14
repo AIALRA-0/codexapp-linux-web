@@ -89,11 +89,20 @@ export class StartupThreadPrewarmer {
       const thread = recordOrNull(recordOrNull(response)?.thread);
       if (thread === null) throw new Error('thread/read returned no thread');
       if (recordOrNull(thread.status)?.type === 'active') return;
+      const configResponse = await client.request('config/read', {}, 30_000);
+      if (this.#generation !== generation) return;
+      const config = recordOrNull(recordOrNull(configResponse)?.config);
       const params = {
         threadId: candidate.threadId,
         history: null,
         path: stringOrNull(thread.path),
         cwd: stringOrNull(thread.cwd) ?? candidate.cwd,
+        // These are the unchanged official renderer's default resume
+        // overrides. Preserve the explicit nulls because the cache's safety
+        // fingerprint intentionally distinguishes exact request shapes.
+        model: null,
+        modelProvider: null,
+        personality: stringOrNull(config?.personality),
         excludeTurns: true,
         initialTurnsPage: {
           limit: 5,

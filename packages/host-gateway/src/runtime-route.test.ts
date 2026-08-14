@@ -234,6 +234,29 @@ describe('renderer request diagnostics', () => {
     );
   });
 
+  it('matches startup prewarm to the official renderer default personality shape exactly', () => {
+    const prewarm = {
+      threadId: 'thread-1',
+      cwd: '/workspace',
+      path: '/rollout.jsonl',
+      history: null,
+      excludeTurns: true,
+      initialTurnsPage: { limit: 5, itemsView: 'full', sortDirection: 'desc' },
+      model: null,
+      modelProvider: null,
+      personality: 'friendly',
+    };
+    const officialRenderer = structuredClone(prewarm);
+
+    expect(threadResumeHasMaterialOverrides(officialRenderer)).toBe(true);
+    expect(rendererResponseCacheKey('thread/resume', prewarm)).toBe(
+      rendererResponseCacheKey('thread/resume', officialRenderer),
+    );
+    expect(threadResumeOverrideFingerprint(prewarm)).toBe(
+      threadResumeOverrideFingerprint(officialRenderer),
+    );
+  });
+
   it('retains the richest known resume shape for a post-turn cache refresh', () => {
     const locatorOnly = {
       threadId: 'thread-1',
