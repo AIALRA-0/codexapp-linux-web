@@ -72,7 +72,13 @@ codexapp_wait_for_controller_safe() {
   local page_size
   local swap_in_bytes
   local swap_out_bytes
-  local maximum_swap_bytes=$((4 * 1024 * 1024))
+  # A host with old but otherwise idle swap can fault pages back in without
+  # being under memory pressure. Keep swap-out strict because it is the direct
+  # signal that the release workload is evicting live memory. A 32 MiB/30 s
+  # swap-in ceiling remains far below the previously observed thrashing rate
+  # (120-210 MiB/30 s) while tolerating isolated stale-page reads.
+  local maximum_swap_in_bytes=$((32 * 1024 * 1024))
+  local maximum_swap_out_bytes=$((4 * 1024 * 1024))
 
   page_size="$(getconf PAGESIZE)"
   previous_swap_in="$(awk '$1 == "pswpin" { print $2 }' /proc/vmstat)"
@@ -86,9 +92,13 @@ codexapp_wait_for_controller_safe() {
       swap_out_delta=$((current_swap_out - previous_swap_out))
       swap_in_bytes=$((swap_in_delta * page_size))
       swap_out_bytes=$((swap_out_delta * page_size))
-      if (( swap_in_bytes > maximum_swap_bytes || swap_out_bytes > maximum_swap_bytes )); then
-        printf 'swap_in_bytes=%s swap_out_bytes=%s maximum_bytes=%s\n' \
-          "$swap_in_bytes" "$swap_out_bytes" "$maximum_swap_bytes" >&2
+      if ((
+        swap_in_bytes > maximum_swap_in_bytes ||
+          swap_out_bytes > maximum_swap_out_bytes
+      )); then
+        printf 'swap_in_bytes=%s maximum_swap_in_bytes=%s swap_out_bytes=%s maximum_swap_out_bytes=%s\n' \
+          "$swap_in_bytes" "$maximum_swap_in_bytes" \
+          "$swap_out_bytes" "$maximum_swap_out_bytes" >&2
         echo "shared host is actively swapping; B release refused" >&2
         return 75
       fi
