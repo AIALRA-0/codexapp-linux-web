@@ -224,6 +224,11 @@ export function rendererRequestFingerprint(params: unknown): string {
   return createHash('sha256').update(JSON.stringify(canonical)).digest('hex').slice(0, 12);
 }
 
+function rendererRequestIntegrityFingerprint(params: unknown): string {
+  const canonical = canonicalizeRendererRequestValue(params);
+  return createHash('sha256').update(JSON.stringify(canonical)).digest('hex');
+}
+
 const THREAD_RESUME_LOCATOR_KEYS = new Set([
   'cwd',
   'excludeTurns',
@@ -258,7 +263,7 @@ export function threadResumeMaterialOverrideFingerprints(params: unknown): Recor
           !THREAD_RESUME_LOCATOR_KEYS.has(key) && value !== null && value !== undefined,
       )
       .sort(([left], [right]) => left.localeCompare(right))
-      .map(([key, value]) => [key, rendererRequestFingerprint(value)]),
+      .map(([key, value]) => [key, rendererRequestIntegrityFingerprint(value)]),
   );
 }
 
