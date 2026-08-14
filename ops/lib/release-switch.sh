@@ -69,7 +69,12 @@ codexapp_wait_for_controller_safe() {
   local current_swap_out
   local swap_in_delta
   local swap_out_delta
+  local page_size
+  local swap_in_bytes
+  local swap_out_bytes
+  local maximum_swap_bytes=$((4 * 1024 * 1024))
 
+  page_size="$(getconf PAGESIZE)"
   previous_swap_in="$(awk '$1 == "pswpin" { print $2 }' /proc/vmstat)"
   previous_swap_out="$(awk '$1 == "pswpout" { print $2 }' /proc/vmstat)"
   for sample in $(seq 1 "$samples"); do
@@ -79,8 +84,11 @@ codexapp_wait_for_controller_safe() {
     if (( sample > 1 )); then
       swap_in_delta=$((current_swap_in - previous_swap_in))
       swap_out_delta=$((current_swap_out - previous_swap_out))
-      if (( swap_in_delta > 256 || swap_out_delta > 256 )); then
-        printf 'swap_in_pages=%s swap_out_pages=%s\n' "$swap_in_delta" "$swap_out_delta" >&2
+      swap_in_bytes=$((swap_in_delta * page_size))
+      swap_out_bytes=$((swap_out_delta * page_size))
+      if (( swap_in_bytes > maximum_swap_bytes || swap_out_bytes > maximum_swap_bytes )); then
+        printf 'swap_in_bytes=%s swap_out_bytes=%s maximum_bytes=%s\n' \
+          "$swap_in_bytes" "$swap_out_bytes" "$maximum_swap_bytes" >&2
         echo "shared host is actively swapping; B release refused" >&2
         return 75
       fi
