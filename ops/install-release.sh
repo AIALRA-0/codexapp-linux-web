@@ -36,7 +36,7 @@ fi
 cleanup() {
   local exit_code=$?
   if (( exit_code != 0 )) && [[ -d "$incomplete" && ! -L "$incomplete" ]]; then
-    rm -rf --one-file-system -- "$incomplete"
+    find "$incomplete" -xdev -depth -delete
   fi
   exit "$exit_code"
 }
@@ -102,7 +102,7 @@ done
   sha256sum -c --quiet RELEASE-SHA256SUMS
 )
 chown -R root:root "$incomplete"
-chmod -R a-w "$incomplete"
+chmod -R a+rX,a-w "$incomplete"
 mv "$incomplete" "$target"
 
 if [[ "$activate" == "--stage" ]]; then
