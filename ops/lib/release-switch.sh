@@ -17,9 +17,9 @@ codexapp_backup_root="/srv/aialra/backups/codexapp-b-upgrades"
 codexapp_pressure_avg60() {
   local resource="$1"
   awk '/^full / {
-    for (index = 1; index <= NF; index += 1) {
-      if ($index ~ /^avg60=/) {
-        split($index, value, "=")
+    for (field_index = 1; field_index <= NF; field_index += 1) {
+      if ($field_index ~ /^avg60=/) {
+        split($field_index, value, "=")
         print value[2]
         exit
       }
