@@ -33,6 +33,7 @@ nginx_target="/etc/nginx/conf.d/codexapp-production-loopback-smoke.conf"
 auth_database="/srv/aialra/state/auth-gateway/sessions.sqlite"
 identity_file="/run/codexapp-production-ui-smoke-$$.identity"
 screenshot_path="${SMOKE_SCREENSHOT_PATH:-/tmp/codexapp-production-ui-smoke-$$.png}"
+pre_browser_script="${SMOKE_PRE_BROWSER_SCRIPT:-}"
 app_port="${CODEXAPP_SMOKE_APP_PORT:-13017}"
 proxy_port="${CODEXAPP_SMOKE_PROXY_PORT:-13018}"
 production_stopped=0
@@ -159,6 +160,14 @@ if [[ -e "$nginx_target" || -L "$nginx_target" ]]; then
   echo "temporary production UI smoke proxy already exists" >&2
   exit 1
 fi
+if [[ -n "$pre_browser_script" ]]; then
+  pre_browser_script="$(realpath --canonicalize-existing "$pre_browser_script")"
+  if [[ ! -f "$pre_browser_script" || -L "$pre_browser_script" ]] ||
+    [[ "$pre_browser_script" != "$application_root/scripts/"* ]]; then
+    echo "SMOKE_PRE_BROWSER_SCRIPT must be a regular script inside the candidate release" >&2
+    exit 65
+  fi
+fi
 if port_is_listening "$app_port" || port_is_listening "$proxy_port"; then
   echo "production UI smoke ports are already in use" >&2
   exit 1
@@ -260,6 +269,20 @@ chmod 0600 "$nginx_target"
 proxy_enabled=1
 nginx -t
 systemctl reload nginx
+
+if [[ -n "$pre_browser_script" ]]; then
+  (
+    cd "$application_root"
+    SMOKE_BASE_URL="http://127.0.0.1:$proxy_port" \
+      SMOKE_PUBLIC_ORIGIN="http://127.0.0.1:$proxy_port" \
+      SMOKE_PROXY_SECRET="$proxy_secret" \
+      SMOKE_PROXY_SECRET_HEADER="$proxy_secret_header" \
+      SMOKE_SUBJECT="$subject" \
+      SMOKE_USERNAME="$username" \
+      SMOKE_EMAIL="$email" \
+      node "$pre_browser_script"
+  )
+fi
 
 (
   cd "$application_root"
