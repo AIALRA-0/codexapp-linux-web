@@ -24,7 +24,9 @@ import {
   rendererResponseCacheInvalidationPrefixes,
   rendererResponseCacheTtlMs,
   threadResumeHasMaterialOverrides,
+  threadResumeMaterialOverrideFingerprints,
   threadResumeOverrideFingerprint,
+  threadResumeOverridesCanReuse,
 } from './runtime.js';
 
 function accessToken(authClaims: Record<string, unknown>): string {
@@ -197,7 +199,7 @@ describe('renderer request diagnostics', () => {
     expect(rendererResponseCacheGenerationCanStore(undefined, 5)).toBe(false);
   });
 
-  it('reuses a resumed thread only when the later request supplies no new overrides', () => {
+  it('reuses a resumed thread when every later material override was already applied', () => {
     const base = {
       threadId: 'thread-1',
       cwd: '/workspace',
@@ -232,6 +234,28 @@ describe('renderer request diagnostics', () => {
     );
     expect(threadResumeOverrideFingerprint(first)).not.toBe(
       threadResumeOverrideFingerprint({ ...first, personality: 'concise' }),
+    );
+    const applied = threadResumeMaterialOverrideFingerprints(first);
+    expect(threadResumeOverridesCanReuse(applied, later)).toBe(true);
+    expect(threadResumeOverridesCanReuse(applied, { ...later, personality: 'friendly' })).toBe(
+      true,
+    );
+    expect(threadResumeOverridesCanReuse(applied, { ...later, personality: 'concise' })).toBe(
+      false,
+    );
+    expect(threadResumeOverridesCanReuse(applied, { ...later, model: 'gpt-new' })).toBe(false);
+    expect(threadResumeOverridesCanReuse(applied, { ...later, config: { feature: false } })).toBe(
+      false,
+    );
+    expect(
+      threadResumeOverridesCanReuse(
+        threadResumeMaterialOverrideFingerprints({ ...later, personality: 'friendly' }),
+        first,
+      ),
+    ).toBe(false);
+    expect(threadResumeOverridesCanReuse(undefined, later)).toBe(true);
+    expect(threadResumeOverridesCanReuse(undefined, { ...later, personality: 'friendly' })).toBe(
+      false,
     );
   });
 

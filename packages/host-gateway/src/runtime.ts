@@ -100,6 +100,7 @@ interface RendererRequestMetadata {
   responseCacheGeneration?: number;
   responseCacheKey?: string;
   responseCacheOverrideFingerprint?: string;
+  responseCacheOverrideFingerprints?: Record<string, string>;
   responseCachePersistentKey?: string;
   responseCachePrincipalKey?: string;
   responseCacheTtlMs?: number;
@@ -118,6 +119,7 @@ interface DeferredResumeNotification {
 interface RendererResponseCacheEntry {
   expiresAtMs: number;
   resumeOverrideFingerprint?: string;
+  resumeOverrideFingerprints?: Record<string, string>;
   result: unknown;
 }
 
@@ -245,6 +247,27 @@ export function threadResumeOverrideFingerprint(params: unknown): string {
     Object.entries(request).filter(([key]) => !THREAD_RESUME_LOCATOR_KEYS.has(key)),
   );
   return rendererRequestFingerprint(overrides);
+}
+
+export function threadResumeMaterialOverrideFingerprints(params: unknown): Record<string, string> {
+  const request = recordOrNull(params) ?? {};
+  return Object.fromEntries(
+    Object.entries(request)
+      .filter(
+        ([key, value]) =>
+          !THREAD_RESUME_LOCATOR_KEYS.has(key) && value !== null && value !== undefined,
+      )
+      .sort(([left], [right]) => left.localeCompare(right))
+      .map(([key, value]) => [key, rendererRequestFingerprint(value)]),
+  );
+}
+
+export function threadResumeOverridesCanReuse(
+  existing: Readonly<Record<string, string>> | undefined,
+  candidateParams: unknown,
+): boolean {
+  const candidate = threadResumeMaterialOverrideFingerprints(candidateParams);
+  return Object.entries(candidate).every(([key, fingerprint]) => existing?.[key] === fingerprint);
 }
 
 export function rendererThreadResumeId(params: unknown): string | null {
@@ -1012,6 +1035,10 @@ export class UserRuntime extends EventEmitter {
           prepared.request.method === 'thread/resume'
             ? threadResumeOverrideFingerprint(prepared.request.params)
             : undefined;
+        const responseCacheOverrideFingerprints =
+          prepared.request.method === 'thread/resume'
+            ? threadResumeMaterialOverrideFingerprints(prepared.request.params)
+            : undefined;
         if (prepared.request.method === 'thread/resume' && responseCacheTtlMs !== null) {
           this.#rememberThreadResumeRefreshParams(prepared.request.params);
         }
@@ -1037,7 +1064,13 @@ export class UserRuntime extends EventEmitter {
           responseCacheReadEligible =
             prepared.request.method !== 'thread/resume' ||
             !threadResumeHasMaterialOverrides(prepared.request.params) ||
-            cached?.resumeOverrideFingerprint === responseCacheOverrideFingerprint;
+            (cached !== undefined &&
+              (cached.resumeOverrideFingerprints !== undefined
+                ? threadResumeOverridesCanReuse(
+                    cached.resumeOverrideFingerprints,
+                    prepared.request.params,
+                  )
+                : cached.resumeOverrideFingerprint === responseCacheOverrideFingerprint));
           if (cached !== undefined && cached.expiresAtMs > Date.now()) {
             if (responseCacheReadEligible) {
               const receivedAtMs = Date.now();
@@ -1063,7 +1096,6 @@ export class UserRuntime extends EventEmitter {
               );
               return undefined;
             }
-            this.#rendererResponseCache.delete(responseCacheKey);
           }
           responseCachePrincipalKey = rendererResponseCacheCanPersist(prepared.request.method)
             ? await this.#readDiscoveryResponseCachePrincipalKey()
@@ -1133,6 +1165,9 @@ export class UserRuntime extends EventEmitter {
           ...(responseCacheOverrideFingerprint === undefined
             ? {}
             : { responseCacheOverrideFingerprint }),
+          ...(responseCacheOverrideFingerprints === undefined
+            ? {}
+            : { responseCacheOverrideFingerprints }),
           ...(responseCachePersistentKey === undefined ? {} : { responseCachePersistentKey }),
           ...(responseCachePrincipalKey === undefined ? {} : { responseCachePrincipalKey }),
           ...(responseCacheTtlMs === null ? {} : { responseCacheTtlMs }),
@@ -1590,6 +1625,9 @@ export class UserRuntime extends EventEmitter {
           ...(metadata.responseCacheOverrideFingerprint === undefined
             ? {}
             : { resumeOverrideFingerprint: metadata.responseCacheOverrideFingerprint }),
+          ...(metadata.responseCacheOverrideFingerprints === undefined
+            ? {}
+            : { resumeOverrideFingerprints: metadata.responseCacheOverrideFingerprints }),
           result: parsed.result,
         });
         if (
@@ -2118,7 +2156,10 @@ export class UserRuntime extends EventEmitter {
       this.#rendererResponseCache.set(cacheKey, {
         expiresAtMs: receivedAtMs + ttlMs,
         ...(method === 'thread/resume'
-          ? { resumeOverrideFingerprint: threadResumeOverrideFingerprint(params) }
+          ? {
+              resumeOverrideFingerprint: threadResumeOverrideFingerprint(params),
+              resumeOverrideFingerprints: threadResumeMaterialOverrideFingerprints(params),
+            }
           : {}),
         result,
       });
