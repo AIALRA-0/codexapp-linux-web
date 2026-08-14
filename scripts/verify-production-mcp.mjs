@@ -10,6 +10,8 @@ const workspace = requiredEnvironment('VERIFY_WORKSPACE');
 const rendererVersion = process.env.VERIFY_RENDERER_VERSION ?? '26.730.61639';
 const configuredGoogleAccounts = csvEnvironment('VERIFY_GOOGLE_ACCOUNTS');
 const refreshGoogleAccounts = process.env.VERIFY_REFRESH_GOOGLE_ACCOUNTS === '1';
+const requestTimeoutMs = positiveNumberEnvironment('VERIFY_REQUEST_TIMEOUT_MS', 60_000);
+const statusAttempts = positiveNumberEnvironment('VERIFY_STATUS_ATTEMPTS', 60);
 const cases = [
   smokeCase('openaiDeveloperDocs', 'list_openai_docs', {}),
   smokeCase('aialra_google_email', 'manage_accounts', { operation: 'list' }),
@@ -25,7 +27,7 @@ const client = new CodexAppServerClient({
   cwd: workspace,
   clientVersion: rendererVersion,
   extraArgs: ['-c', 'features.code_mode_host=true'],
-  requestTimeoutMs: 180_000,
+  requestTimeoutMs,
 });
 const stderr = [];
 client.on('request', (event) => {
@@ -42,18 +44,24 @@ client.on('stderr', (line) => {
 });
 
 try {
+  reportProgress('app-server-starting');
   await client.start();
+  reportProgress('app-server-ready');
   const started = await client.request('thread/start', {
     cwd: workspace,
     ephemeral: true,
     experimentalRawEvents: false,
   });
   const threadId = requiredString(started?.thread?.id ?? started?.threadId, 'thread id');
-  const status = await waitForMcpStatus(client, threadId, cases);
+  reportProgress('thread-started');
+  const status = await waitForMcpStatus(client, threadId, cases, statusAttempts);
+  reportProgress('required-tools-ready');
 
   const results = [];
   for (const testCase of cases) {
+    reportProgress(`tool-start:${testCase.label}`);
     results.push(await runCase(client, threadId, status, testCase));
+    reportProgress(`tool-finish:${testCase.label}`);
   }
   const discoveredGoogleAccounts = await discoverGoogleAccounts(client, threadId);
   const googleAccounts = unique([...configuredGoogleAccounts, ...discoveredGoogleAccounts]);
@@ -281,9 +289,9 @@ function unique(values) {
   return [...new Set(values)];
 }
 
-async function waitForMcpStatus(appServer, threadId, requiredCases) {
+async function waitForMcpStatus(appServer, threadId, requiredCases, maximumAttempts) {
   let lastStatus;
-  for (let attempt = 0; attempt < 120; attempt += 1) {
+  for (let attempt = 0; attempt < maximumAttempts; attempt += 1) {
     const response = await appServer.request('mcpServerStatus/list', {
       threadId,
       cursor: null,
@@ -332,6 +340,18 @@ function requiredEnvironment(name) {
 function requiredString(value, label) {
   if (typeof value !== 'string' || value.length === 0) throw new Error(`${label} is missing`);
   return value;
+}
+
+function positiveNumberEnvironment(name, fallback) {
+  const value = Number(process.env[name] ?? fallback);
+  if (!Number.isFinite(value) || value <= 0 || !Number.isInteger(value)) {
+    throw new Error(`${name} must be a positive integer`);
+  }
+  return value;
+}
+
+function reportProgress(stage) {
+  process.stderr.write(`${JSON.stringify({ progress: true, stage })}\n`);
 }
 
 function delay(milliseconds) {

@@ -15,6 +15,7 @@ runtime_root="$(mktemp -d "$runtime_parent/codexapp-desktop-tools-smoke.XXXXXXXX
 service_name="codexapp-desktop-tools-smoke-$$.service"
 app_port="13019"
 public_origin="http://127.0.0.1:$app_port"
+secret_group="${CODEXAPP_SECRET_GROUP:-codexappsecrets}"
 
 source "$application_root/ops/lib/systemd-host-hardening.sh"
 source "$application_root/ops/lib/pinned-official-release.sh"
@@ -55,6 +56,10 @@ if [[ ! -d "$application_root" || ! -f "$environment_file" ]]; then
   echo "desktop tools smoke application or environment is missing" >&2
   exit 1
 fi
+if ! getent group "$secret_group" >/dev/null; then
+  echo "desktop tools smoke secret group does not exist: $secret_group" >&2
+  exit 1
+fi
 if port_is_listening; then
   echo "desktop tools smoke port is already in use" >&2
   exit 1
@@ -88,6 +93,7 @@ systemd-run \
   --unit "$service_name" \
   --uid "$service_user" \
   --gid "$service_group" \
+  --property "SupplementaryGroups=$secret_group" \
   --working-directory "$application_root" \
   --property "EnvironmentFile=$environment_file" \
   "${CODEXAPP_HOST_HARDENING_ARGS[@]}" \

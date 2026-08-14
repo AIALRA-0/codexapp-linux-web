@@ -280,6 +280,10 @@ export async function connectOfficialBridge({ baseUrl, identityHeaders, publicOr
   const waitForViewMessage = (predicate, timeoutMs = 30_000) => {
     const recent = recentViewMessages.findLast(predicate);
     if (recent !== undefined) return Promise.resolve(recent);
+    return waitForNextViewMessage(predicate, timeoutMs);
+  };
+
+  const waitForNextViewMessage = (predicate, timeoutMs = 30_000) => {
     const pending = deferred();
     const waiter = {
       predicate,
@@ -312,6 +316,7 @@ export async function connectOfficialBridge({ baseUrl, identityHeaders, publicOr
     prewarmThreadStart,
     respondMcpRequest,
     waitForViewMessage,
+    waitForNextViewMessage,
     workerRequest,
     close() {
       for (const transport of portTransports.values()) {

@@ -76,7 +76,7 @@ page.on('response', (response) => {
     const contentLength = Number(response.headers()['content-length']);
     mainAssetTransferBytes = Number.isFinite(contentLength) ? contentLength : undefined;
   }
-  if (/\/assets\/[a-z]{2,3}(?:-[A-Z0-9]{2,4})+-[^/]+\.js$/u.test(response.url())) {
+  if (/\/assets\/[a-z]{2,3}(?:-[A-Z0-9]{2,4})*-?[^/]+\.js$/u.test(response.url())) {
     loadedLocaleAssets.push(response.url().split('/').pop());
   }
   if (response.url().startsWith(baseUrl) && response.status() >= 400) {
@@ -354,36 +354,67 @@ try {
       inspectSettingsMenu === 'settings' ||
       inspectSettingsMenu === 'language'
     ) {
-      const accountButton = page
-        .locator('button, [role="button"]')
-        .filter({ hasText: /Lucas Ding|22aialra22@gmail\.com/u })
-        .last();
-      await accountButton.waitFor({ state: 'visible', timeout: 20_000 });
-      await accountButton.click();
+      const visibleButtons = page.locator('button');
+      const profileButtonIndex = await visibleButtons.evaluateAll((elements) =>
+        elements.findIndex((element) => {
+          const rect = element.getBoundingClientRect();
+          const style = getComputedStyle(element);
+          return (
+            rect.left < 300 &&
+            rect.top > window.innerHeight * 0.7 &&
+            rect.width > 0 &&
+            rect.height > 0 &&
+            style.display !== 'none' &&
+            style.visibility !== 'hidden' &&
+            (element.textContent ?? '').trim().length > 0
+          );
+        }),
+      );
+      if (profileButtonIndex === -1) throw new Error('profile menu button not found');
+      const profileButton = visibleButtons.nth(profileButtonIndex);
+      await profileButton.waitFor({ state: 'visible', timeout: 60_000 });
+      await profileButton.click();
       await page.waitForTimeout(500);
       afterOpen = await inspectInteractiveElements();
       if (inspectSettingsMenu === 'settings' || inspectSettingsMenu === 'language') {
         const settingsItem = page
           .locator('[role="menuitem"]')
-          .filter({ hasText: /^(?:设置|Settings|設定|Paramètres)/u })
+          .filter({ hasText: /Ctrl\+,/u })
           .last();
         await settingsItem.waitFor({ state: 'visible', timeout: 20_000 });
         await settingsItem.click();
-        await page.waitForFunction(
-          () =>
-            !document.body.innerText.includes('正在加载设置…') &&
-            !document.body.innerText.includes('Loading settings…'),
-          undefined,
-          { timeout: 120_000 },
-        );
+        await page.locator('[role="switch"]').first().waitFor({
+          state: 'visible',
+          timeout: 120_000,
+        });
         const settingsDialog = await inspectInteractiveElements();
         let languageMenu;
         let switchedLocale;
         if (inspectSettingsMenu === 'language') {
-          const languageButton = page
-            .locator('button')
-            .filter({ hasText: /^(?:简体中文|English|繁體中文|日本語|Français)/iu })
-            .last();
+          const currentLanguageLabel = await page.evaluate(() => {
+            const locale = document.documentElement.lang;
+            const specialLabels = {
+              'ms-MY': 'Bahasa Melayu',
+              'zh-CN': '简体中文',
+              'zh-HK': '繁體中文（香港）',
+              'zh-TW': '繁體中文（台灣）',
+            };
+            if (locale in specialLabels) return specialLabels[locale];
+            return new Intl.DisplayNames([locale], {
+              languageDisplay: 'standard',
+              type: 'language',
+            }).of(locale);
+          });
+          const settingsButtons = page.locator('button');
+          const languageButtonIndex = await settingsButtons.evaluateAll(
+            (elements, label) =>
+              elements.findIndex((element) => (element.textContent ?? '').trim() === label),
+            currentLanguageLabel,
+          );
+          if (languageButtonIndex === -1) {
+            throw new Error(`language button not found for ${currentLanguageLabel}`);
+          }
+          const languageButton = settingsButtons.nth(languageButtonIndex);
           await languageButton.waitFor({ state: 'visible', timeout: 20_000 });
           await languageButton.click();
           await page.waitForTimeout(300);
@@ -392,17 +423,8 @@ try {
           for (let index = 0; index < switchLocaleSequence.length; index += 1) {
             const localeSwitch = switchLocaleSequence[index];
             if (index > 0) {
-              const currentLanguageButton = page
-                .locator('button')
-                .filter({
-                  hasText: new RegExp(
-                    `^${escapeRegExp(switchLocaleSequence[index - 1].label)}$`,
-                    'u',
-                  ),
-                })
-                .last();
-              await currentLanguageButton.waitFor({ state: 'visible', timeout: 20_000 });
-              await currentLanguageButton.click();
+              await languageButton.waitFor({ state: 'visible', timeout: 20_000 });
+              await languageButton.click();
             }
             const localeOption = page
               .locator('[role="option"], [role="menuitem"], button')
@@ -415,22 +437,19 @@ try {
               localeSwitch.expected,
               { timeout: 30_000 },
             );
+            const assetLocale = localeSwitch.assetLocale ?? localeSwitch.expected;
             if (localeSwitch.expected !== 'en-US') {
               await waitFor(
-                () =>
-                  loadedLocaleAssets.some((asset) =>
-                    asset?.startsWith(`${localeSwitch.expected}-`),
-                  ),
+                () => loadedLocaleAssets.some((asset) => asset?.startsWith(`${assetLocale}-`)),
                 30_000,
               );
             }
             switchedLocales.push({
               label: localeSwitch.label,
               documentLocale: await page.evaluate(() => document.documentElement.lang),
-              localeAsset: loadedLocaleAssets.find((asset) =>
-                asset?.startsWith(`${localeSwitch.expected}-`),
-              ),
+              localeAsset: loadedLocaleAssets.find((asset) => asset?.startsWith(`${assetLocale}-`)),
             });
+            reportProgress(`locale-${localeSwitch.expected}`);
           }
           if (switchLocaleSequence.length > 0) {
             switchedLocale = { sequence: switchedLocales };
@@ -581,7 +600,9 @@ function parseLocaleSwitchSequence(json, label, expected) {
           typeof entry.label !== 'string' ||
           entry.label.length === 0 ||
           typeof entry.expected !== 'string' ||
-          entry.expected.length === 0,
+          entry.expected.length === 0 ||
+          (entry.assetLocale !== undefined &&
+            (typeof entry.assetLocale !== 'string' || entry.assetLocale.length === 0)),
       )
     ) {
       throw new Error('SMOKE_SWITCH_LOCALES_JSON must be a locale switch array');

@@ -52,38 +52,101 @@ try {
       threadId: null,
       threadToolsEnabled: false,
     });
-    const started = await bridge.prewarmThreadStart({
+    const started = await bridge.mcpRequest('thread/start', {
       cwd: workspaceRoot,
       developerInstructions: requiredString(
         developerInstructions.instructions,
         'developer instructions',
       ),
       dynamicTools: [],
-      ephemeral: true,
+      ephemeral: false,
       experimentalRawEvents: false,
     });
     const ephemeralThreadId = requiredString(
       started?.thread?.id ?? started?.threadId,
       'ephemeral thread id',
     );
-    // Starting the ephemeral thread is itself a thread mutation and therefore
-    // exercises invalidation. Some official app-server builds correctly reject
-    // deleting it because an ephemeral thread was never persisted.
-    await bridge
-      .mcpRequest('thread/delete', { threadId: ephemeralThreadId })
-      .catch(() => undefined);
-    const coldAgain = await measuredRequest(bridge, params);
-    const warmAgain = await measuredRequest(bridge, params);
-    if (coldAgain.sha256 !== cold.sha256 || warmAgain.sha256 !== cold.sha256) {
-      throw new Error('history changed during cache invalidation test');
+    try {
+      const ephemeralParams = { ...params, threadId: ephemeralThreadId };
+      const baselineCompleted = bridge.waitForNextViewMessage(
+        (message) =>
+          message?.type === 'mcp-notification' &&
+          message.method === 'turn/completed' &&
+          message.params?.threadId === ephemeralThreadId,
+        300_000,
+      );
+      await bridge.mcpRequest('turn/start', {
+        threadId: ephemeralThreadId,
+        input: [
+          {
+            type: 'text',
+            text: 'Reply with exactly: CACHE_BASELINE_OK',
+            text_elements: [],
+          },
+        ],
+      });
+      await baselineCompleted;
+      const beforeTurn = await measuredRequest(bridge, ephemeralParams);
+      const completed = bridge.waitForNextViewMessage(
+        (message) =>
+          message?.type === 'mcp-notification' &&
+          message.method === 'turn/completed' &&
+          message.params?.threadId === ephemeralThreadId,
+        300_000,
+      );
+      await bridge.mcpRequest('turn/start', {
+        threadId: ephemeralThreadId,
+        input: [
+          {
+            type: 'text',
+            text: 'Reply with exactly: CACHE_INVALIDATION_OK',
+            text_elements: [],
+          },
+        ],
+      });
+      await completed;
+      const propagationWaitMs = 750;
+      await delay(propagationWaitMs);
+      const afterTurn = await measuredRequest(bridge, ephemeralParams);
+      const warmAfterTurn = await measuredRequest(bridge, ephemeralParams);
+      if (afterTurn.sha256 === beforeTurn.sha256) {
+        throw new Error('mutated ephemeral history replayed its stale cached result');
+      }
+      if (warmAfterTurn.sha256 !== afterTurn.sha256) {
+        throw new Error('warm ephemeral history differs from the post-mutation result');
+      }
+      if (warmAfterTurn.durationMs > maximumWarmMs) {
+        throw new Error(`post-mutation warm response exceeded ${String(maximumWarmMs)} ms`);
+      }
+
+      const targetAfterMutation = await measuredRequest(bridge, params);
+      const targetWarmAfterMutation = await measuredRequest(bridge, params);
+      if (
+        targetAfterMutation.sha256 !== cold.sha256 ||
+        targetWarmAfterMutation.sha256 !== cold.sha256
+      ) {
+        throw new Error('target history changed during isolated invalidation test');
+      }
+      if (targetWarmAfterMutation.durationMs > maximumWarmMs) {
+        throw new Error(`post-invalidation warm response exceeded ${String(maximumWarmMs)} ms`);
+      }
+      afterInvalidation = {
+        mutatedEphemeral: {
+          propagationWaitMs,
+          before: publicMeasurement(beforeTurn),
+          after: publicMeasurement(afterTurn),
+          warm: publicMeasurement(warmAfterTurn),
+        },
+        target: {
+          afterMutation: publicMeasurement(targetAfterMutation),
+          warm: publicMeasurement(targetWarmAfterMutation),
+        },
+      };
+    } finally {
+      await bridge
+        .mcpRequest('thread/delete', { threadId: ephemeralThreadId })
+        .catch(() => undefined);
     }
-    if (warmAgain.durationMs > maximumWarmMs) {
-      throw new Error(`post-invalidation warm response exceeded ${String(maximumWarmMs)} ms`);
-    }
-    if (coldAgain.durationMs <= warmAgain.durationMs * 5) {
-      throw new Error('thread mutation did not invalidate the prior history cache');
-    }
-    afterInvalidation = { cold: publicMeasurement(coldAgain), warm: publicMeasurement(warmAgain) };
   }
 
   process.stdout.write(
@@ -119,6 +182,10 @@ function publicMeasurement(measurement) {
     hasNextCursor: measurement.hasNextCursor,
     sha256: measurement.sha256,
   };
+}
+
+function delay(milliseconds) {
+  return new Promise((resolve) => setTimeout(resolve, milliseconds));
 }
 
 function requiredEnvironment(name) {

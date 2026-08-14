@@ -38,6 +38,11 @@ proxy_port="${CODEXAPP_SMOKE_PROXY_PORT:-13018}"
 production_stopped=0
 proxy_enabled=0
 supplementary_group_arguments=()
+if [[ -z "$supplementary_groups" ]]; then
+  supplementary_groups="$(
+    systemctl show --property SupplementaryGroups --value "$production_service"
+  )"
+fi
 if [[ -n "$supplementary_groups" ]]; then
   supplementary_group_arguments=(--property "SupplementaryGroups=$supplementary_groups")
 fi
@@ -65,7 +70,7 @@ if [[ -z "$proxy_secret_header" || ! "$proxy_secret_header" =~ ^[A-Za-z0-9-]+$ ]
   exit 65
 fi
 proxy_secret="$(tr -d '\r\n' <"$proxy_secret_file")"
-if [[ ! "$proxy_secret" =~ ^[0-9A-Fa-f]{64,}$ ]]; then
+if [[ ! "$proxy_secret" =~ ^([0-9A-Fa-f]{64,}|[A-Za-z0-9+/]{43,}={0,2})$ ]]; then
   echo "production UI smoke proxy proof is invalid" >&2
   exit 65
 fi
