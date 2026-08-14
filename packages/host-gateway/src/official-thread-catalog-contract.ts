@@ -17,6 +17,7 @@ interface OldOfficialThreadCatalogModule {
 }
 
 interface LatestOfficialThreadCatalogModule {
+  Di?: unknown;
   wi?: unknown;
   _i?: unknown;
 }
@@ -41,11 +42,13 @@ export function loadQualifiedThreadCatalogContract(
 
   const shared = officialRequire(sharedPath) as LatestOfficialThreadCatalogModule;
   const sourceKinds =
-    version === '26.803.81509'
-      ? (shared as LatestOfficialThreadCatalogModule & { bi?: unknown }).bi
-      : version === '26.730.61639'
-        ? shared._i
-        : shared.wi;
+    version === '26.810.41047'
+      ? shared.Di
+      : version === '26.803.81509'
+        ? (shared as LatestOfficialThreadCatalogModule & { bi?: unknown }).bi
+        : version === '26.730.61639'
+          ? shared._i
+          : shared.wi;
   if (!Array.isArray(sourceKinds)) {
     throw new Error('qualified official thread catalog source kinds changed');
   }
@@ -58,27 +61,33 @@ export function loadQualifiedThreadCatalogContract(
 
 function loadLatestOfficialThreadConverter(
   sourceRoot: string,
-  version: '26.727.51351' | '26.730.61639' | '26.803.81509',
+  version: '26.727.51351' | '26.730.61639' | '26.803.81509' | '26.810.41047',
 ): QualifiedThreadCatalogContract['convertThread'] {
   const mainSource = readQualifiedMainSource(sourceRoot);
   const contract =
-    version === '26.803.81509'
+    version === '26.810.41047'
       ? {
-          converterName: 'uS',
-          converterMarker: 'function uS(e,t=lS){if(e.ephemeral||e.parentThreadId!=null',
-          endMarker: 'var mS=`codex-notification`',
+          converterName: 'Rx',
+          converterMarker: 'function Rx(e,t=Lx){if(e.ephemeral||e.parentThreadId!=null',
+          endMarker: 'var Hx=`codex-notification`',
         }
-      : version === '26.730.61639'
+      : version === '26.803.81509'
         ? {
-            converterName: 'cS',
-            converterMarker: 'function cS(e,t=sS){if(e.ephemeral||e.parentThreadId!=null',
-            endMarker: 'var fS=`codex-notification`',
+            converterName: 'uS',
+            converterMarker: 'function uS(e,t=lS){if(e.ephemeral||e.parentThreadId!=null',
+            endMarker: 'var mS=`codex-notification`',
           }
-        : {
-            converterName: 'qx',
-            converterMarker: 'function qx(e,t=Vx){if(e.ephemeral||e.parentThreadId!=null',
-            endMarker: 'var Zx=`codex-notification`',
-          };
+        : version === '26.730.61639'
+          ? {
+              converterName: 'cS',
+              converterMarker: 'function cS(e,t=sS){if(e.ephemeral||e.parentThreadId!=null',
+              endMarker: 'var fS=`codex-notification`',
+            }
+          : {
+              converterName: 'qx',
+              converterMarker: 'function qx(e,t=Vx){if(e.ephemeral||e.parentThreadId!=null',
+              endMarker: 'var Zx=`codex-notification`',
+            };
   const { converterMarker } = contract;
   const converterIndex = mainSource.indexOf(converterMarker);
   if (

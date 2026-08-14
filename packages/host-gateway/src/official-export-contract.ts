@@ -2,7 +2,7 @@ import { readFileSync } from 'node:fs';
 import { join, resolve } from 'node:path';
 
 export type QualifiedOfficialVersion =
-  '26.721.81911' | '26.727.51351' | '26.730.61639' | '26.803.81509';
+  '26.721.81911' | '26.727.51351' | '26.730.61639' | '26.803.81509' | '26.810.41047';
 
 const DESKTOP_STATE_EXPORTS = {
   '26.721.81911': {
@@ -189,6 +189,52 @@ const DESKTOP_STATE_EXPORTS = {
     Jr: 'Nr',
     autoDenyPermissions: 'Zt',
   },
+  '26.810.41047': {
+    E: 'S',
+    Bl: 'Zc',
+    Ht: 'Ft',
+    Gt: 'Rt',
+    Wt: 'Lt',
+    Cr: 'dr',
+    Di: 'mi',
+    Er: 'mr',
+    Gr: 'kr',
+    Tr: 'pr',
+    Vr: 'Tr',
+    qr: 'jr',
+    br: 'cr',
+    kr: '_r',
+    Sr: 'ur',
+    xr: 'lr',
+    zl: 'Xc',
+    Jl: 'tl',
+    Ql: 'il',
+    Xl: 'nl',
+    Zl: 'rl',
+    rn: 'Yt',
+    wr: 'fr',
+    _r: 'ar',
+    Ar: 'vr',
+    yr: 'sr',
+    vr: 'or',
+    Ur: 'Dr',
+    T: 'x',
+    w: 'b',
+    C: 'y',
+    S: 'v',
+    Kr: 'Ar',
+    Wr: 'Or',
+    Hr: 'Er',
+    Rr: 'Sr',
+    zo: 'bo',
+    Rt: 'jt',
+    Lt: 'At',
+    on: 'Qt',
+    Sc: 'Ms',
+    xc: 'js',
+    Jr: 'Mr',
+    autoDenyPermissions: '$t',
+  },
 } as const satisfies Record<QualifiedOfficialVersion, Record<string, string>>;
 
 const GIT_EXPORTS = {
@@ -197,32 +243,44 @@ const GIT_EXPORTS = {
     githubService: 'D',
     gitManager: 'F',
     localExecutionHostRpc: 'I',
+    rpcTarget: null,
   },
   '26.727.51351': {
     attachRpc: 'St',
     githubService: 'x',
     gitManager: 'O',
     localExecutionHostRpc: 'k',
+    rpcTarget: null,
   },
   '26.730.61639': {
     attachRpc: 'St',
     githubService: 'x',
     gitManager: 'O',
     localExecutionHostRpc: 'k',
+    rpcTarget: null,
   },
   '26.803.81509': {
     attachRpc: 'St',
     githubService: 'x',
     gitManager: 'O',
     localExecutionHostRpc: 'k',
+    rpcTarget: null,
   },
-} as const satisfies Record<QualifiedOfficialVersion, Record<string, string>>;
+  '26.810.41047': {
+    attachRpc: 'wt',
+    githubService: 'C',
+    gitManager: 'H',
+    localExecutionHostRpc: null,
+    rpcTarget: 'Ct',
+  },
+} as const satisfies Record<QualifiedOfficialVersion, Record<string, string | null>>;
 
 const DEVELOPER_INSTRUCTIONS_EXPORTS = {
   '26.721.81911': 'an',
   '26.727.51351': 'Qt',
   '26.730.61639': 'Yt',
   '26.803.81509': 'Yt',
+  '26.810.41047': 'Zt',
 } as const satisfies Record<QualifiedOfficialVersion, string>;
 
 export function readQualifiedOfficialVersion(sourceRoot: string): QualifiedOfficialVersion {
@@ -232,7 +290,8 @@ export function readQualifiedOfficialVersion(sourceRoot: string): QualifiedOffic
     parsed.version !== '26.721.81911' &&
     parsed.version !== '26.727.51351' &&
     parsed.version !== '26.730.61639' &&
-    parsed.version !== '26.803.81509'
+    parsed.version !== '26.803.81509' &&
+    parsed.version !== '26.810.41047'
   ) {
     throw new Error(`unqualified official package version: ${String(parsed.version)}`);
   }
