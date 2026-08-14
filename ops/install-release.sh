@@ -49,6 +49,7 @@ if ! command -v rsync >/dev/null 2>&1; then
 fi
 rsync -a \
   --exclude='/.git/' \
+  --exclude='/.git' \
   --exclude='/.official/' \
   --exclude='/artifacts/' \
   --exclude='/coverage/' \
