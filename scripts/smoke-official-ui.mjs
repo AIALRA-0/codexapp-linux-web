@@ -499,6 +499,12 @@ try {
     }
     settingsMenuInspection = { beforeOpen, afterOpen };
   }
+  await waitForStableArrayLength(
+    failedLocalRequests,
+    expectedLocalAssetFailures.length,
+    10_000,
+    1_000,
+  );
   const localAssetFailureDetails = normalizeLocalAssetFailures(failedLocalRequests);
   if (
     pageErrors.length > 0 ||
@@ -726,6 +732,23 @@ async function waitFor(predicate, timeoutMs) {
     await new Promise((resolve) => setTimeout(resolve, 20));
   }
   throw new Error(`timed out after ${String(timeoutMs)}ms`);
+}
+
+async function waitForStableArrayLength(values, minimumLength, timeoutMs, stableMs) {
+  const deadline = Date.now() + timeoutMs;
+  let previousLength = values.length;
+  let unchangedSince = Date.now();
+  while (Date.now() < deadline) {
+    if (values.length !== previousLength) {
+      previousLength = values.length;
+      unchangedSince = Date.now();
+    }
+    if (values.length >= minimumLength && Date.now() - unchangedSince >= stableMs) return;
+    await new Promise((resolve) => setTimeout(resolve, 20));
+  }
+  throw new Error(
+    `local asset failures did not settle at the expected minimum count: ${String(minimumLength)}`,
+  );
 }
 
 async function waitForVisibleConversationText(page, text, timeoutMs) {
