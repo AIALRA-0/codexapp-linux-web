@@ -560,6 +560,8 @@ export class UserRuntime extends EventEmitter {
     this.#startupThreadPrewarmer = new StartupThreadPrewarmer({
       count: config.startupThreadPrewarmCount,
       catalog: this.threadCatalog,
+      resume: async (threadId, params, timeoutMs) =>
+        this.#refreshThreadReadCache(threadId, 'thread/resume', params, timeoutMs),
       onComplete: ({ durationMs, threadId }) => {
         this.emit('performance', {
           kind: 'startup-thread-prewarm',
@@ -2057,17 +2059,19 @@ export class UserRuntime extends EventEmitter {
     threadId: string,
     method: 'thread/items/list' | 'thread/resume' | 'thread/turns/list',
     params: unknown,
-  ): Promise<void> {
-    if (this.#stopping || this.#appServer?.ready !== true) return;
+    timeoutMs = 300_000,
+  ): Promise<boolean> {
+    if (this.#stopping || this.#appServer?.ready !== true) return false;
     const ttlMs = rendererResponseCacheTtlMs(method, params);
-    if (ttlMs === null) return;
+    if (ttlMs === null) return false;
     const cacheKey = rendererResponseCacheKey(method, params);
     const generation = this.#rendererResponseCacheGenerationForKey(cacheKey);
-    const principalKey = await this.#readDiscoveryResponseCachePrincipalKey();
-    if (principalKey === undefined) return;
+    const principalKey = rendererResponseCacheCanPersist(method)
+      ? await this.#readDiscoveryResponseCachePrincipalKey()
+      : undefined;
     const startedAtMs = Date.now();
     try {
-      const result = await this.#requireAppServer().request(method, params, 300_000);
+      const result = await this.#requireAppServer().request(method, params, timeoutMs);
       if (
         !rendererResponseCacheGenerationCanStore(
           generation,
@@ -2075,7 +2079,7 @@ export class UserRuntime extends EventEmitter {
         ) ||
         !rendererResponseCanBeCached(method, result)
       ) {
-        return;
+        return false;
       }
       const receivedAtMs = Date.now();
       this.#rendererResponseCache.set(cacheKey, {
@@ -2085,7 +2089,7 @@ export class UserRuntime extends EventEmitter {
           : {}),
         result,
       });
-      if (rendererResponseCacheCanPersist(method)) {
+      if (rendererResponseCacheCanPersist(method) && principalKey !== undefined) {
         this.#discoveryResponseCacheStore.write(
           principalKey,
           rendererPersistentResponseCacheKey(method, params),
@@ -2101,6 +2105,7 @@ export class UserRuntime extends EventEmitter {
         durationMs: receivedAtMs - startedAtMs,
         threadId,
       });
+      return true;
     } catch (error) {
       this.emit('capability-error', {
         requestType: 'thread-history-cache-refresh',
@@ -2108,6 +2113,7 @@ export class UserRuntime extends EventEmitter {
         threadId,
         error: error instanceof Error ? error.message : 'thread history cache refresh failed',
       });
+      return false;
     }
   }
 

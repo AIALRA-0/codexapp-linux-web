@@ -12,6 +12,11 @@ interface StartupThreadCatalog {
 interface StartupThreadPrewarmerOptions {
   count: number;
   catalog: StartupThreadCatalog;
+  resume: (
+    threadId: string,
+    params: Record<string, unknown>,
+    timeoutMs: number,
+  ) => Promise<boolean>;
   onComplete?: (details: { durationMs: number; threadId: string }) => void;
   onError?: (error: Error, details: { method: string; threadId: string }) => void;
   timeoutMs?: number;
@@ -20,6 +25,7 @@ interface StartupThreadPrewarmerOptions {
 export class StartupThreadPrewarmer {
   #count: number;
   #catalog: StartupThreadCatalog;
+  #resume: StartupThreadPrewarmerOptions['resume'];
   #onComplete: NonNullable<StartupThreadPrewarmerOptions['onComplete']>;
   #onError: NonNullable<StartupThreadPrewarmerOptions['onError']>;
   #timeoutMs: number;
@@ -29,6 +35,7 @@ export class StartupThreadPrewarmer {
   constructor(options: StartupThreadPrewarmerOptions) {
     this.#count = options.count;
     this.#catalog = options.catalog;
+    this.#resume = options.resume;
     this.#onComplete = options.onComplete ?? (() => undefined);
     this.#onError = options.onError ?? (() => undefined);
     this.#timeoutMs = options.timeoutMs ?? 120_000;
@@ -82,23 +89,21 @@ export class StartupThreadPrewarmer {
       const thread = recordOrNull(recordOrNull(response)?.thread);
       if (thread === null) throw new Error('thread/read returned no thread');
       if (recordOrNull(thread.status)?.type === 'active') return;
-      await client.request(
-        'thread/resume',
-        {
-          threadId: candidate.threadId,
-          history: null,
-          path: stringOrNull(thread.path),
-          cwd: stringOrNull(thread.cwd) ?? candidate.cwd,
-          excludeTurns: true,
-          initialTurnsPage: {
-            limit: 5,
-            itemsView: 'full',
-            sortDirection: 'desc',
-          },
+      const params = {
+        threadId: candidate.threadId,
+        history: null,
+        path: stringOrNull(thread.path),
+        cwd: stringOrNull(thread.cwd) ?? candidate.cwd,
+        excludeTurns: true,
+        initialTurnsPage: {
+          limit: 5,
+          itemsView: 'full',
+          sortDirection: 'desc',
         },
-        this.#timeoutMs,
-      );
+      };
+      const cached = await this.#resume(candidate.threadId, params, this.#timeoutMs);
       if (this.#generation !== generation) return;
+      if (!cached) throw new Error('thread/resume result was not cached');
       this.#onComplete({ durationMs: Date.now() - startedAtMs, threadId: candidate.threadId });
     } catch (error) {
       if (this.#generation !== generation) return;
