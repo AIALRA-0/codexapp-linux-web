@@ -448,12 +448,14 @@ codexapp_set_expected_official_version() {
 codexapp_set_operational_limits() {
   local temporary
   if [[ "$(grep -c '^MAX_SESSIONS=' "$codexapp_environment_file")" -ne 1 ]] ||
-    [[ "$(grep -c '^MAX_SESSIONS_PER_USER=' "$codexapp_environment_file")" -ne 1 ]]; then
+    [[ "$(grep -c '^MAX_SESSIONS_PER_USER=' "$codexapp_environment_file")" -ne 1 ]] ||
+    [[ "$(grep -c '^STARTUP_THREAD_PREWARM_COUNT=' "$codexapp_environment_file")" -gt 1 ]]; then
     echo "B production session settings are not unique" >&2
     return 1
   fi
   temporary="$(mktemp "$(dirname -- "$codexapp_environment_file")/.codexapp-limits.XXXXXXXX")"
   awk '
+    BEGIN { prewarm = 0 }
     /^MAX_SESSIONS=/ {
       print "MAX_SESSIONS=10"
       next
@@ -462,7 +464,15 @@ codexapp_set_operational_limits() {
       print "MAX_SESSIONS_PER_USER=4"
       next
     }
+    /^STARTUP_THREAD_PREWARM_COUNT=/ {
+      print "STARTUP_THREAD_PREWARM_COUNT=1"
+      prewarm = 1
+      next
+    }
     { print }
+    END {
+      if (prewarm == 0) print "STARTUP_THREAD_PREWARM_COUNT=1"
+    }
   ' "$codexapp_environment_file" >"$temporary"
   chown --reference="$codexapp_environment_file" "$temporary"
   chmod --reference="$codexapp_environment_file" "$temporary"
