@@ -56,6 +56,16 @@ describe('gateway production configuration', () => {
       '0123456789abcdef0123456789abcdef0123456789abcdef',
     );
     expect(config.authProxySecretFile).toBe(fixture.proxySecret);
+    expect(config.startupThreadPrewarmCount).toBe(0);
+  });
+
+  it('bounds startup thread prewarming to a small explicit count', async () => {
+    const fixture = await environment();
+    expect(
+      loadConfig({ ...fixture.values, STARTUP_THREAD_PREWARM_COUNT: '1' })
+        .startupThreadPrewarmCount,
+    ).toBe(1);
+    expect(() => loadConfig({ ...fixture.values, STARTUP_THREAD_PREWARM_COUNT: '4' })).toThrow();
   });
 
   it('rejects a proxy proof that is too short', async () => {

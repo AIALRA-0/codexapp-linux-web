@@ -71,6 +71,7 @@ const configSchema = z.object({
   idleRuntimeSeconds: z.coerce.number().int().min(60).default(900),
   maxSessions: z.coerce.number().int().min(10).max(10_000).default(1_000),
   maxSessionsPerUser: z.coerce.number().int().min(2).max(100).default(20),
+  startupThreadPrewarmCount: z.coerce.number().int().min(0).max(3).default(0),
   maxBridgeMessagesPerSecond: z.coerce.number().int().min(50).max(5_000).default(500),
   minimumFreeBytes: z.coerce
     .number()
@@ -125,6 +126,7 @@ export function loadConfig(environment: NodeJS.ProcessEnv = process.env): Gatewa
     idleRuntimeSeconds: environment.IDLE_RUNTIME_SECONDS,
     maxSessions: environment.MAX_SESSIONS,
     maxSessionsPerUser: environment.MAX_SESSIONS_PER_USER,
+    startupThreadPrewarmCount: environment.STARTUP_THREAD_PREWARM_COUNT,
     maxBridgeMessagesPerSecond: environment.MAX_BRIDGE_MESSAGES_PER_SECOND,
     minimumFreeBytes: environment.MINIMUM_FREE_BYTES,
     devIdentity: environment.NODE_ENV === 'development' ? environment.DEV_IDENTITY : undefined,
