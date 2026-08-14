@@ -4,16 +4,14 @@ import { StartupThreadPrewarmer } from './startup-thread-prewarmer.js';
 
 describe('startup thread prewarmer', () => {
   it('resumes only the configured most recent thread through the official App Server', async () => {
-    const request = vi
-      .fn()
-      .mockResolvedValueOnce({
-        thread: {
-          cwd: '/workspace/recent',
-          path: '/rollouts/recent.jsonl',
-          status: { type: 'idle' },
-        },
-      })
-      .mockResolvedValueOnce({ thread: { id: 'recent' } });
+    const request = vi.fn().mockResolvedValueOnce({
+      thread: {
+        cwd: '/workspace/recent',
+        path: '/rollouts/recent.jsonl',
+        status: { type: 'idle' },
+      },
+    });
+    const resume = vi.fn().mockResolvedValue(true);
     const onComplete = vi.fn();
     const prewarmer = new StartupThreadPrewarmer({
       count: 1,
@@ -25,16 +23,16 @@ describe('startup thread prewarmer', () => {
           ],
         }),
       },
+      resume,
       onComplete,
     });
 
     prewarmer.schedule({ request } as never);
     await prewarmer.waitForThread('recent');
 
-    expect(request).toHaveBeenCalledTimes(2);
-    expect(request).toHaveBeenNthCalledWith(
-      2,
-      'thread/resume',
+    expect(request).toHaveBeenCalledTimes(1);
+    expect(resume).toHaveBeenCalledWith(
+      'recent',
       expect.objectContaining({
         threadId: 'recent',
         path: '/rollouts/recent.jsonl',
@@ -48,17 +46,15 @@ describe('startup thread prewarmer', () => {
 
   it('lets an incoming open wait for an in-progress prewarm instead of duplicating the scan', async () => {
     let finishResume: (() => void) | undefined;
-    const request = vi
-      .fn()
-      .mockResolvedValueOnce({
-        thread: { cwd: '/workspace', path: '/rollout.jsonl', status: { type: 'idle' } },
-      })
-      .mockImplementationOnce(
-        () =>
-          new Promise((resolve) => {
-            finishResume = () => resolve({ thread: { id: 'thread-1' } });
-          }),
-      );
+    const request = vi.fn().mockResolvedValueOnce({
+      thread: { cwd: '/workspace', path: '/rollout.jsonl', status: { type: 'idle' } },
+    });
+    const resume = vi.fn(
+      () =>
+        new Promise<boolean>((resolve) => {
+          finishResume = () => resolve(true);
+        }),
+    );
     const prewarmer = new StartupThreadPrewarmer({
       count: 1,
       catalog: {
@@ -66,6 +62,7 @@ describe('startup thread prewarmer', () => {
           entries: [{ threadId: 'thread-1', cwd: '/workspace' }],
         }),
       },
+      resume,
     });
 
     prewarmer.schedule({ request } as never);
@@ -78,7 +75,8 @@ describe('startup thread prewarmer', () => {
     expect(released).toBe(false);
     finishResume?.();
     await waiting;
-    expect(request).toHaveBeenCalledTimes(2);
+    expect(request).toHaveBeenCalledTimes(1);
+    expect(resume).toHaveBeenCalledTimes(1);
   });
 
   it('does not resume a thread that already has active work', async () => {
@@ -92,6 +90,7 @@ describe('startup thread prewarmer', () => {
           entries: [{ threadId: 'active', cwd: '/workspace' }],
         }),
       },
+      resume: vi.fn().mockResolvedValue(true),
     });
 
     prewarmer.schedule({ request } as never);
@@ -101,6 +100,34 @@ describe('startup thread prewarmer', () => {
       'thread/read',
       { threadId: 'active', includeTurns: false },
       30_000,
+    );
+  });
+
+  it('does not report completion when the official response could not be cached', async () => {
+    const onComplete = vi.fn();
+    const onError = vi.fn();
+    const prewarmer = new StartupThreadPrewarmer({
+      count: 1,
+      catalog: {
+        readBootstrapSnapshot: () => ({
+          entries: [{ threadId: 'uncacheable', cwd: '/workspace' }],
+        }),
+      },
+      resume: vi.fn().mockResolvedValue(false),
+      onComplete,
+      onError,
+    });
+    const request = vi.fn().mockResolvedValue({
+      thread: { cwd: '/workspace', path: '/rollout.jsonl', status: { type: 'idle' } },
+    });
+
+    prewarmer.schedule({ request } as never);
+    await prewarmer.waitForThread('uncacheable');
+
+    expect(onComplete).not.toHaveBeenCalled();
+    expect(onError).toHaveBeenCalledWith(
+      expect.objectContaining({ message: 'thread/resume result was not cached' }),
+      { method: 'thread/resume', threadId: 'uncacheable' },
     );
   });
 });
