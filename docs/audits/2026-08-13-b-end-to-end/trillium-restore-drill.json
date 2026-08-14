@@ -1,0 +1,12 @@
+{
+  "schemaVersion": 1,
+  "workspaceRelativeRoot": "projects",
+  "threads": [
+    {
+      "label": "Trillium Note",
+      "threadId": "019f7292-0097-79c2-a19a-ea179c9327cc",
+      "workspace": "trillium-reader",
+      "rolloutSha256": "b0f1f64af3883a325e7393bb948b9df9aba30a49a3cf095594775368b0b45147"
+    }
+  ]
+}

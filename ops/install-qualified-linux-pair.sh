@@ -123,7 +123,9 @@ jq -n \
   >"$runtime_incomplete/package.json"
 (
   cd "$runtime_incomplete"
-  find . -type f -print0 | sort -z | xargs -0 sha256sum >RUNTIME-SHA256SUMS
+  find . -type f ! -name RUNTIME-SHA256SUMS -print0 |
+    sort -z |
+    xargs -0 sha256sum >RUNTIME-SHA256SUMS
   sha256sum -c --quiet RUNTIME-SHA256SUMS
 )
 chown -R root:root "$runtime_incomplete"
