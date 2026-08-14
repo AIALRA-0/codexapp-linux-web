@@ -12,6 +12,7 @@ import {
   rendererNotificationShouldWaitForResume,
   rendererPersistentResponseCacheKey,
   rendererThreadResumeId,
+  rendererThreadBoundRequestId,
   rendererThreadHistoryRefreshId,
   rendererThreadResumeRefreshShouldReplace,
   rendererNotificationCacheInvalidationPrefixes,
@@ -271,6 +272,9 @@ describe('renderer request diagnostics', () => {
     };
     expect(rendererThreadResumeId(locatorOnly)).toBe('thread-1');
     expect(rendererThreadResumeId({ cwd: '/workspace' })).toBeNull();
+    expect(rendererThreadBoundRequestId('thread/resume', locatorOnly)).toBe('thread-1');
+    expect(rendererThreadBoundRequestId('thread/delete', locatorOnly)).toBe('thread-1');
+    expect(rendererThreadBoundRequestId('thread/read', locatorOnly)).toBeNull();
     expect(rendererThreadResumeRefreshShouldReplace(undefined, locatorOnly)).toBe(true);
     expect(rendererThreadResumeRefreshShouldReplace(locatorOnly, officialRendererShape)).toBe(true);
     expect(rendererThreadResumeRefreshShouldReplace(officialRendererShape, locatorOnly)).toBe(

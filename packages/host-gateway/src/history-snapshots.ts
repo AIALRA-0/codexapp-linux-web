@@ -181,6 +181,17 @@ export class AppServerHistorySnapshotStore {
       .run(principalKey, hostId, threadId);
   }
 
+  deleteHostThread(hostId: string, threadId: string): void {
+    nonEmptyKey(hostId, 'host');
+    nonEmptyKey(threadId, 'thread');
+    this.#database
+      .prepare(
+        `DELETE FROM app_server_history_snapshots
+         WHERE host_id = ? AND thread_id = ?`,
+      )
+      .run(hostId, threadId);
+  }
+
   #migrate(): void {
     const currentVersion =
       (this.#database.prepare('PRAGMA user_version').get()?.user_version as number | undefined) ??

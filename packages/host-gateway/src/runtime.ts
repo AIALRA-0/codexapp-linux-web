@@ -254,6 +254,12 @@ export function rendererThreadResumeId(params: unknown): string | null {
     : null;
 }
 
+export function rendererThreadBoundRequestId(method: string, params: unknown): string | null {
+  return method === 'thread/resume' || method === 'thread/delete'
+    ? rendererThreadResumeId(params)
+    : null;
+}
+
 export function rendererThreadResumeRefreshShouldReplace(
   existing: unknown,
   candidate: unknown,
@@ -1113,10 +1119,10 @@ export class UserRuntime extends EventEmitter {
           }
         }
         const requestShape = rendererRequestShape(prepared.request.method, prepared.request.params);
-        const resumeThreadId =
-          prepared.request.method === 'thread/resume'
-            ? rendererThreadResumeId(prepared.request.params)
-            : null;
+        const requestThreadId = rendererThreadBoundRequestId(
+          prepared.request.method,
+          prepared.request.params,
+        );
         const metadata: RendererRequestMetadata = {
           ...(browserSessionId === undefined ? {} : { browserSessionId }),
           method: prepared.request.method,
@@ -1132,7 +1138,7 @@ export class UserRuntime extends EventEmitter {
           ...(responseCacheTtlMs === null ? {} : { responseCacheTtlMs }),
           ...(requestShape === undefined ? {} : { requestShape }),
           startedAtMs,
-          ...(resumeThreadId === null ? {} : { threadId: resumeThreadId }),
+          ...(requestThreadId === null ? {} : { threadId: requestThreadId }),
           ...(prepared.request.trace === undefined ? {} : { trace: prepared.request.trace }),
         };
         this.#invalidateRendererResponseCache(prepared.request.method);
@@ -1599,6 +1605,9 @@ export class UserRuntime extends EventEmitter {
       }
       if (metadata !== undefined && parsed.error === undefined) {
         this.#invalidateRendererResponseCache(metadata.method);
+        if (metadata.method === 'thread/delete' && metadata.threadId !== undefined) {
+          this.#deleteHistorySnapshot(metadata.threadId);
+        }
       }
       if (metadata?.method === 'getAuthStatus' && parsed.error === undefined) {
         const result =
@@ -1841,6 +1850,7 @@ export class UserRuntime extends EventEmitter {
       if (typeof params.threadId === 'string') {
         this.#prewarmedThreads.stopTracking(params.threadId);
         this.#forgetThreadResumeRefresh(params.threadId);
+        this.#deleteHistorySnapshot(params.threadId);
       }
     }
     if (parsedNotification.method === 'turn/completed') {
@@ -1951,6 +1961,18 @@ export class UserRuntime extends EventEmitter {
         requestType: 'discovery-response-cache-invalidate',
         method,
         error: error instanceof Error ? error.message : 'discovery cache invalidation failed',
+      });
+    }
+  }
+
+  #deleteHistorySnapshot(threadId: string): void {
+    try {
+      this.#historySnapshotStore.deleteHostThread('local', threadId);
+    } catch (error) {
+      this.emit('capability-error', {
+        requestType: 'history-snapshot-delete',
+        threadId,
+        error: error instanceof Error ? error.message : 'history snapshot delete failed',
       });
     }
   }

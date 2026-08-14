@@ -83,6 +83,22 @@ describe('official app-server history snapshots', () => {
     store.close();
   });
 
+  it('removes every cached principal for a deleted host thread', async () => {
+    const store = await createStore();
+    store.write('principal-a', 'local', snapshot('thread-deleted', 'principal a'));
+    store.write('principal-b', 'local', snapshot('thread-deleted', 'principal b'));
+    store.write('principal-a', 'local', snapshot('thread-kept', 'kept'));
+    store.write('principal-a', 'other', snapshot('thread-deleted', 'other host'));
+
+    store.deleteHostThread('local', 'thread-deleted');
+
+    expect(store.read('principal-a', 'local', 'thread-deleted')).toBeNull();
+    expect(store.read('principal-b', 'local', 'thread-deleted')).toBeNull();
+    expect(store.read('principal-a', 'local', 'thread-kept')).not.toBeNull();
+    expect(store.read('principal-a', 'other', 'thread-deleted')).not.toBeNull();
+    store.close();
+  });
+
   it('requires a current official account lease for every operation', async () => {
     const store = await createStore();
     let principal = { accountId: 'account-1', userId: 'user-1' };
