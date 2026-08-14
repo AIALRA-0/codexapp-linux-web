@@ -32,6 +32,10 @@ const requireCompressedMainAsset = process.env.SMOKE_REQUIRE_COMPRESSED_MAIN_ASS
 const expectedLocalAssetFailures = parseExpectedLocalAssetFailures(
   optionalEnvironmentValue('SMOKE_EXPECTED_LOCAL_FAILURES_JSON'),
 );
+const expectedHistorySnapshotGate = parseExpectedBooleanEnvironment(
+  'SMOKE_EXPECTED_HISTORY_SNAPSHOT_GATE',
+  false,
+);
 if (baseUrl === undefined || browserExecutable === undefined) {
   throw new Error('SMOKE_BASE_URL and BROWSER_EXECUTABLE are required');
 }
@@ -275,7 +279,7 @@ try {
     featureOverrideClients.some(
       (client) =>
         client.overrideMarker !== true ||
-        client.checkedValue !== false ||
+        client.checkedValue !== expectedHistorySnapshotGate ||
         client.internationalizationOverride !== true,
     )
   ) {
@@ -530,6 +534,7 @@ try {
       ok: true,
       smokeAttempt,
       rendererVersion: renderer.bootstrapVersion,
+      expectedHistorySnapshotGate,
       historySnapshotGate: renderer.historySnapshotGate,
       documentLocale: renderer.documentLocale,
       loadedLocaleAssets,
@@ -626,6 +631,14 @@ function elapsed(timestampMs) {
 function optionalEnvironmentValue(name) {
   const value = process.env[name];
   return value === undefined || value.length === 0 ? undefined : value;
+}
+
+function parseExpectedBooleanEnvironment(name, defaultValue) {
+  const value = optionalEnvironmentValue(name);
+  if (value === undefined) return defaultValue;
+  if (value === 'true') return true;
+  if (value === 'false') return false;
+  throw new Error(`${name} must be exactly true or false`);
 }
 
 function escapeRegExp(value) {
