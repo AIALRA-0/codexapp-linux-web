@@ -19,6 +19,7 @@ app_port="13018"
 public_origin="http://127.0.0.1:$app_port"
 service_user="codexappweb"
 service_group="codexappweb"
+secret_group="${CODEXAPP_SECRET_GROUP:-codexappsecrets}"
 active_unit=""
 
 source "$application_root/ops/lib/systemd-host-hardening.sh"
@@ -66,6 +67,10 @@ if [[ ! -d "$application_root" || ! -f "$environment_file" ]]; then
   echo "backup restore smoke application or environment is missing" >&2
   exit 1
 fi
+if ! getent group "$secret_group" >/dev/null; then
+  echo "backup restore smoke secret group does not exist: $secret_group" >&2
+  exit 1
+fi
 if port_is_listening; then
   echo "backup restore smoke port is already in use" >&2
   exit 1
@@ -95,6 +100,7 @@ start_isolated_host() {
     --unit "$active_unit" \
     --uid "$service_user" \
     --gid "$service_group" \
+    --property "SupplementaryGroups=$secret_group" \
     --working-directory "$application_root" \
     --property "EnvironmentFile=$environment_file" \
     "${CODEXAPP_HOST_HARDENING_ARGS[@]}" \

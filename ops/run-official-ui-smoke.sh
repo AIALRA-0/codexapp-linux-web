@@ -19,6 +19,7 @@ screenshot_path="/tmp/codexapp-official-ui-smoke-$$.png"
 app_port="13017"
 proxy_port="13016"
 proxy_enabled=0
+secret_group="${CODEXAPP_SECRET_GROUP:-codexappsecrets}"
 
 source "$application_root/ops/lib/systemd-host-hardening.sh"
 source "$application_root/ops/lib/pinned-official-release.sh"
@@ -71,6 +72,10 @@ for required_path in "$application_root" "$environment_file" "$nginx_source"; do
     exit 1
   fi
 done
+if ! getent group "$secret_group" >/dev/null; then
+  echo "official UI smoke secret group does not exist: $secret_group" >&2
+  exit 1
+fi
 if [[ -e "$nginx_target" || -L "$nginx_target" ]]; then
   echo "temporary Nginx smoke configuration already exists" >&2
   exit 1
@@ -108,6 +113,7 @@ systemd-run \
   --unit "$service_name" \
   --uid "$service_user" \
   --gid "$service_group" \
+  --property "SupplementaryGroups=$secret_group" \
   --working-directory "$application_root" \
   --property "EnvironmentFile=$environment_file" \
   "${CODEXAPP_HOST_HARDENING_ARGS[@]}" \
