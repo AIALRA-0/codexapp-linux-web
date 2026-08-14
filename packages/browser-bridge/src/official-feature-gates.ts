@@ -42,12 +42,13 @@ interface StatsigGlobal {
 type StatsigScope = Record<string, unknown>;
 
 /**
- * The unchanged official renderer contains a recent-history snapshot path.
- * This experimental B candidate enables that official path only for isolated
- * qualification against a verified, authorized production snapshot. It must
- * not be promoted unless no-snapshot fallback and mutation invalidation are
- * proven separately. The same official Statsig seam enables the renderer's
- * bundled locale catalogs.
+ * The unchanged official renderer contains both its established thread-loading
+ * path and an experimental recent-history snapshot path. The snapshot path can
+ * leave a cold, migrated thread at its metadata-only shell when no authorized
+ * snapshot exists, so the browser host keeps that rollout off and lets the
+ * renderer use its established App Server path. The same official Statsig seam
+ * enables the renderer's bundled locale catalogs: without it, a saved locale
+ * changes document.lang but leaves every label in English.
  */
 export function installOfficialHistorySnapshotGate(scope: StatsigScope): () => void {
   const existingDescriptor = Object.getOwnPropertyDescriptor(scope, '__STATSIG__');
@@ -169,7 +170,7 @@ function decorateStatsigClient(client: StatsigClient | undefined): void {
         ...officialOverride.details,
         reason: 'LocalOverride',
       },
-      value: true,
+      value: false,
     };
   };
   adapter.getLayerOverride = (layer, user, options) => {

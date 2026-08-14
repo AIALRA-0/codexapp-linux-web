@@ -288,6 +288,21 @@ try {
   ) {
     throw new Error(`official renderer did not mount: ${JSON.stringify(renderer)}`);
   }
+  const featureOverrideClients = renderer.historySnapshotGate.clients ?? [];
+  if (
+    renderer.historySnapshotGate.available !== true ||
+    featureOverrideClients.length === 0 ||
+    featureOverrideClients.some(
+      (client) =>
+        client.overrideMarker !== true ||
+        client.checkedValue !== false ||
+        client.internationalizationOverride !== true,
+    )
+  ) {
+    throw new Error(
+      `official renderer feature overrides are unsafe: ${JSON.stringify(renderer.historySnapshotGate)}`,
+    );
+  }
   if (pageErrors.length > 0 || failedLocalRequests.length > 0) {
     throw new Error(
       `official renderer emitted errors: ${JSON.stringify({ pageErrors, failedLocalRequests })}`,
