@@ -29,6 +29,9 @@ const switchLocaleSequence = parseLocaleSwitchSequence(
 );
 const verifyLocaleAfterReload = process.env.SMOKE_VERIFY_LOCALE_AFTER_RELOAD === '1';
 const requireCompressedMainAsset = process.env.SMOKE_REQUIRE_COMPRESSED_MAIN_ASSET === '1';
+const expectedLocalAssetFailures = parseExpectedLocalAssetFailures(
+  optionalEnvironmentValue('SMOKE_EXPECTED_LOCAL_FAILURES_JSON'),
+);
 if (baseUrl === undefined || browserExecutable === undefined) {
   throw new Error('SMOKE_BASE_URL and BROWSER_EXECUTABLE are required');
 }
@@ -303,11 +306,6 @@ try {
       `official renderer feature overrides are unsafe: ${JSON.stringify(renderer.historySnapshotGate)}`,
     );
   }
-  if (pageErrors.length > 0 || failedLocalRequests.length > 0) {
-    throw new Error(
-      `official renderer emitted errors: ${JSON.stringify({ pageErrors, failedLocalRequests })}`,
-    );
-  }
   if (requireCompressedMainAsset && mainAssetEncoding !== 'gzip') {
     throw new Error(
       `official renderer main asset was not compressed: ${JSON.stringify({
@@ -491,6 +489,19 @@ try {
     }
     settingsMenuInspection = { beforeOpen, afterOpen };
   }
+  const localAssetFailureDetails = normalizeLocalAssetFailures(failedLocalRequests);
+  if (
+    pageErrors.length > 0 ||
+    JSON.stringify(localAssetFailureDetails) !== JSON.stringify(expectedLocalAssetFailures)
+  ) {
+    throw new Error(
+      `official renderer emitted unexpected errors: ${JSON.stringify({
+        pageErrors,
+        localAssetFailureDetails,
+        expectedLocalAssetFailures,
+      })}`,
+    );
+  }
   const screenshot = await page.screenshot({
     ...(screenshotPath === undefined ? {} : { path: screenshotPath }),
     type: 'png',
@@ -531,7 +542,10 @@ try {
       settingsMenuInspection,
       screenshotBytes: screenshot.length,
       screenshotMaximumChannelDeviation: Math.round(maximumChannelDeviation * 100) / 100,
-      localAssetFailures: failedLocalRequests.length,
+      localAssetFailures: localAssetFailureDetails.length,
+      localAssetFailureDetails,
+      expectedLocalAssetFailures: expectedLocalAssetFailures.length,
+      expectedLocalAssetFailureDetails: expectedLocalAssetFailures,
       pageErrors: pageErrors.length,
       timingsMs: {
         domContentLoaded: elapsed(domContentLoadedAtMs),
@@ -573,7 +587,8 @@ try {
       error: error instanceof Error ? error.message : String(error),
       failureScreenshotPath,
       failureState,
-      localAssetFailures: failedLocalRequests,
+      localAssetFailures: normalizeLocalAssetFailures(failedLocalRequests),
+      expectedLocalAssetFailures,
       pageErrors,
       timingsMs: {
         domContentLoaded: elapsed(domContentLoadedAtMs),
@@ -629,6 +644,46 @@ function parseLocaleSwitchSequence(json, label, expected) {
     throw new Error('SMOKE_SWITCH_LOCALE_EXPECTED is required with a locale label');
   }
   return [{ label, expected }];
+}
+
+function parseExpectedLocalAssetFailures(json) {
+  if (json === undefined) return [];
+  const parsed = JSON.parse(json);
+  if (
+    !Array.isArray(parsed) ||
+    parsed.some((entry) => {
+      if (entry === null || typeof entry !== 'object' || Array.isArray(entry)) return true;
+      const keys = Object.keys(entry).sort();
+      return (
+        JSON.stringify(keys) !== JSON.stringify(['path', 'status']) ||
+        !Number.isInteger(entry.status) ||
+        entry.status < 400 ||
+        entry.status > 599 ||
+        typeof entry.path !== 'string' ||
+        !entry.path.startsWith('/')
+      );
+    })
+  ) {
+    throw new Error(
+      'SMOKE_EXPECTED_LOCAL_FAILURES_JSON must be an array of exact {status,path} entries',
+    );
+  }
+  return sortLocalAssetFailures(parsed);
+}
+
+function normalizeLocalAssetFailures(failures) {
+  return sortLocalAssetFailures(
+    failures.map(({ status, url }) => ({
+      status,
+      path: new URL(url).pathname,
+    })),
+  );
+}
+
+function sortLocalAssetFailures(failures) {
+  return [...failures].sort(
+    (left, right) => left.status - right.status || left.path.localeCompare(right.path),
+  );
 }
 
 function reportProgress(stage) {
