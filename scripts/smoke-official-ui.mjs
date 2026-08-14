@@ -70,6 +70,9 @@ let clickTargetVisibleAtMs;
 let clickedAtMs;
 let afterClickTextVisibleAtMs;
 let waitedTextGoneAtMs;
+let reloadStartedAtMs;
+let reloadExpectedTextVisibleAtMs;
+let reloadConversationTextVisibleAtMs;
 let settingsMenuInspection;
 
 page.on('pageerror', (error) => pageErrors.push(error.message));
@@ -150,33 +153,7 @@ try {
     reportProgress('expected-text-visible');
   }
   if (expectedConversationText !== undefined) {
-    await page.waitForFunction(
-      (text) =>
-        Array.from(document.querySelectorAll('body *')).some((element) => {
-          if (!(element instanceof HTMLElement)) return false;
-          const ownText = (element.innerText ?? '').trim();
-          if (!ownText.includes(text)) return false;
-          if (
-            Array.from(element.children).some((child) => (child.textContent ?? '').includes(text))
-          ) {
-            return false;
-          }
-          const rect = element.getBoundingClientRect();
-          const style = getComputedStyle(element);
-          return (
-            rect.width > 0 &&
-            rect.height > 0 &&
-            rect.left >= 275 &&
-            rect.bottom > 100 &&
-            rect.top < innerHeight &&
-            style.display !== 'none' &&
-            style.visibility !== 'hidden' &&
-            style.opacity !== '0'
-          );
-        }),
-      expectedConversationText,
-      { timeout: contentTimeoutMs },
-    );
+    await waitForVisibleConversationText(page, expectedConversationText, contentTimeoutMs);
     reportProgress('conversation-text-visible');
   }
 
@@ -471,7 +448,9 @@ try {
             switchedLocale = { sequence: switchedLocales };
             if (verifyLocaleAfterReload) {
               const finalLocale = switchLocaleSequence.at(-1).expected;
+              reloadStartedAtMs = Date.now();
               await page.reload({ waitUntil: 'domcontentloaded', timeout: 45_000 });
+              reportProgress('reload-dom-content-loaded');
               await page.waitForFunction(
                 (locale) => document.documentElement.lang === locale,
                 finalLocale,
@@ -479,6 +458,30 @@ try {
               );
               switchedLocale.persistedAfterReload =
                 (await page.evaluate(() => document.documentElement.lang)) === finalLocale;
+              if (expectedText !== undefined) {
+                await page.waitForFunction(
+                  (text) => document.body.innerText.includes(text),
+                  expectedText,
+                  {
+                    timeout: contentTimeoutMs,
+                  },
+                );
+                reloadExpectedTextVisibleAtMs = Date.now();
+              }
+              if (expectedConversationText !== undefined) {
+                await waitForVisibleConversationText(
+                  page,
+                  expectedConversationText,
+                  contentTimeoutMs,
+                );
+                reloadConversationTextVisibleAtMs = Date.now();
+              }
+              switchedLocale.contentPersistedAfterReload =
+                expectedText === undefined || reloadExpectedTextVisibleAtMs !== undefined;
+              switchedLocale.conversationPersistedAfterReload =
+                expectedConversationText === undefined ||
+                reloadConversationTextVisibleAtMs !== undefined;
+              reportProgress('reload-conversation-text-visible');
             }
           }
         }
@@ -559,6 +562,14 @@ try {
         clicked: elapsed(clickedAtMs),
         afterClickTextVisible: elapsed(afterClickTextVisibleAtMs),
         waitedTextGone: elapsed(waitedTextGoneAtMs),
+        reloadExpectedTextVisible:
+          reloadStartedAtMs === undefined || reloadExpectedTextVisibleAtMs === undefined
+            ? null
+            : reloadExpectedTextVisibleAtMs - reloadStartedAtMs,
+        reloadConversationTextVisible:
+          reloadStartedAtMs === undefined || reloadConversationTextVisibleAtMs === undefined
+            ? null
+            : reloadConversationTextVisibleAtMs - reloadStartedAtMs,
         clickToContent:
           clickedAtMs === undefined || afterClickTextVisibleAtMs === undefined
             ? null
@@ -702,4 +713,36 @@ async function waitFor(predicate, timeoutMs) {
     await new Promise((resolve) => setTimeout(resolve, 20));
   }
   throw new Error(`timed out after ${String(timeoutMs)}ms`);
+}
+
+async function waitForVisibleConversationText(page, text, timeoutMs) {
+  await page.waitForFunction(
+    (expectedText) =>
+      Array.from(document.querySelectorAll('body *')).some((element) => {
+        if (!(element instanceof HTMLElement)) return false;
+        const ownText = (element.innerText ?? '').trim();
+        if (!ownText.includes(expectedText)) return false;
+        if (
+          Array.from(element.children).some((child) =>
+            (child.textContent ?? '').includes(expectedText),
+          )
+        ) {
+          return false;
+        }
+        const rect = element.getBoundingClientRect();
+        const style = getComputedStyle(element);
+        return (
+          rect.width > 0 &&
+          rect.height > 0 &&
+          rect.left >= 275 &&
+          rect.bottom > 100 &&
+          rect.top < innerHeight &&
+          style.display !== 'none' &&
+          style.visibility !== 'hidden' &&
+          style.opacity !== '0'
+        );
+      }),
+    text,
+    { timeout: timeoutMs },
+  );
 }

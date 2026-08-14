@@ -1343,6 +1343,15 @@ export class UserRuntime extends EventEmitter {
           browserSessionId,
         );
         return undefined;
+      case 'show-diff':
+        this.#emitRendererMessage(
+          {
+            type: 'toggle-diff-panel',
+            open: true,
+          },
+          browserSessionId,
+        );
+        return undefined;
       case 'avatar-overlay-open-state-request':
         this.#emitRendererMessage(
           {
@@ -1369,6 +1378,8 @@ export class UserRuntime extends EventEmitter {
       case 'keyboard-layout-map-changed':
       case 'app-shell-shortcut-state-changed':
       case 'view-focused':
+      case 'show-plan-summary':
+      case 'update-diff-if-open':
         // These update native windows, docks, trays, power management, or
         // Electron-owned webview partitions. The browser already owns those
         // surfaces, so accepting the notification is the exact Linux/web
