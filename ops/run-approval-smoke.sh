@@ -20,6 +20,7 @@ public_origin="http://127.0.0.1:$host_port"
 fixture_url="http://127.0.0.1:$fixture_port"
 service_user="codexappweb"
 service_group="codexappweb"
+secret_group="${CODEXAPP_SECRET_GROUP:-codexappsecrets}"
 user_key="$(printf %s 'approval-smoke-subject' | sha256sum | awk '{print $1}')"
 user_root="$runtime_root/users/$user_key"
 codex_home="$user_root/codex-home"
@@ -68,6 +69,10 @@ trap cleanup EXIT
 
 if [[ ! -d "$application_root" || ! -f "$environment_file" ]]; then
   echo "approval smoke application or environment is missing" >&2
+  exit 1
+fi
+if ! getent group "$secret_group" >/dev/null; then
+  echo "approval smoke secret group does not exist: $secret_group" >&2
   exit 1
 fi
 if port_is_listening "$host_port" || port_is_listening "$fixture_port"; then
@@ -153,6 +158,7 @@ systemd-run \
   --uid "$service_user" \
   --gid "$service_group" \
   --working-directory "$application_root" \
+  --property "SupplementaryGroups=$secret_group" \
   --property "EnvironmentFile=$environment_file" \
   "${CODEXAPP_HOST_HARDENING_ARGS[@]}" \
   -- \

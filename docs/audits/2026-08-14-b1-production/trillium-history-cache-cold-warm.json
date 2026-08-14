@@ -1,0 +1,20 @@
+{
+  "ok": true,
+  "threadLabel": "trillium-note-production",
+  "initial": {
+    "cold": {
+      "bytes": 562278,
+      "dataCount": 5,
+      "durationMs": 162,
+      "hasNextCursor": true,
+      "sha256": "fa32b2916959d2b16c3bda95838bf2d1c780341eda00dfe324f9ae9bc639e7b1"
+    },
+    "warm": {
+      "bytes": 562278,
+      "dataCount": 5,
+      "durationMs": 69,
+      "hasNextCursor": true,
+      "sha256": "fa32b2916959d2b16c3bda95838bf2d1c780341eda00dfe324f9ae9bc639e7b1"
+    }
+  }
+}

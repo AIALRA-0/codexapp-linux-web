@@ -22,29 +22,33 @@ const backupPath = join(codexHome, 'config.toml.before-migrated-local-mcp');
 const temporaryPath = join(codexHome, `.config.toml.migrated-local-mcp.${String(process.pid)}.tmp`);
 
 assertRegularFile(configPath, 'Codex config');
-assertRegularFile(googleLauncher, 'Google MCP launcher');
-assertDirectory(privateRoot, 'private MCP root');
+const googleLauncherAvailable = isRegularFile(googleLauncher);
+if (googleLauncherAvailable) assertDirectory(privateRoot, 'private MCP root');
 
 const original = readFileSync(configPath, 'utf8');
 const originalMetadata = statSync(configPath);
 let next = removeTomlTable(original, '[mcp_servers.aialra_google_email]');
 next = removeTomlTable(next, '[mcp_servers.aialra_microsoft_email]');
 
-const googleConfigRoot = join(privateRoot, 'google', 'config');
-const googleDataRoot = join(privateRoot, 'google', 'data');
-const googleSection = [
-  '# Managed by ops/configure-migrated-local-mcp.mjs.',
-  '[mcp_servers.aialra_google_email]',
-  'command = "/usr/bin/node"',
-  `args = [${JSON.stringify(googleLauncher)}]`,
-  `cwd = ${JSON.stringify(projectRoot)}`,
-  'startup_timeout_sec = 120',
-  'tool_timeout_sec = 120',
-  'default_tools_approval_mode = "writes"',
-  `env = { XDG_CONFIG_HOME = ${JSON.stringify(googleConfigRoot)}, XDG_DATA_HOME = ${JSON.stringify(googleDataRoot)} }`,
-  'env_vars = ["HTTPS_PROXY", "NO_PROXY"]',
-].join('\n');
-next = `${next.trimEnd()}\n\n${googleSection}\n`;
+if (googleLauncherAvailable) {
+  const googleConfigRoot = join(privateRoot, 'google', 'config');
+  const googleDataRoot = join(privateRoot, 'google', 'data');
+  const googleSection = [
+    '# Managed by ops/configure-migrated-local-mcp.mjs.',
+    '[mcp_servers.aialra_google_email]',
+    'command = "/usr/bin/node"',
+    `args = [${JSON.stringify(googleLauncher)}]`,
+    `cwd = ${JSON.stringify(projectRoot)}`,
+    'startup_timeout_sec = 120',
+    'tool_timeout_sec = 120',
+    'default_tools_approval_mode = "writes"',
+    `env = { XDG_CONFIG_HOME = ${JSON.stringify(googleConfigRoot)}, XDG_DATA_HOME = ${JSON.stringify(googleDataRoot)} }`,
+    'env_vars = ["HTTPS_PROXY", "NO_PROXY"]',
+  ].join('\n');
+  next = `${next.trimEnd()}\n\n${googleSection}\n`;
+} else {
+  next = `${next.trimEnd()}\n`;
+}
 
 if (next !== original) {
   if (!existsSync(backupPath)) {
@@ -62,10 +66,15 @@ process.stdout.write(
   `${JSON.stringify({
     ok: true,
     changed: next !== original,
-    configuredServers: ['aialra_google_email'],
-    removedServers: ['aialra_microsoft_email'],
-    removalReason: 'source Microsoft 365 account is retired',
-    googleStorageIsPrivate: true,
+    configuredServers: googleLauncherAvailable ? ['aialra_google_email'] : [],
+    removedServers: googleLauncherAvailable
+      ? ['aialra_microsoft_email']
+      : ['aialra_google_email', 'aialra_microsoft_email'],
+    removalReason: googleLauncherAvailable
+      ? 'source Microsoft 365 account is retired'
+      : 'local Google MCP project is absent; official Gmail remains available',
+    googleLauncherAvailable,
+    googleStorageIsPrivate: googleLauncherAvailable,
   })}\n`,
 );
 
@@ -102,6 +111,11 @@ function assertRegularFile(path, label) {
   if (!metadata.isFile() || metadata.isSymbolicLink()) {
     throw new Error(`${label} must be a regular non-symbolic file`);
   }
+}
+
+function isRegularFile(path) {
+  const metadata = lstatSync(path, { throwIfNoEntry: false });
+  return metadata?.isFile() === true && !metadata.isSymbolicLink();
 }
 
 function assertDirectory(path, label) {

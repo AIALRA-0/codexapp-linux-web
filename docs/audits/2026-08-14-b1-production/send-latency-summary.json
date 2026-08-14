@@ -1,0 +1,12 @@
+{
+  "ok": true,
+  "runs": 3,
+  "acceptedMs": [51, 24, 13],
+  "firstVisibleOutputMs": [4345, 3750, 3868],
+  "completedMs": [4628, 4028, 4197],
+  "p50": {
+    "accepted": 24,
+    "firstVisibleOutput": 3868,
+    "completed": 4197
+  }
+}

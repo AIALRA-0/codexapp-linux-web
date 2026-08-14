@@ -39,6 +39,7 @@
     "smoke:host-persistence": "node scripts/smoke-host-persistence.mjs",
     "smoke:large-thread": "node scripts/smoke-large-thread.mjs",
     "smoke:projects-egress": "node scripts/smoke-projects-egress.mjs",
+    "smoke:production-lifecycle": "node scripts/smoke-production-lifecycle.mjs",
     "smoke:mcp": "node scripts/smoke-mcp.mjs",
     "smoke:official-ui": "node scripts/smoke-official-ui.mjs",
     "smoke:task-start": "node scripts/smoke-task-start.mjs",

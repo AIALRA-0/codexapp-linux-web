@@ -52,6 +52,7 @@ import {
   type HistorySnapshotPrincipal,
 } from './history-snapshots.js';
 import { OfficialPrewarmedThreads } from './prewarmed-threads.js';
+import { StartupThreadPrewarmer } from './startup-thread-prewarmer.js';
 import { RequestUserInputAutoResolution } from './request-user-input-auto-resolution.js';
 import { ensureRuntimeDirectory, resolveRuntimeDirectory } from './runtime-directory.js';
 import { DurableStateStore } from './state.js';
@@ -459,6 +460,7 @@ export class UserRuntime extends EventEmitter {
   #githubService: OfficialGithubService | undefined;
   #pendingGitRequests = new Map<string, string>();
   #prewarmedThreads: OfficialPrewarmedThreads;
+  #startupThreadPrewarmer: StartupThreadPrewarmer;
   #turnLatency: TurnLatencyTracker;
   #bootstrapPrepared = false;
   #preparingBootstrap: Promise<void> | undefined;
@@ -552,6 +554,24 @@ export class UserRuntime extends EventEmitter {
         this.emit('capability-error', {
           requestType: 'thread-catalog',
           error: error.message,
+        });
+      },
+    });
+    this.#startupThreadPrewarmer = new StartupThreadPrewarmer({
+      count: config.startupThreadPrewarmCount,
+      catalog: this.threadCatalog,
+      onComplete: ({ durationMs, threadId }) => {
+        this.emit('performance', {
+          kind: 'startup-thread-prewarm',
+          durationMs,
+          threadId,
+        });
+      },
+      onError: (error, details) => {
+        this.emit('capability-error', {
+          requestType: 'startup-thread-prewarm',
+          error: error.message,
+          ...details,
         });
       },
     });
@@ -842,6 +862,7 @@ export class UserRuntime extends EventEmitter {
     this.#threadResumeRefreshTimers.clear();
     this.#threadResumeRefreshParams.clear();
     this.#threadLatestPageRefreshParams.clear();
+    this.#startupThreadPrewarmer.clear();
     await this.#gitWorker?.stop();
     this.#gitWorker = undefined;
     this.#pendingGitRequests.clear();
@@ -902,6 +923,10 @@ export class UserRuntime extends EventEmitter {
           this.config.minimumFreeBytes,
           prepared.request.method,
         );
+        if (prepared.request.method === 'thread/resume') {
+          const threadId = rendererThreadResumeId(prepared.request.params);
+          if (threadId !== null) await this.#startupThreadPrewarmer.waitForThread(threadId);
+        }
         if (prepared.request.method === 'app/list') {
           const cached = await this.#appDirectoryCache.list(prepared.request.params);
           if (cached !== null) {
@@ -1677,6 +1702,7 @@ export class UserRuntime extends EventEmitter {
     await this.#refreshModelProviderCapabilities(client);
     this.#appServerRestartAttempt = 0;
     await this.threadCatalog.start(client);
+    this.#startupThreadPrewarmer.schedule(client);
     await this.automationController.start();
   }
 
@@ -1700,6 +1726,7 @@ export class UserRuntime extends EventEmitter {
         error: error instanceof Error ? error.message : 'thread catalog recovery failed',
       });
     });
+    this.#startupThreadPrewarmer.schedule(client);
   }
 
   async #refreshModelProviderCapabilities(client: CodexAppServerClient): Promise<void> {
