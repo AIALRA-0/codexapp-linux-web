@@ -60,6 +60,8 @@ rollback() {
     fi
     systemctl start "$codexapp_service_name" || true
     codexapp_wait_for_health 90 || true
+  elif [[ -n "$snapshot_root" ]]; then
+    codexapp_discard_unfinalized_snapshot "$snapshot_root" "$release_id" || true
   fi
   rm -f -- "$environment_backup"
   exit "$exit_code"
@@ -72,7 +74,7 @@ snapshot_root="$CODEXAPP_PREPARED_SNAPSHOT_ROOT"
 # Wait for the shared host to settle again before entering the brief stopped-
 # service final sync instead of either bypassing the gate or failing every
 # release with a production-sized state tree.
-codexapp_wait_for_controller_safe
+codexapp_wait_for_controller_recovery
 codexapp_assert_no_background_work
 systemctl stop "$codexapp_service_name"
 switched=1
