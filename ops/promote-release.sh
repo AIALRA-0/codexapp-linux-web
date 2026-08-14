@@ -97,7 +97,7 @@ if ! codexapp_wait_for_health 90; then
   echo "promoted release did not become ready" >&2
   exit 1
 fi
-codexapp_assert_controller_safe
+codexapp_assert_controller_work_safe
 
 trap - EXIT
 rm -f -- "$environment_backup"

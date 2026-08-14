@@ -27,10 +27,8 @@ codexapp_pressure_avg60() {
   }' "/proc/pressure/$resource"
 }
 
-codexapp_assert_controller_safe() {
+codexapp_assert_controller_work_safe() {
   local snapshot
-  local memory_pressure
-  local io_pressure
   curl -fsS --max-time 5 "$codexapp_controller_health_url" >/dev/null || {
     echo "stable A controller is not ready; B release refused" >&2
     return 75
@@ -46,6 +44,12 @@ codexapp_assert_controller_safe() {
     echo "stable A controller is busy; B release refused" >&2
     return 75
   fi
+}
+
+codexapp_assert_controller_safe() {
+  local memory_pressure
+  local io_pressure
+  codexapp_assert_controller_work_safe
   memory_pressure="$(codexapp_pressure_avg60 memory)"
   io_pressure="$(codexapp_pressure_avg60 io)"
   if ! awk -v value="$memory_pressure" 'BEGIN { exit !(value < 1) }' ||
