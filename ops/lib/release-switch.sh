@@ -465,13 +465,13 @@ codexapp_set_operational_limits() {
       next
     }
     /^STARTUP_THREAD_PREWARM_COUNT=/ {
-      print "STARTUP_THREAD_PREWARM_COUNT=1"
+      print "STARTUP_THREAD_PREWARM_COUNT=0"
       prewarm = 1
       next
     }
     { print }
     END {
-      if (prewarm == 0) print "STARTUP_THREAD_PREWARM_COUNT=1"
+      if (prewarm == 0) print "STARTUP_THREAD_PREWARM_COUNT=0"
     }
   ' "$codexapp_environment_file" >"$temporary"
   chown --reference="$codexapp_environment_file" "$temporary"
