@@ -7,18 +7,25 @@ const { CodexAppServerClient } = await import(
 const codexBin = requiredEnvironment('VERIFY_CODEX_BIN');
 const codexHome = requiredEnvironment('VERIFY_CODEX_HOME');
 const workspace = requiredEnvironment('VERIFY_WORKSPACE');
-const rendererVersion = process.env.VERIFY_RENDERER_VERSION ?? '26.730.61639';
+const rendererVersion = process.env.VERIFY_RENDERER_VERSION ?? '26.810.41047';
 const configuredGoogleAccounts = csvEnvironment('VERIFY_GOOGLE_ACCOUNTS');
 const refreshGoogleAccounts = process.env.VERIFY_REFRESH_GOOGLE_ACCOUNTS === '1';
+const verifyLegacyGoogleEmail =
+  process.env.VERIFY_LEGACY_GOOGLE_EMAIL === '1' ||
+  configuredGoogleAccounts.length > 0 ||
+  refreshGoogleAccounts;
 const requestTimeoutMs = positiveNumberEnvironment('VERIFY_REQUEST_TIMEOUT_MS', 60_000);
 const statusAttempts = positiveNumberEnvironment('VERIFY_STATUS_ATTEMPTS', 60);
 const cases = [
   smokeCase('openaiDeveloperDocs', 'list_openai_docs', {}),
-  smokeCase('aialra_google_email', 'manage_accounts', { operation: 'list' }),
   smokeCase('codex_apps', 'github.get_profile', {}),
   smokeCase('codex_apps', 'gmail.get_profile', {}),
   smokeCase('codex_apps', 'google_drive.get_profile', {}),
   smokeCase('codex_apps', 'microsoft_outlook_email.get_profile', {}),
+  smokeCase('aialra-shopping-browser', 'browser_snapshot', {}),
+  ...(verifyLegacyGoogleEmail
+    ? [smokeCase('aialra_google_email', 'manage_accounts', { operation: 'list' })]
+    : []),
 ];
 
 const client = new CodexAppServerClient({
@@ -63,47 +70,50 @@ try {
     results.push(await runCase(client, threadId, status, testCase));
     reportProgress(`tool-finish:${testCase.label}`);
   }
-  const discoveredGoogleAccounts = await discoverGoogleAccounts(client, threadId);
-  const googleAccounts = unique([...configuredGoogleAccounts, ...discoveredGoogleAccounts]);
   const repairs = [];
-  if (googleAccounts.length === 0) {
-    results.push({
-      label: 'aialra_google_email/account-discovery',
-      server: 'aialra_google_email',
-      tool: 'manage_accounts',
-      ok: false,
-      discovered: true,
-      called: true,
-      reason: 'no-configured-accounts',
-      milliseconds: 0,
-    });
-  }
-  for (const account of googleAccounts) {
-    if (refreshGoogleAccounts) {
-      repairs.push(await refreshGoogleAccount(client, threadId, account));
+  if (verifyLegacyGoogleEmail) {
+    const discoveredGoogleAccounts = await discoverGoogleAccounts(client, threadId);
+    const googleAccounts = unique([...configuredGoogleAccounts, ...discoveredGoogleAccounts]);
+    if (googleAccounts.length === 0) {
+      results.push({
+        label: 'aialra_google_email/account-discovery',
+        server: 'aialra_google_email',
+        tool: 'manage_accounts',
+        ok: false,
+        discovered: true,
+        called: true,
+        reason: 'no-configured-accounts',
+        milliseconds: 0,
+      });
     }
-    results.push(
-      await runCase(
-        client,
-        threadId,
-        status,
-        smokeCase(
-          'aialra_google_email',
-          'manage_accounts',
-          { operation: 'status', email: account },
-          {
-            label: `google-account:${hashIdentifier(account)}`,
-            expected: /(?:tokenValid["']?\s*:\s*true|\[x\]\s*Token valid)/i,
-          },
+    for (const account of googleAccounts) {
+      if (refreshGoogleAccounts) {
+        repairs.push(await refreshGoogleAccount(client, threadId, account));
+      }
+      results.push(
+        await runCase(
+          client,
+          threadId,
+          status,
+          smokeCase(
+            'aialra_google_email',
+            'manage_accounts',
+            { operation: 'status', email: account },
+            {
+              label: `google-account:${hashIdentifier(account)}`,
+              expected: /(?:tokenValid["']?\s*:\s*true|\[x\]\s*Token valid)/i,
+            },
+          ),
         ),
-      ),
-    );
+      );
+    }
   }
   const failures = results.filter((result) => !result.ok);
   process.stdout.write(
     `${JSON.stringify({
       ok: failures.length === 0,
       rendererVersion,
+      legacyGoogleEmailVerified: verifyLegacyGoogleEmail,
       tested: results.length,
       results,
       repairs,
