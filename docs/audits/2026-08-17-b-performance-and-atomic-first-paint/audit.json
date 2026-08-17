@@ -17,7 +17,7 @@
     "risk_level": "high",
     "decision_owner": "AIALRA",
     "desired_outcome": "首屏只在项目、目标对话、最新正文和输入区一致后一次显示；超大对话不再自动遍历全部历史；常用对话保持热状态。",
-    "current_state": "正式 B 仍运行上一不可变版本。候选已通过隔离浏览器、真实生产状态两轮读取和仅预热最近线程的对照测试。",
+    "current_state": "正式 B 已发布 20260817.1445-b2-atomic-first-paint。发布前状态快照和逐文件二次校验通过；发布后真实 Trillium 冷、热首屏、五种语言及刷新保持通过；A 保持原版本且未重启。",
     "decision": "是否发布原子首屏、官方按需历史分页、最近线程预热和 24 小时运行时保温。",
     "success_metrics": [
       "原子首屏事件触发时项目名、目标对话最新正文和输入区已经同时可见",
@@ -178,7 +178,7 @@
       "id": "S4",
       "origin": "internal",
       "title": "候选完整 CI、隔离鉴权和任务启动",
-      "location": "repository:release-20260817.1435-b2-atomic-first-paint",
+      "location": "repository:release-20260817.1445-b2-atomic-first-paint;commit:98c321deebdb421e784bc24e5c7cffa07a5d69f8",
       "source_type": "test-observation",
       "date": "2026-08-17",
       "accessed_at": "2026-08-17",
@@ -389,12 +389,18 @@
       "name": "最近一线程预热对照",
       "result": "冷路径降至 61.254 秒，未出现历史自动排空、页面错误或资源失败。",
       "source_ids": ["S3"]
+    },
+    {
+      "id": "V4",
+      "name": "正式 B 发布后真实状态复测",
+      "result": "冷启动最新正文 52.100 秒、原子首屏 52.848 秒；热启动最新正文 10.916 秒、原子首屏 11.771 秒。English、繁體中文（台灣）、日本語、français (France)、简体中文依次生效，最终简体中文和最新正文在刷新后保持；gzip 生效，页面错误和本地资源失败均为 0。",
+      "source_ids": ["S3", "S4"]
     }
   ],
   "alignment_questions": [],
   "recommendation": {
     "verdict": "proceed-with-guardrails",
-    "action": "发布 P2；首屏保持遮罩直到真实完整状态，历史按需分页，最近一线程预热并保温 24 小时。",
+    "action": "P2 已发布；继续监控首屏遮罩、官方按需历史分页、最近一线程预热和 24 小时保温。",
     "rationale": "候选解决资源消失错觉并去掉可避免的全历史加载，真实大线程热路径和预热路径均改善，且没有增加第二套持久状态。",
     "strongest_counterevidence": "服务器或 App Server 真正冷启动仍可能约 61 秒；外部 OpenAI 冷请求曾达到 56.567 秒。",
     "minimum_test": "发布后连续验证冷/热 Trillium、发送接受、刷新、语言保持、离网页面后台任务和 A/B 资源。",
