@@ -56,11 +56,63 @@ describe('gateway production configuration', () => {
       '0123456789abcdef0123456789abcdef0123456789abcdef',
     );
     expect(config.authProxySecretFile).toBe(fixture.proxySecret);
+    expect(config.startupThreadPrewarmCount).toBe(0);
+  });
+
+  it('bounds startup thread prewarming to a small explicit count', async () => {
+    const fixture = await environment();
+    expect(
+      loadConfig({ ...fixture.values, STARTUP_THREAD_PREWARM_COUNT: '1' })
+        .startupThreadPrewarmCount,
+    ).toBe(1);
+    expect(() => loadConfig({ ...fixture.values, STARTUP_THREAD_PREWARM_COUNT: '4' })).toThrow();
   });
 
   it('rejects a proxy proof that is too short', async () => {
     const fixture = await environment();
     await writeFile(fixture.proxySecret, 'short\n');
     expect(() => loadConfig(fixture.values)).toThrow('proxy secret');
+  });
+
+  it('accepts only a credential-free loopback OpenAI egress proxy', async () => {
+    const fixture = await environment();
+    expect(
+      loadConfig({
+        ...fixture.values,
+        OPENAI_EGRESS_PROXY_URL: 'http://127.0.0.1:40000',
+      }).openAiEgressProxyUrl,
+    ).toBe('http://127.0.0.1:40000');
+    expect(() =>
+      loadConfig({
+        ...fixture.values,
+        OPENAI_EGRESS_PROXY_URL: 'http://proxy.example.com:40000',
+      }),
+    ).toThrow('loopback');
+    expect(() =>
+      loadConfig({
+        ...fixture.values,
+        OPENAI_EGRESS_PROXY_URL: 'http://user:secret@127.0.0.1:40000',
+      }),
+    ).toThrow('credentials');
+  });
+
+  it('requires the complete version-locked Electron network configuration', async () => {
+    const fixture = await environment();
+    expect(() =>
+      loadConfig({
+        ...fixture.values,
+        ELECTRON_NET_BIN: join(fixture.root, 'electron'),
+      }),
+    ).toThrow('Electron network requires');
+    const config = loadConfig({
+      ...fixture.values,
+      ELECTRON_NET_BIN: join(fixture.root, 'electron'),
+      ELECTRON_NET_WORKER: join(fixture.root, 'electron-worker.cjs'),
+      ELECTRON_NET_USER_DATA_DIR: join(fixture.root, 'electron-data'),
+      ELECTRON_NET_EXPECTED_VERSION: '43.2.0',
+      ELECTRON_NET_EXPECTED_CHROMIUM_VERSION: '150.0.7871.129',
+    });
+    expect(config.expectedElectronNetVersion).toBe('43.2.0');
+    expect(config.expectedElectronNetChromiumVersion).toBe('150.0.7871.129');
   });
 });

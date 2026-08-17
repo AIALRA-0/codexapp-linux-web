@@ -17,6 +17,12 @@ import { Readable, Writable } from 'node:stream';
 import { pipeline } from 'node:stream/promises';
 import { MessageChannel, Worker, type MessagePort } from 'node:worker_threads';
 
+import {
+  officialGitExportNames,
+  readQualifiedOfficialVersion,
+} from './official-export-contract.js';
+import { resolveOfficialSharedModulePath } from './official-shared-module.js';
+
 interface OfficialRpcSession {
   [Symbol.dispose](): void;
 }
@@ -29,6 +35,7 @@ interface OfficialSharedModule {
   ) => OfficialGithubServiceTarget;
   F: new (appEvent: { subscribe: (listener: (event: unknown) => void) => () => void }) => unknown;
   I: new (getExecutionHost: (hostId: string) => LocalExecutionHost) => unknown;
+  R: new () => object;
 }
 
 interface OfficialGithubServiceTarget {
@@ -87,8 +94,7 @@ export class OfficialGithubService {
   readonly #service: OfficialGithubServiceTarget;
 
   constructor(options: OfficialGitWorkerOptions) {
-    const sharedPath = join(options.sourceRoot, '.vite', 'build', 'src-DChWimf7.js');
-    const shared = require(sharedPath) as Partial<OfficialSharedModule>;
+    const shared = loadOfficialGitModule(options.sourceRoot);
     if (typeof shared.D !== 'function' || typeof shared.F !== 'function') {
       throw new Error('qualified official GitHub service exports changed');
     }
@@ -256,19 +262,25 @@ export class OfficialGitWorker extends EventEmitter {
       mkdir(join(this.options.userRoot, 'home'), { recursive: true, mode: 0o700 }),
       mkdir(join(this.options.userRoot, 'tmp'), { recursive: true, mode: 0o700 }),
     ]);
-    const sharedPath = join(this.options.sourceRoot, '.vite', 'build', 'src-DChWimf7.js');
     const workerPath = join(this.options.sourceRoot, '.vite', 'build', 'worker.js');
-    const shared = require(sharedPath) as Partial<OfficialSharedModule>;
-    if (typeof shared.At !== 'function' || typeof shared.I !== 'function') {
+    const shared = loadOfficialGitModule(this.options.sourceRoot);
+    if (
+      typeof shared.At !== 'function' ||
+      (typeof shared.I !== 'function' && typeof shared.R !== 'function')
+    ) {
       throw new Error('qualified official worker RPC exports changed');
     }
     const executionHost = new LocalExecutionHost(this.options, (diagnostic) => {
       this.emit('process-diagnostic', diagnostic);
     });
-    const rpcTarget = new shared.I((hostId) => {
+    const getExecutionHost = (hostId: string): LocalExecutionHost => {
       if (hostId !== 'local') throw new Error(`Git execution host is unavailable: ${hostId}`);
       return executionHost;
-    });
+    };
+    const rpcTarget =
+      typeof shared.I === 'function'
+        ? new shared.I(getExecutionHost)
+        : createLocalExecutionHostRpc(shared.R as OfficialSharedModule['R'], getExecutionHost);
     const channel = new MessageChannel();
     this.#rpcSession = shared.At(channel.port1, rpcTarget);
     this.#stopping = false;
@@ -370,6 +382,21 @@ export class OfficialGitWorker extends EventEmitter {
   }
 }
 
+function loadOfficialGitModule(sourceRoot: string): Partial<OfficialSharedModule> {
+  const sharedPath = resolveOfficialSharedModulePath(sourceRoot);
+  const raw = require(sharedPath) as Record<string, unknown>;
+  const names = officialGitExportNames(readQualifiedOfficialVersion(sourceRoot));
+  return {
+    At: raw[names.attachRpc] as OfficialSharedModule['At'],
+    D: raw[names.githubService] as OfficialSharedModule['D'],
+    F: raw[names.gitManager] as OfficialSharedModule['F'],
+    ...(names.localExecutionHostRpc === null
+      ? {}
+      : { I: raw[names.localExecutionHostRpc] as OfficialSharedModule['I'] }),
+    ...(names.rpcTarget === null ? {} : { R: raw[names.rpcTarget] as OfficialSharedModule['R'] }),
+  };
+}
+
 class LocalGithubAppServerClient {
   readonly id = 'local';
   readonly isLocal = true;
@@ -440,9 +467,14 @@ class LocalExecutionHost {
       });
       throw error;
     }
+    const explicitRepository = normalizeExplicitGitDirectory(
+      options.args,
+      options.cwd,
+      options.env,
+    );
     const child = spawn(command, args, {
-      cwd: options.cwd,
-      env: mergeSpawnEnvironment(this.workerEnvironment, options.env),
+      cwd: explicitRepository.cwd,
+      env: mergeSpawnEnvironment(this.workerEnvironment, explicitRepository.env),
       detached: process.platform !== 'win32',
       stdio: ['pipe', 'pipe', 'pipe'],
     });
@@ -609,6 +641,318 @@ class LocalExecutionHost {
     if (isWithin(absolute, this.#root) || isWithin(absolute, this.#canonicalRoot)) return;
     this.#assertAllowedPath(absolute, 'stat');
   }
+}
+
+type RemoteCallback = ((value: unknown) => unknown) & {
+  dup?: () => RemoteCallback;
+  [Symbol.dispose]?: () => void;
+};
+
+const FILE_WATCH_CALLBACK_DELAY_MS = 16;
+const FILE_WATCH_CALLBACK_MAX_PATHS = 256;
+
+function createLocalExecutionHostRpc(
+  RpcTargetBase: new () => object,
+  getExecutionHost: (hostId: string) => LocalExecutionHost,
+): object {
+  class LocalExecutionHostRpc extends RpcTargetBase {
+    readonly #targetsByHostId = new Map<string, LocalExecutionHostTarget>();
+
+    getHost(hostId: string): LocalExecutionHostTarget {
+      const existing = this.#targetsByHostId.get(hostId);
+      if (existing !== undefined) return existing;
+      const target = new LocalExecutionHostTarget(() => getExecutionHost(hostId));
+      this.#targetsByHostId.set(hostId, target);
+      return target;
+    }
+  }
+
+  class LocalExecutionHostTarget extends RpcTargetBase {
+    readonly #getExecutionHost: () => LocalExecutionHost;
+
+    constructor(resolveExecutionHost: () => LocalExecutionHost) {
+      super();
+      this.#getExecutionHost = resolveExecutionHost;
+    }
+
+    spawn(options: unknown): {
+      stdin: WritableStream<Uint8Array>;
+      stdout: ReadableStream<Uint8Array>;
+      stderr: ReadableStream<Uint8Array>;
+      process: LocalProcessRpc;
+    } {
+      const result = this.#getExecutionHost().spawn(options);
+      return {
+        stdin: result.stdin,
+        stdout: result.stdout,
+        stderr: result.stderr,
+        process: new LocalProcessRpc(result),
+      };
+    }
+
+    readFile(path: string): ReadableStream<Uint8Array> {
+      return this.#getExecutionHost().readFile(path);
+    }
+
+    writeFile(path: string, value: unknown): Promise<void> {
+      return this.#getExecutionHost().writeFile(path, value);
+    }
+
+    createDirectory(path: string, options?: { recursive?: boolean }): Promise<void> {
+      return this.#getExecutionHost().createDirectory(path, options);
+    }
+
+    async stat(path: string): Promise<Record<string, unknown>> {
+      const value = await this.#getExecutionHost().stat(path);
+      return {
+        birthtimeMs: value.birthtimeMs,
+        ctimeMs: value.ctimeMs,
+        ino: value.ino,
+        isDirectory: value.isDirectory(),
+        isFile: value.isFile(),
+        isSymbolicLink: value.isSymbolicLink(),
+        mtimeMs: value.mtimeMs,
+        size: value.size,
+      };
+    }
+
+    async readDirectory(path: string): Promise<Array<Record<string, unknown>>> {
+      return (await this.#getExecutionHost().readDirectory(path)).map((value) => ({
+        name: value.name,
+        isDirectory: value.isDirectory(),
+        isFile: value.isFile(),
+        isSymbolicLink: value.isSymbolicLink(),
+      }));
+    }
+
+    remove(path: string, options?: { recursive?: boolean; force?: boolean }): Promise<void> {
+      return this.#getExecutionHost().remove(path, options);
+    }
+
+    copyFile(source: string, destination: string): Promise<void> {
+      return this.#getExecutionHost().copyFile(source, destination);
+    }
+
+    copy(
+      source: string,
+      destination: string,
+      options?: { recursive?: boolean; force?: boolean },
+    ): Promise<void> {
+      return this.#getExecutionHost().copy(source, destination, options);
+    }
+
+    codexHome(): string {
+      return this.#getExecutionHost().codexHome();
+    }
+
+    platformFamily(): 'windows' | 'unix' {
+      return this.#getExecutionHost().platformFamily();
+    }
+
+    platformOs(): 'windows' | 'macos' | 'linux' {
+      return this.#getExecutionHost().platformOs();
+    }
+
+    startFileWatch(options: unknown, listenerValue: unknown): LocalFileWatchRpc {
+      if (typeof listenerValue !== 'function') {
+        throw new TypeError('Git worker file watch listener must be callable');
+      }
+      const supplied = listenerValue as RemoteCallback;
+      const listener = supplied.dup?.() ?? supplied;
+      const changeBatcher = new LocalFileWatchChangeBatcher(listener);
+      try {
+        const session = this.#getExecutionHost().startFileWatch({
+          ...(options !== null && typeof options === 'object' && !Array.isArray(options)
+            ? options
+            : {}),
+          onChange: (event: { changedPaths: string[] }) => changeBatcher.enqueue(event),
+        });
+        return new LocalFileWatchRpc(session, changeBatcher);
+      } catch (error) {
+        changeBatcher.dispose();
+        throw error;
+      }
+    }
+  }
+
+  class LocalProcessRpc extends RpcTargetBase {
+    readonly #result: LocalSpawnResult;
+    #exited = false;
+
+    constructor(result: LocalSpawnResult) {
+      super();
+      this.#result = result;
+    }
+
+    wait(): Promise<{ code: number | null; signal: NodeJS.Signals | null }> {
+      return this.#result.wait().finally(() => {
+        this.#exited = true;
+      });
+    }
+
+    kill(): void {
+      this.#result.kill();
+    }
+
+    resize(): void {
+      this.#result.resize();
+    }
+
+    [Symbol.dispose](): void {
+      if (!this.#exited) this.#result.kill();
+    }
+  }
+
+  class LocalFileWatchRpc extends RpcTargetBase {
+    readonly coverage: { recursive: boolean };
+    readonly path: string;
+    readonly #changeBatcher: LocalFileWatchChangeBatcher;
+    readonly #closed: Promise<{ reason: string; error?: string }>;
+    readonly #session: LocalFileWatchSession;
+    #disposed = false;
+
+    constructor(session: LocalFileWatchSession, changeBatcher: LocalFileWatchChangeBatcher) {
+      super();
+      this.#session = session;
+      this.#changeBatcher = changeBatcher;
+      this.#closed = session.closed.finally(() => changeBatcher.dispose());
+      this.coverage = session.coverage;
+      this.path = session.path;
+    }
+
+    closed(): Promise<{ reason: string; error?: string }> {
+      return this.#closed;
+    }
+
+    dispose(): void {
+      if (this.#disposed) return;
+      this.#disposed = true;
+      this.#session.dispose();
+      this.#changeBatcher.dispose();
+    }
+
+    [Symbol.dispose](): void {
+      this.dispose();
+    }
+  }
+
+  return new LocalExecutionHostRpc();
+}
+
+class LocalFileWatchChangeBatcher {
+  readonly #listener: RemoteCallback;
+  #pendingChangedPaths: Set<string> | null = new Set();
+  #timer: NodeJS.Timeout | null = null;
+  #disposed = false;
+
+  constructor(listener: RemoteCallback) {
+    this.#listener = listener;
+  }
+
+  enqueue(event: { changedPaths: string[] }): void {
+    if (this.#disposed) return;
+    if (event.changedPaths.length === 0) {
+      this.#pendingChangedPaths = null;
+    } else if (this.#pendingChangedPaths !== null) {
+      for (const path of event.changedPaths) {
+        this.#pendingChangedPaths.add(path);
+        if (this.#pendingChangedPaths.size >= FILE_WATCH_CALLBACK_MAX_PATHS) this.flush();
+      }
+    }
+    if (
+      this.#timer === null &&
+      (this.#pendingChangedPaths === null || this.#pendingChangedPaths.size > 0)
+    ) {
+      this.#timer = setTimeout(() => this.flush(), FILE_WATCH_CALLBACK_DELAY_MS);
+      this.#timer.unref();
+    }
+  }
+
+  flush(): void {
+    if (this.#timer !== null) {
+      clearTimeout(this.#timer);
+      this.#timer = null;
+    }
+    const changedPaths = this.#pendingChangedPaths;
+    this.#pendingChangedPaths = new Set();
+    if (this.#disposed || changedPaths?.size === 0) return;
+    const result = this.#listener({
+      changedPaths: changedPaths === null ? [] : [...changedPaths],
+    });
+    Promise.resolve(result).then(
+      () => disposeRemoteResult(result),
+      () => disposeRemoteResult(result),
+    );
+  }
+
+  dispose(): void {
+    if (this.#disposed) return;
+    this.#disposed = true;
+    if (this.#timer !== null) {
+      clearTimeout(this.#timer);
+      this.#timer = null;
+    }
+    this.#listener[Symbol.dispose]?.();
+  }
+}
+
+function disposeRemoteResult(value: unknown): void {
+  if (value !== null && (typeof value === 'object' || typeof value === 'function')) {
+    const dispose = (value as { [Symbol.dispose]?: () => void })[Symbol.dispose];
+    dispose?.call(value);
+  }
+}
+
+/**
+ * Git 2.43 treats running from a repository's `.git` directory as implicit
+ * bare-repository discovery when `safe.bareRepository=explicit` is enabled.
+ * The current official desktop Git module intentionally enables that guard and
+ * reads repository-scoped configuration from the common Git directory. Make
+ * the same repository explicit through Git's standard environment boundary;
+ * the official command and its safety setting remain unchanged.
+ */
+function normalizeExplicitGitDirectory(
+  args: string[],
+  cwd: string,
+  env: Record<string, string>,
+): { cwd: string; env: Record<string, string> } {
+  if (
+    process.platform !== 'linux' ||
+    basename(args[0] ?? '') !== 'git' ||
+    gitSubcommand(args) !== 'config' ||
+    !args.includes('safe.bareRepository=explicit') ||
+    basename(cwd) !== '.git' ||
+    env.GIT_DIR !== undefined ||
+    env.GIT_WORK_TREE !== undefined
+  ) {
+    return { cwd, env };
+  }
+  try {
+    if (!statSync(join(cwd, 'config')).isFile()) return { cwd, env };
+  } catch {
+    return { cwd, env };
+  }
+  return {
+    cwd: dirname(cwd),
+    env: {
+      ...env,
+      GIT_DIR: cwd,
+      GIT_WORK_TREE: dirname(cwd),
+    },
+  };
+}
+
+function gitSubcommand(args: string[]): string | null {
+  for (let index = 1; index < args.length; index += 1) {
+    const argument = args[index];
+    if (argument === '-c') {
+      index += 1;
+      continue;
+    }
+    if (argument?.startsWith('-') === true) continue;
+    return argument ?? null;
+  }
+  return null;
 }
 
 class LocalSpawnResult {

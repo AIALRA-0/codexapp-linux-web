@@ -1,9 +1,17 @@
 import type { ClientFrame, HostFrame, RuntimeBootstrap } from '@codexapp/contracts';
 
+import {
+  browserPickedFiles,
+  browserPickFilesSuccessMessage,
+  parseBrowserPickFilesRequest,
+  pickBrowserFiles,
+} from './browser-file-picker.js';
 import { browserFileResourceUrl, rewriteOfficialResourceAttribute } from './file-protocol.js';
+import { installAtomicFirstPaint } from './first-paint.js';
 import { officialExternalNavigationUrl } from './navigation.js';
+import { installOfficialHistorySnapshotGate } from './official-feature-gates.js';
 import { OrderedBuffer } from './ordered-buffer.js';
-import { isTerminalBridgeCloseCode } from './reconnect.js';
+import { isReloadBridgeCloseCode, isTerminalBridgeCloseCode } from './reconnect.js';
 import { installRemoteWebviewAdapter } from './remote-webview.js';
 
 declare global {
@@ -18,6 +26,7 @@ type Unsubscribe = () => void;
 
 interface ElectronBridge {
   windowType: 'electron';
+  acknowledgeChunkedMessage(transferId: string, sequence: number): void;
   getPreloadStartedAtMs(): number;
   sendMessageFromView(message: unknown): Promise<void>;
   getPathForFile(file: File): string | null;
@@ -32,6 +41,7 @@ interface ElectronBridge {
   subscribeToSystemThemeVariant(listener: () => void): Unsubscribe;
   triggerSentryTestError(): Promise<void>;
   getSentryInitOptions(): Record<string, unknown>;
+  getDesktopUserAgent(): string;
   getAppSessionId(): string;
   getBuildFlavor(): string;
   isDeviceCheckSupported(): boolean;
@@ -50,6 +60,7 @@ interface HostPortRegistration {
 }
 
 const REQUIRED_METHODS = [
+  'acknowledgeChunkedMessage',
   'getPreloadStartedAtMs',
   'sendMessageFromView',
   'getPathForFile',
@@ -64,6 +75,7 @@ const REQUIRED_METHODS = [
   'subscribeToSystemThemeVariant',
   'triggerSentryTestError',
   'getSentryInitOptions',
+  'getDesktopUserAgent',
   'getAppSessionId',
   'getBuildFlavor',
   'isDeviceCheckSupported',
@@ -108,6 +120,11 @@ export class BrowserHostTransport extends EventTarget {
       this.#receive(event.data);
     });
     socket.addEventListener('close', (event) => {
+      if (isReloadBridgeCloseCode(event.code)) {
+        this.#closed = true;
+        window.location.reload();
+        return;
+      }
       if (isTerminalBridgeCloseCode(event.code)) {
         this.#closed = true;
         const error = new Error(`browser host session was rejected (${String(event.code)})`);
@@ -318,6 +335,7 @@ export class BrowserHostTransport extends EventTarget {
           link.remove();
           break;
         }
+        this.dispatchEvent(new CustomEvent('view-message', { detail: frame.message }));
         window.dispatchEvent(new MessageEvent('message', { data: frame.message }));
         break;
       case 'worker-message':
@@ -437,15 +455,40 @@ function installBridge(): void {
     throw new Error('official renderer browser bootstrap is missing');
   }
 
+  installOfficialHistorySnapshotGate(window as unknown as Record<string, unknown>);
   installOfficialFileProtocolAdapter();
+  const firstPaint = installAtomicFirstPaint(bootstrap);
   const preloadStartedAt = performance.timeOrigin;
   const transport = new BrowserHostTransport(bootstrap);
+  transport.addEventListener('ready', () => firstPaint.markTransportReady());
+  transport.addEventListener('view-message', (event) => {
+    firstPaint.observeRendererMessage((event as CustomEvent<unknown>).detail);
+  });
+  transport.addEventListener('fatal', () => firstPaint.fail('与服务器的连接已断开'));
   installRemoteWebviewAdapter(bootstrap, (message) => transport.sendViewMessage(message));
   const themeListeners = new Set<() => void>();
   const media = window.matchMedia('(prefers-color-scheme: dark)');
   let theme: 'dark' | 'light' = bootstrap.systemThemeVariant;
   let lastSurfaceFocused: boolean | undefined;
   const pendingUploads = new Map<string, Promise<void>>();
+
+  const stageBrowserUpload = (file: File): string | null => {
+    if (!(file instanceof File)) return null;
+    const id = crypto.randomUUID();
+    const safeName = file.name.replaceAll(/[^A-Za-z0-9._-]/gu, '_').slice(0, 180) || 'upload';
+    const remotePath = `${bootstrap.uploadPathPrefix}/${id}/${safeName}`;
+    const upload = fetch(`/api/uploads/${id}/${encodeURIComponent(safeName)}`, {
+      method: 'PUT',
+      body: file,
+      credentials: 'same-origin',
+      headers: { 'content-type': file.type || 'application/octet-stream' },
+    }).then((response) => {
+      if (!response.ok) throw new Error(`upload failed (${String(response.status)})`);
+    });
+    pendingUploads.set(remotePath, upload);
+    void upload.finally(() => pendingUploads.delete(remotePath));
+    return remotePath;
+  };
 
   const openExternalUrl = (url: string): void => {
     const opened = window.open(url, '_blank');
@@ -497,8 +540,24 @@ function installBridge(): void {
 
   const bridge: ElectronBridge = {
     windowType: 'electron',
+    // The browser transport acknowledges every host frame at the WebSocket
+    // protocol layer. The Electron-only chunk IPC is therefore never emitted
+    // by this host, but the official preload contract still requires the hook.
+    acknowledgeChunkedMessage: () => undefined,
     getPreloadStartedAtMs: () => preloadStartedAt,
     sendMessageFromView: async (message) => {
+      firstPaint.observeRendererRequest(message);
+      const pickFilesRequest = parseBrowserPickFilesRequest(message);
+      if (pickFilesRequest !== null) {
+        const selected = await pickBrowserFiles(pickFilesRequest.imagesOnly);
+        const files = browserPickedFiles(selected, stageBrowserUpload);
+        window.dispatchEvent(
+          new MessageEvent('message', {
+            data: browserPickFilesSuccessMessage(pickFilesRequest.requestId, files),
+          }),
+        );
+        return;
+      }
       const externalUrl = officialExternalNavigationUrl(message);
       if (externalUrl !== null) {
         openExternalUrl(externalUrl);
@@ -507,23 +566,7 @@ function installBridge(): void {
       await waitForUploads(message);
       await transport.sendViewMessage(message);
     },
-    getPathForFile: (file) => {
-      if (!(file instanceof File)) return null;
-      const id = crypto.randomUUID();
-      const safeName = file.name.replaceAll(/[^A-Za-z0-9._-]/gu, '_').slice(0, 180) || 'upload';
-      const remotePath = `${bootstrap.uploadPathPrefix}/${id}/${safeName}`;
-      const upload = fetch(`/api/uploads/${id}/${encodeURIComponent(safeName)}`, {
-        method: 'PUT',
-        body: file,
-        credentials: 'same-origin',
-        headers: { 'content-type': file.type || 'application/octet-stream' },
-      }).then((response) => {
-        if (!response.ok) throw new Error(`upload failed (${String(response.status)})`);
-      });
-      pendingUploads.set(remotePath, upload);
-      void upload.finally(() => pendingUploads.delete(remotePath));
-      return remotePath;
-    },
+    getPathForFile: stageBrowserUpload,
     startFileDrag: () => false,
     sendWorkerMessageFromView: (worker, message) => transport.sendWorkerMessage(worker, message),
     subscribeToWorkerMessages: (worker, listener) => transport.subscribeWorker(worker, listener),
@@ -540,6 +583,7 @@ function installBridge(): void {
       await transport.invoke('trigger-sentry-test');
     },
     getSentryInitOptions: () => bootstrap.sentryInitOptions,
+    getDesktopUserAgent: () => bootstrap.desktopUserAgent,
     getAppSessionId: () => bootstrap.appSessionId,
     getBuildFlavor: () => bootstrap.buildFlavor,
     isDeviceCheckSupported: () => false,

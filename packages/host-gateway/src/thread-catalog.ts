@@ -1,13 +1,14 @@
 import { createHash } from 'node:crypto';
-import { createRequire } from 'node:module';
-import { join, resolve } from 'node:path';
+import { resolve } from 'node:path';
 
 import type { CodexAppServerClient } from '@codexapp/app-server-client';
 
+import { loadQualifiedThreadCatalogContract } from './official-thread-catalog-contract.js';
+
 const PAGE_LIMIT = 100;
 const MAX_CATALOG_ENTRIES = 50_000;
-const PERSISTED_FORMAT_VERSION = 1;
-const CURSOR_VERSION = 2;
+const PERSISTED_FORMAT_VERSION = 2;
+const CURSOR_VERSION = 3;
 
 interface OfficialSharedModule {
   Fi: unknown[];
@@ -20,6 +21,7 @@ export interface ThreadCatalogEntry {
   displayTitle: string;
   sourceCreatedAt: number;
   sourceUpdatedAt: number;
+  sourceRecencyAt: number;
   cwd: string;
   sourceKind: string;
   sourceDetail: unknown;
@@ -65,6 +67,7 @@ interface CatalogCursor {
   sortKey: 'created_at' | 'updated_at';
   sourceUpdatedAt: number;
   sourceCreatedAt: number;
+  sourceRecencyAt: number;
   threadId: string;
 }
 
@@ -97,8 +100,6 @@ interface CatalogOptions {
   onError: (error: Error) => void;
   loadOfficialShared?: () => OfficialSharedModule;
 }
-
-const require = createRequire(import.meta.url);
 
 export class OfficialThreadCatalog {
   readonly sourceRoot: string;
@@ -149,14 +150,18 @@ export class OfficialThreadCatalog {
     if (!this.#loaded) throw new Error('Thread catalog must be loaded before it starts');
     if (this.#stopped) throw new Error('Thread catalog is stopped');
     this.#client = client;
-    const sharedPath = join(this.sourceRoot, '.vite', 'build', 'src-DChWimf7.js');
-    const shared =
-      this.#loadOfficialShared?.() ?? (require(sharedPath) as Partial<OfficialSharedModule>);
-    if (typeof shared.o !== 'function' || !Array.isArray(shared.Fi)) {
-      throw new Error('qualified official thread catalog exports changed');
+    const injected = this.#loadOfficialShared?.();
+    if (injected !== undefined) {
+      if (typeof injected.o !== 'function' || !Array.isArray(injected.Fi)) {
+        throw new Error('qualified official thread catalog exports changed');
+      }
+      this.#convertThread = injected.o;
+      this.#sourceKinds = [...injected.Fi];
+    } else {
+      const contract = loadQualifiedThreadCatalogContract(this.sourceRoot);
+      this.#convertThread = contract.convertThread;
+      this.#sourceKinds = contract.sourceKinds;
     }
-    this.#convertThread = shared.o;
-    this.#sourceKinds = [...shared.Fi];
     if (this.#entries.size === 0) {
       try {
         await this.#scan(true);
@@ -281,6 +286,7 @@ export class OfficialThreadCatalog {
               sortKey: request.sortKey,
               sourceUpdatedAt: last.sourceUpdatedAt,
               sourceCreatedAt: last.sourceCreatedAt,
+              sourceRecencyAt: last.sourceRecencyAt,
               threadId: last.threadId,
             }),
     };
@@ -528,6 +534,9 @@ function parseCatalogEntry(value: unknown): ThreadCatalogEntry | null {
     displayTitle: entry.displayTitle,
     sourceCreatedAt: entry.sourceCreatedAt as number,
     sourceUpdatedAt: entry.sourceUpdatedAt as number,
+    sourceRecencyAt: Number.isFinite(entry.sourceRecencyAt)
+      ? (entry.sourceRecencyAt as number)
+      : (entry.sourceUpdatedAt as number),
     cwd: entry.cwd,
     sourceKind: entry.sourceKind,
     sourceDetail: entry.sourceDetail,
@@ -686,10 +695,10 @@ function compareEntries(
   right: ThreadCatalogEntry,
   sortKey: 'created_at' | 'updated_at',
 ): number {
-  const leftPrimary = sortKey === 'created_at' ? left.sourceCreatedAt : left.sourceUpdatedAt;
-  const rightPrimary = sortKey === 'created_at' ? right.sourceCreatedAt : right.sourceUpdatedAt;
-  const leftSecondary = sortKey === 'created_at' ? left.sourceUpdatedAt : left.sourceCreatedAt;
-  const rightSecondary = sortKey === 'created_at' ? right.sourceUpdatedAt : right.sourceCreatedAt;
+  const leftPrimary = sortKey === 'created_at' ? left.sourceCreatedAt : left.sourceRecencyAt;
+  const rightPrimary = sortKey === 'created_at' ? right.sourceCreatedAt : right.sourceRecencyAt;
+  const leftSecondary = sortKey === 'created_at' ? left.sourceRecencyAt : left.sourceCreatedAt;
+  const rightSecondary = sortKey === 'created_at' ? right.sourceRecencyAt : right.sourceCreatedAt;
   return (
     rightPrimary - leftPrimary ||
     rightSecondary - leftSecondary ||
@@ -698,12 +707,12 @@ function compareEntries(
 }
 
 function compareEntryToCursor(entry: ThreadCatalogEntry, cursor: CatalogCursor): number {
-  const primary = cursor.sortKey === 'created_at' ? entry.sourceCreatedAt : entry.sourceUpdatedAt;
+  const primary = cursor.sortKey === 'created_at' ? entry.sourceCreatedAt : entry.sourceRecencyAt;
   const cursorPrimary =
-    cursor.sortKey === 'created_at' ? cursor.sourceCreatedAt : cursor.sourceUpdatedAt;
-  const secondary = cursor.sortKey === 'created_at' ? entry.sourceUpdatedAt : entry.sourceCreatedAt;
+    cursor.sortKey === 'created_at' ? cursor.sourceCreatedAt : cursor.sourceRecencyAt;
+  const secondary = cursor.sortKey === 'created_at' ? entry.sourceRecencyAt : entry.sourceCreatedAt;
   const cursorSecondary =
-    cursor.sortKey === 'created_at' ? cursor.sourceUpdatedAt : cursor.sourceCreatedAt;
+    cursor.sortKey === 'created_at' ? cursor.sourceRecencyAt : cursor.sourceCreatedAt;
   if (primary !== cursorPrimary) return cursorPrimary - primary;
   if (secondary !== cursorSecondary) return cursorSecondary - secondary;
   return entry.threadId.localeCompare(cursor.threadId);
@@ -745,6 +754,7 @@ function parseCursor(value: string): CatalogCursor {
       (cursor.sortKey !== 'created_at' && cursor.sortKey !== 'updated_at') ||
       !Number.isFinite(cursor.sourceUpdatedAt) ||
       !Number.isFinite(cursor.sourceCreatedAt) ||
+      !Number.isFinite(cursor.sourceRecencyAt) ||
       typeof cursor.threadId !== 'string' ||
       cursor.threadId.length === 0
     ) {

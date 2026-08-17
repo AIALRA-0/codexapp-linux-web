@@ -1,23 +1,35 @@
 [Unit]
 Description=CodexApp official browser host
 Requires=codexapp-official-sandbox-policy.service
-After=network-online.target codexapp-official-sandbox-policy.service
-Wants=network-online.target
+After=network-online.target codexapp-official-browser-display.service codexapp-official-sandbox-policy.service codexapp-openai-egress-proxy.service
+Wants=network-online.target codexapp-official-browser-display.service codexapp-openai-egress-proxy.service
 
 [Service]
 Type=simple
 User=codexappweb
 Group=codexappweb
+SupplementaryGroups=codexappsecrets
 WorkingDirectory=/srv/aialra/apps/codexapp-official-web-host/current
 EnvironmentFile=/srv/aialra/config/secrets/codexapp-official-web-host.env
+Environment=HOME=/srv/aialra/state/codexapp-official/service-home
+Environment=XDG_CACHE_HOME=/srv/aialra/state/codexapp-official/service-home/.cache
+Environment=XDG_CONFIG_HOME=/srv/aialra/state/codexapp-official/service-home/.config
+Environment=DISPLAY=127.0.0.1:99
 ExecStart=/usr/bin/node /srv/aialra/apps/codexapp-official-web-host/current/apps/host/dist/main.js
 Restart=on-failure
 RestartSec=3
 TimeoutStopSec=20s
 KillMode=mixed
 UMask=0077
-TasksMax=2048
-MemoryMax=6G
+# B may use more memory for a large official conversation, but it remains
+# subordinate to the stable A controller on the shared 24 GiB host.
+TasksMax=1024
+MemoryHigh=6G
+MemoryMax=8G
+MemorySwapMax=2G
+CPUQuota=400%
+CPUWeight=100
+IOWeight=50
 
 NoNewPrivileges=true
 PrivateTmp=true

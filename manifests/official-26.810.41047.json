@@ -1,0 +1,14 @@
+{
+  "product": "ChatGPT",
+  "bundleIdentifier": "com.openai.codex",
+  "alternateProductName": "Codex",
+  "version": "26.810.41047",
+  "buildNumber": "6570",
+  "electron": "42.3.0",
+  "vite": "8.1.5",
+  "codexCli": "0.148.0-alpha.9",
+  "asarBytes": 280620042,
+  "asarSha256": "75b341a8e19dcf420090a51389bb90688036ca29cfa65847a65932f0aa898278",
+  "source": "OpenAI official Linux package, locally qualified from the immutable package artifact",
+  "redistributable": false
+}

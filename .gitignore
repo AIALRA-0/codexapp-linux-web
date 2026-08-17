@@ -26,3 +26,6 @@ secrets/
 
 # Local reports.
 reports/generated/
+
+# Private migration manifests contain local task identifiers and exact paths.
+ops/workspace/migration-*.private.json

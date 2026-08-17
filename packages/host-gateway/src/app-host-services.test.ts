@@ -1,4 +1,4 @@
-import { mkdir, mkdtemp, readFile, rm, stat, symlink, writeFile } from 'node:fs/promises';
+import { mkdir, mkdtemp, readFile, realpath, rm, stat, symlink, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
@@ -13,7 +13,9 @@ import {
   DynamicToolCallsService,
   FileAttachmentsService,
   FileDragsService,
+  LocalProjectsService,
   OpenInService,
+  PrimaryRuntimeService,
   PullRequestMessageGenerationOperation,
   PluginScheduledTasksService,
   RemoteControlEnvironmentsService,
@@ -62,6 +64,9 @@ async function createRuntimeHarness(): Promise<RuntimeHarness> {
     codexHome,
     workspaceRoot,
     uploadRoot,
+    config: {
+      expectedRendererVersion: '26.721.31836',
+    },
     officialDesktopState: {
       request: (operation: string, params: Record<string, unknown>) => {
         desktopStateRequests.push({ operation, params });
@@ -120,6 +125,65 @@ async function createRuntimeHarness(): Promise<RuntimeHarness> {
 }
 
 describe('official AppHost browser services', () => {
+  it('creates local projects with the official durable state and update messages', async () => {
+    const { runtime, globalState, messages } = await createRuntimeHarness();
+    const service = new LocalProjectsService(runtime);
+    const appearance = { color: 'blue', icon: 'folder' };
+
+    const created = await service.create({
+      appearance,
+      name: 'Server project',
+      sources: [runtime.workspaceRoot],
+    });
+    const canonicalWorkspaceRoot = await realpath(runtime.workspaceRoot);
+
+    expect(created.rootPaths).toEqual([canonicalWorkspaceRoot]);
+    expect(created.projectId).toMatch(/^[0-9a-f-]{36}$/u);
+    const projects = globalState['local-projects'] as Record<string, Record<string, unknown>>;
+    expect(typeof projects[created.projectId]?.createdAt).toBe('number');
+    expect(typeof projects[created.projectId]?.updatedAt).toBe('number');
+    expect(globalState['local-projects']).toEqual({
+      [created.projectId]: {
+        id: created.projectId,
+        name: 'Server project',
+        rootPaths: [canonicalWorkspaceRoot],
+        createdAt: projects[created.projectId]?.createdAt,
+        updatedAt: projects[created.projectId]?.updatedAt,
+      },
+    });
+    expect(globalState['project-order']).toEqual([created.projectId]);
+    expect(globalState['project-appearances']).toEqual({
+      [created.projectId]: appearance,
+    });
+    expect(globalState['selected-project']).toEqual({
+      type: 'local',
+      projectId: created.projectId,
+    });
+    expect(messages).toEqual([
+      {
+        type: 'global-state-updated',
+        keys: ['local-projects', 'project-order', 'project-appearances', 'selected-project'],
+      },
+      { type: 'workspace-root-options-updated' },
+      { type: 'active-workspace-roots-updated' },
+    ]);
+  });
+
+  it('creates a safe default folder for a project without sources', async () => {
+    const { runtime } = await createRuntimeHarness();
+    const service = new LocalProjectsService(runtime);
+
+    const created = await service.create({
+      appearance: null,
+      name: '../Default / Project',
+      sources: [],
+    });
+
+    expect(created.rootPaths).toHaveLength(1);
+    expect(created.rootPaths[0]).toMatch(/Default - Project$/u);
+    expect((await stat(created.rootPaths[0]!)).isDirectory()).toBe(true);
+  });
+
   it('reports exact unsupported Linux Computer Use settings state', () => {
     const service = new ComputerUseSettingsService();
     expect(service.getAppApprovals()).toBeNull();
@@ -132,6 +196,30 @@ describe('official AppHost browser services', () => {
       lockIconDataURL: null,
     });
     expect(service.setLockedUseEnabled(true)).toBeNull();
+  });
+
+  it('reports the server workspace runtime as ready through the official service contract', async () => {
+    const { runtime } = await createRuntimeHarness();
+    const service = new PrimaryRuntimeService(runtime);
+
+    expect(service.getInstalledBundleVersion()).toBe('server-26.721.31836');
+    expect(service.loadDependencies({ hostId: 'local' })).toEqual({
+      bundleVersion: 'server-26.721.31836',
+      installed: true,
+      instructions: null,
+    });
+    expect(service.diagnoseDependencies({ hostId: 'local' })).toMatchObject({
+      bundleVersion: 'server-26.721.31836',
+      installed: true,
+      problems: [],
+    });
+    expect(service.resetDependencies({ hostId: 'local', release: 'stable' })).toEqual({
+      bundleVersion: 'server-26.721.31836',
+      status: 'installed',
+    });
+    expect(() => service.loadDependencies({ hostId: 'remote' })).toThrow(
+      'only supports the local host',
+    );
   });
 
   it('reports physical Codex Micro and native file drags as unavailable', () => {

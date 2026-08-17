@@ -54,8 +54,6 @@ interface SessionEntry {
   identity: AuthentikIdentity;
   runtime: UserRuntime;
   cleanupTimer?: NodeJS.Timeout;
-  appHostDiagnosticListener?: (message: string) => void;
-  capabilityErrorListener?: (details: unknown) => void;
 }
 
 const CONTENT_TYPES: Record<string, string> = {
@@ -91,6 +89,15 @@ const SECURITY_HEADERS: Record<string, string> = {
   'x-frame-options': 'DENY',
 };
 
+const WEBSOCKET_HEARTBEAT_INTERVAL_MS = 25_000;
+
+interface WebSocketHeartbeatTarget {
+  readyState: number;
+  off(event: 'close', listener: () => void): unknown;
+  once(event: 'close', listener: () => void): unknown;
+  ping(): unknown;
+}
+
 const CSP = [
   "default-src 'none'",
   "base-uri 'self'",
@@ -107,14 +114,19 @@ const CSP = [
   "connect-src 'self' https://ab.chatgpt.com https://api.mapbox.com https://cdn.openai.com https://events.mapbox.com wss://chatgpt.com wss://ws.chatgpt-staging.com wss://ws.chatgpt.com",
 ].join('; ');
 
-const BROWSER_BRIDGE_MODULES = [
+export const BROWSER_BRIDGE_MODULES = [
+  'browser-file-picker.js',
   'file-protocol.js',
+  'first-paint.js',
   'index.js',
   'navigation.js',
+  'official-feature-gates.js',
   'ordered-buffer.js',
   'reconnect.js',
   'remote-webview.js',
 ] as const;
+
+const MAX_CONCURRENT_BRIDGE_INVOCATIONS = 128;
 
 export async function createGateway(config: GatewayConfig): Promise<FastifyInstance> {
   const qualification = verifyPreparedRelease(config.sourceManifest);
@@ -144,6 +156,10 @@ export async function createGateway(config: GatewayConfig): Promise<FastifyInsta
       readFileSync(join(bridgeModuleRoot, filename)),
     ]),
   );
+  const missingBridgeImports = findMissingBrowserBridgeImports(bridgeModules);
+  if (missingBridgeImports.length > 0) {
+    throw new Error(`browser bridge imports are not served: ${missingBridgeImports.join(', ')}`);
+  }
   const bridgeHash = createHash('sha256');
   for (const [filename, source] of bridgeModules) {
     bridgeHash.update(filename).update('\0').update(source).update('\0');
@@ -175,6 +191,39 @@ export async function createGateway(config: GatewayConfig): Promise<FastifyInsta
     trustProxy: false,
     requestTimeout: 130_000,
   });
+  const observedRuntimes = new WeakSet<UserRuntime>();
+  const observeRuntime = (runtime: UserRuntime): void => {
+    if (observedRuntimes.has(runtime)) return;
+    observedRuntimes.add(runtime);
+    if (process.env.NODE_ENV === 'development') {
+      runtime.on('app-host-send', (message: string) => {
+        const details = { appHostFrame: message.slice(0, 4_000) };
+        if (message.startsWith('["reject"')) {
+          app.log.warn(details, 'AppHost call rejected');
+        } else {
+          app.log.debug(details, 'AppHost frame sent');
+        }
+      });
+    }
+    runtime.on('capability-error', (details: unknown) => {
+      app.log.warn({ details }, 'renderer capability request failed');
+    });
+    runtime.on('performance', (details: unknown) => {
+      const record =
+        details !== null && typeof details === 'object' ? (details as Record<string, unknown>) : {};
+      const durationMs = typeof record.durationMs === 'number' ? record.durationMs : 0;
+      const importantCacheHit =
+        record.kind === 'official-cache' && record.method === 'thread/resume';
+      if (durationMs >= 250 || importantCacheHit) {
+        app.log.info({ details: record }, 'renderer request latency');
+      } else {
+        app.log.debug({ details: record }, 'renderer request latency');
+      }
+    });
+    runtime.on('background-work-changed', (details: unknown) => {
+      app.log.info({ auditUserKey: runtime.userKey, details }, 'background work state changed');
+    });
+  };
 
   await app.register(websocket, {
     options: {
@@ -206,6 +255,14 @@ export async function createGateway(config: GatewayConfig): Promise<FastifyInsta
       storage,
     };
   });
+  app.get('/ops/background-work', (_request, reply) => {
+    const snapshot = runtimes.backgroundWorkSnapshot;
+    return reply.header('cache-control', 'no-store').send({
+      ok: true,
+      ...snapshot,
+      observedAtMs: Date.now(),
+    });
+  });
 
   app.get<{ Params: { filename: string } }>(
     `${bridgeBasePath}/:filename`,
@@ -224,13 +281,14 @@ export async function createGateway(config: GatewayConfig): Promise<FastifyInsta
 
   app.get('/__codex/bootstrap.js', async (request, reply) => {
     const identity = requireIdentity(request, config);
-    const runtime = await runtimes.acquire(identity);
+    const runtime = await runtimes.acquireBootstrap(identity);
     try {
       const sessionId = randomUUID();
       const ticket = issueTicket(identity, sessionId, config);
       const bootstrap = runtimeBootstrapSchema.parse({
         contractVersion: 1,
         rendererVersion: config.expectedRendererVersion,
+        desktopUserAgent: `Codex Desktop/${config.expectedRendererVersion} (X11; Linux; ${process.arch})`,
         websocketUrl: new URL('/api/bridge', config.publicOrigin)
           .toString()
           .replace(/^http/u, 'ws'),
@@ -250,6 +308,12 @@ export async function createGateway(config: GatewayConfig): Promise<FastifyInsta
         systemThemeVariant: 'light',
         usesOwlAppShell: false,
         uploadPathPrefix: runtime.uploadPathPrefix,
+      });
+      // The persisted catalog is enough for the official renderer to paint its
+      // shell and sidebar. Start Codex, MCP, plugins, and browser services in
+      // parallel instead of holding the bootstrap response behind them.
+      void runtime.start().catch((error: unknown) => {
+        app.log.error({ err: error, auditUserKey: runtime.userKey }, 'runtime warmup failed');
       });
       const source = `window.__CODEX_BROWSER_BOOTSTRAP__=${escapeScriptJson(bootstrap)};\n`;
       return reply
@@ -346,9 +410,11 @@ export async function createGateway(config: GatewayConfig): Promise<FastifyInsta
       socket.close(4403, 'origin rejected');
       return;
     }
+    installWebSocketHeartbeat(socket);
     let entry: SessionEntry | undefined;
     let helloReceived = false;
     let frameQueue = Promise.resolve();
+    const concurrentInvocations = new Set<Promise<void>>();
     const rateLimiter = new ConnectionRateLimiter(
       config.maxBridgeMessagesPerSecond,
       config.maxBridgeMessagesPerSecond * 2,
@@ -392,7 +458,37 @@ export async function createGateway(config: GatewayConfig): Promise<FastifyInsta
             clearTimeout(helloTimer);
             helloReceived = true;
             entry = sessions.get(ticket.sessionId);
+            const resumedSession = entry !== undefined;
             if (entry === undefined) {
+              if (missingBridgeSessionRequiresReload(frame.lastHostSequence)) {
+                app.log.info(
+                  {
+                    auditUserKey,
+                    sessionId: ticket.sessionId,
+                    lastHostSequence: frame.lastHostSequence,
+                  },
+                  'bridge session state unavailable; renderer reload requested',
+                );
+                socket.close(4410, 'browser session state unavailable');
+                return;
+              }
+              // A full page reload creates a new official app session id. Any
+              // older disconnected session for the same immutable identity can
+              // no longer be the authoritative renderer, so discard its replay
+              // buffer before it accumulates live notifications for ten minutes.
+              for (const [staleSessionId, staleEntry] of reconnectableIdentityEntries(
+                sessions,
+                identity,
+              )) {
+                clearTimeout(staleEntry.cleanupTimer);
+                staleEntry.session.dispose();
+                sessions.delete(staleSessionId);
+                runtimes.release(staleEntry.runtime);
+                app.log.info(
+                  { auditUserKey, sessionId: staleSessionId },
+                  'superseded disconnected bridge session discarded',
+                );
+              }
               if (
                 sessions.size >= config.maxSessions ||
                 countIdentitySessions(sessions.values(), identity) >= config.maxSessionsPerUser
@@ -401,39 +497,36 @@ export async function createGateway(config: GatewayConfig): Promise<FastifyInsta
                 socket.close(4429, 'session capacity exceeded');
                 return;
               }
-              const runtime = await runtimes.acquire(identity);
-              const appHostDiagnosticListener =
-                process.env.NODE_ENV === 'development'
-                  ? (message: string) => {
-                      const details = { appHostFrame: message.slice(0, 4_000) };
-                      if (message.startsWith('["reject"')) {
-                        app.log.warn(details, 'AppHost call rejected');
-                      } else {
-                        app.log.debug(details, 'AppHost frame sent');
-                      }
-                    }
-                  : undefined;
-              const capabilityErrorListener =
-                process.env.NODE_ENV === 'development'
-                  ? (details: unknown) => {
-                      app.log.warn({ details }, 'renderer capability request failed');
-                    }
-                  : undefined;
-              if (appHostDiagnosticListener !== undefined) {
-                runtime.on('app-host-send', appHostDiagnosticListener);
-              }
-              if (capabilityErrorListener !== undefined) {
-                runtime.on('capability-error', capabilityErrorListener);
-              }
+              // Attach the official renderer to the persisted AppHost state
+              // immediately. Codex, MCP, plugins, and browser services keep
+              // warming in parallel; renderer requests that need them already
+              // await UserRuntime.start() at their capability boundary.
+              const runtime = await runtimes.acquireBootstrap(identity);
+              void runtime.start().catch((error: unknown) => {
+                app.log.error(
+                  { err: error, auditUserKey: runtime.userKey },
+                  'bridge runtime warmup failed',
+                );
+              });
+              observeRuntime(runtime);
               entry = {
                 session: new BrowserSession(ticket.sessionId, runtime),
                 identity,
                 runtime,
-                ...(appHostDiagnosticListener === undefined ? {} : { appHostDiagnosticListener }),
-                ...(capabilityErrorListener === undefined ? {} : { capabilityErrorListener }),
               };
               sessions.set(ticket.sessionId, entry);
-              app.log.info({ auditUserKey, sessionId: ticket.sessionId }, 'bridge session created');
+              app.log.info(
+                {
+                  auditUserKey,
+                  sessionId: ticket.sessionId,
+                  identitySessionCount: countIdentitySessions(sessions.values(), identity),
+                  reconnectableSessionCount: countReconnectableIdentitySessions(
+                    sessions.values(),
+                    identity,
+                  ),
+                },
+                'bridge session created',
+              );
             } else if (!identitiesMatch(entry.identity, identity)) {
               app.log.warn(
                 { auditUserKey, sessionId: ticket.sessionId },
@@ -446,7 +539,24 @@ export async function createGateway(config: GatewayConfig): Promise<FastifyInsta
               clearTimeout(entry.cleanupTimer);
               delete entry.cleanupTimer;
             }
-            entry.session.attach(socket, frame.lastHostSequence);
+            if (!entry.session.attach(socket, frame.lastHostSequence)) {
+              entry.session.dispose();
+              sessions.delete(entry.session.id);
+              runtimes.release(entry.runtime);
+              entry = undefined;
+              return;
+            }
+            if (resumedSession) {
+              app.log.info(
+                {
+                  auditUserKey,
+                  lastHostSequence: frame.lastHostSequence,
+                  pendingHostFrames: entry.session.pendingHostFrames,
+                  sessionId: entry.session.id,
+                },
+                'bridge session resumed',
+              );
+            }
             return;
           }
           if (frame.type === 'hello' || entry === undefined) {
@@ -485,6 +595,28 @@ export async function createGateway(config: GatewayConfig): Promise<FastifyInsta
               'bridge frame received',
             );
           }
+          if (isConcurrentBridgeInvocation(frame)) {
+            if (concurrentInvocations.size >= MAX_CONCURRENT_BRIDGE_INVOCATIONS) {
+              app.log.warn(
+                {
+                  auditUserKey,
+                  sessionId: entry.session.id,
+                  concurrentInvocationCount: concurrentInvocations.size,
+                },
+                'bridge concurrent invocation limit exceeded',
+              );
+              socket.close(4429, 'concurrent invocation limit exceeded');
+              return;
+            }
+            const invocation = handleClientFrame(entry.session, frame)
+              .catch((error: unknown) => {
+                app.log.error({ err: error }, 'concurrent bridge frame failed');
+                socket.close(4500, 'host command failed');
+              })
+              .finally(() => concurrentInvocations.delete(invocation));
+            concurrentInvocations.add(invocation);
+            return;
+          }
           await handleClientFrame(entry.session, frame);
         })
         .catch((error: unknown) => {
@@ -492,24 +624,35 @@ export async function createGateway(config: GatewayConfig): Promise<FastifyInsta
           socket.close(4500, 'host command failed');
         });
     });
-    socket.on('close', () => {
+    socket.on('close', (code, reason) => {
       clearTimeout(helloTimer);
       if (entry === undefined) return;
       if (!entry.session.detach(socket)) return;
-      app.log.info({ auditUserKey, sessionId: entry.session.id }, 'bridge connection closed');
+      app.log.info(
+        {
+          auditUserKey,
+          closeCode: code,
+          closeReason: reason.toString().slice(0, 160),
+          sessionId: entry.session.id,
+        },
+        'bridge connection closed',
+      );
       if (entry.cleanupTimer === undefined) {
         entry.cleanupTimer = setTimeout(() => {
           if (entry === undefined) return;
+          const pendingHostFrames = entry.session.pendingHostFrames;
           entry.session.dispose();
           sessions.delete(entry.session.id);
-          if (entry.appHostDiagnosticListener !== undefined) {
-            entry.runtime.off('app-host-send', entry.appHostDiagnosticListener);
-          }
-          if (entry.capabilityErrorListener !== undefined) {
-            entry.runtime.off('capability-error', entry.capabilityErrorListener);
-          }
+          app.log.info(
+            {
+              auditUserKey,
+              sessionId: entry.session.id,
+              pendingHostFrames,
+            },
+            'bridge reconnect window expired',
+          );
           runtimes.release(entry.runtime);
-        }, 10 * 60_000);
+        }, config.bridgeReconnectSeconds * 1_000);
         entry.cleanupTimer.unref();
       }
     });
@@ -529,6 +672,7 @@ export async function createGateway(config: GatewayConfig): Promise<FastifyInsta
       socket.close(4403, 'origin rejected');
       return;
     }
+    installWebSocketHeartbeat(socket);
     const { browserSessionId, browserTabId, conversationId } = request.query;
     if (
       typeof browserSessionId !== 'string' ||
@@ -610,20 +754,31 @@ export async function createGateway(config: GatewayConfig): Promise<FastifyInsta
     const identity = requireIdentity(request, config);
     const requested = request.params['*'];
     if (requested === '' && !requestHasInitialRoute(request, config.publicOrigin)) {
-      const runtime = await runtimes.acquire(identity);
+      const runtime = await runtimes.acquireBootstrap(identity);
       try {
-        const initialRoute = await runtime.readInitialRoute();
-        const location = officialInitialRouteLocation(initialRoute);
+        const location =
+          runtime.cachedInitialRoute === null
+            ? '/'
+            : officialInitialRouteLocation(runtime.cachedInitialRoute);
         if (location !== '/') return reply.redirect(location);
       } finally {
         runtimes.release(runtime);
       }
     }
     if (shouldServeRendererIndex(requested, request.headers.accept)) {
+      const rendererIndex = rendererInitialRouteForRequest(
+        requested,
+        request.raw.url,
+        config.publicOrigin,
+      );
       return reply
         .header('cache-control', 'private, no-store')
         .type('text/html; charset=utf-8')
-        .send(renderedIndex);
+        .send(
+          rendererIndex === null
+            ? renderedIndex
+            : injectInitialRouteMeta(renderedIndex, rendererIndex),
+        );
     }
     return sendOfficialAsset(requested, config.officialRoot, reply);
   });
@@ -634,6 +789,20 @@ export async function createGateway(config: GatewayConfig): Promise<FastifyInsta
     await runtimes.stopAll();
   });
   return app;
+}
+
+export function findMissingBrowserBridgeImports(
+  modules: ReadonlyMap<string, Buffer | string>,
+): string[] {
+  const missing = new Set<string>();
+  const localImport = /(?:from\s*|import\s*)['"]\.\/([A-Za-z0-9._-]+\.js)['"]/gu;
+  for (const source of modules.values()) {
+    for (const match of source.toString().matchAll(localImport)) {
+      const filename = match[1];
+      if (filename !== undefined && !modules.has(filename)) missing.add(filename);
+    }
+  }
+  return [...missing].sort();
 }
 
 export function countIdentitySessions(
@@ -647,11 +816,38 @@ export function countIdentitySessions(
   return count;
 }
 
+export function countReconnectableIdentitySessions(
+  entries: Iterable<Pick<SessionEntry, 'identity' | 'cleanupTimer'>>,
+  identity: AuthentikIdentity,
+): number {
+  let count = 0;
+  for (const entry of entries) {
+    if (entry.cleanupTimer !== undefined && identitiesMatch(entry.identity, identity)) count += 1;
+  }
+  return count;
+}
+
+export function reconnectableIdentityEntries<
+  T extends { identity: AuthentikIdentity; cleanupTimer?: NodeJS.Timeout },
+>(entries: Iterable<[string, T]>, identity: AuthentikIdentity): Array<[string, T]> {
+  return [...entries].filter(
+    ([, entry]) => entry.cleanupTimer !== undefined && identitiesMatch(entry.identity, identity),
+  );
+}
+
 export function officialInitialRouteLocation(initialRoute: '/' | '/login'): string {
   if (initialRoute === '/') return '/';
   const url = new URL('http://official-renderer.invalid/');
   url.searchParams.set('initialRoute', initialRoute);
   return `${url.pathname}${url.search}`;
+}
+
+export function missingBridgeSessionRequiresReload(lastHostSequence: number): boolean {
+  return lastHostSequence > 0;
+}
+
+export function isConcurrentBridgeInvocation(frame: ClientFrame): boolean {
+  return frame.type === 'command' || frame.type === 'worker-command';
 }
 
 export function shouldServeRendererIndex(
@@ -667,8 +863,53 @@ export function shouldServeRendererIndex(
   );
 }
 
+export function rendererInitialRouteForRequest(
+  requested: string,
+  rawUrl: string | undefined,
+  publicOrigin: string,
+): string | null {
+  if (requested === '' || requested === 'index.html' || rawUrl === undefined) return null;
+  const url = new URL(rawUrl, publicOrigin);
+  if (url.searchParams.has('initialRoute')) return null;
+  return `${url.pathname}${url.search}`;
+}
+
+export function injectInitialRouteMeta(index: string, initialRoute: string): string {
+  const headNeedle = '<head>';
+  const headPosition = index.indexOf(headNeedle);
+  if (
+    headPosition < 0 ||
+    index.indexOf(headNeedle, headPosition + headNeedle.length) >= 0 ||
+    /<meta\s+name=["']initial-route["']/iu.test(index)
+  ) {
+    throw new Error('official index initial route marker changed');
+  }
+  const escapedRoute = initialRoute
+    .replaceAll('&', '&amp;')
+    .replaceAll('"', '&quot;')
+    .replaceAll('<', '&lt;')
+    .replaceAll('>', '&gt;');
+  return `${index.slice(0, headPosition + headNeedle.length)}\n    <meta name="initial-route" content="${escapedRoute}">${index.slice(headPosition + headNeedle.length)}`;
+}
+
 export function terminateWebsocketClients(clients: Iterable<{ terminate: () => void }>): void {
   for (const client of clients) client.terminate();
+}
+
+export function installWebSocketHeartbeat(
+  socket: WebSocketHeartbeatTarget,
+  intervalMs = WEBSOCKET_HEARTBEAT_INTERVAL_MS,
+): () => void {
+  const timer = setInterval(() => {
+    if (socket.readyState === 1) socket.ping();
+  }, intervalMs);
+  timer.unref();
+  const stop = (): void => {
+    clearInterval(timer);
+    socket.off('close', stop);
+  };
+  socket.once('close', stop);
+  return stop;
 }
 
 function requestHasInitialRoute(request: FastifyRequest, publicOrigin: string): boolean {
@@ -766,16 +1007,26 @@ function requireIdentity(request: FastifyRequest, config: GatewayConfig): Authen
   }
 }
 
-function injectBridgeScripts(index: string, bridgePath: string): string {
+export function injectBridgeScripts(index: string, bridgePath: string): string {
+  const headNeedle = '<head>';
+  const headPosition = index.indexOf(headNeedle);
+  if (
+    headPosition < 0 ||
+    index.indexOf(headNeedle, headPosition + headNeedle.length) >= 0 ||
+    /<base\b/iu.test(index)
+  ) {
+    throw new Error('official index head marker changed');
+  }
+  const indexWithBase = `${index.slice(0, headPosition + headNeedle.length)}\n    <base href="/">${index.slice(headPosition + headNeedle.length)}`;
   const needle = '<script type="module" crossorigin';
-  const position = index.indexOf(needle);
-  if (position < 0 || index.indexOf(needle, position + needle.length) >= 0) {
+  const position = indexWithBase.indexOf(needle);
+  if (position < 0 || indexWithBase.indexOf(needle, position + needle.length) >= 0) {
     throw new Error('official index entry script marker changed');
   }
   const insertion =
     '<script src="/__codex/bootstrap.js"></script>\n' +
     `    <script type="module" src="${bridgePath}"></script>\n    `;
-  return `${index.slice(0, position)}${insertion}${index.slice(position)}`;
+  return `${indexWithBase.slice(0, position)}${insertion}${indexWithBase.slice(position)}`;
 }
 
 function escapeScriptJson(value: unknown): string {

@@ -9,14 +9,17 @@ if [[ "$(id -u)" -ne 0 ]]; then
 fi
 
 application_root="${APPLICATION_ROOT:-/srv/aialra/apps/codexapp-official-web-host/current}"
-environment_file="/srv/aialra/config/secrets/codexapp-official-web-host.env"
+environment_file="${ENVIRONMENT_FILE:-/srv/aialra/config/secrets/codexapp-official-web-host.env}"
 runtime_parent="/srv/aialra/state"
 runtime_root="$(mktemp -d "$runtime_parent/codexapp-desktop-tools-smoke.XXXXXXXX")"
 service_name="codexapp-desktop-tools-smoke-$$.service"
 app_port="13019"
 public_origin="http://127.0.0.1:$app_port"
+secret_group="${CODEXAPP_SECRET_GROUP:-codexappsecrets}"
 
 source "$application_root/ops/lib/systemd-host-hardening.sh"
+source "$application_root/ops/lib/pinned-official-release.sh"
+codexapp_load_pinned_official_release "$application_root"
 codexapp_prepare_host_hardening "$runtime_root"
 
 read_environment_value() {
@@ -53,6 +56,10 @@ if [[ ! -d "$application_root" || ! -f "$environment_file" ]]; then
   echo "desktop tools smoke application or environment is missing" >&2
   exit 1
 fi
+if ! getent group "$secret_group" >/dev/null; then
+  echo "desktop tools smoke secret group does not exist: $secret_group" >&2
+  exit 1
+fi
 if port_is_listening; then
   echo "desktop tools smoke port is already in use" >&2
   exit 1
@@ -86,14 +93,20 @@ systemd-run \
   --unit "$service_name" \
   --uid "$service_user" \
   --gid "$service_group" \
+  --property "SupplementaryGroups=$secret_group" \
   --working-directory "$application_root" \
   --property "EnvironmentFile=$environment_file" \
   "${CODEXAPP_HOST_HARDENING_ARGS[@]}" \
   -- \
   /usr/bin/env \
+  "${CODEXAPP_PINNED_OFFICIAL_ENV[@]}" \
+  "${CODEXAPP_HOST_SERVICE_ENV[@]}" \
   "PORT=$app_port" \
   "PUBLIC_ORIGIN=$public_origin" \
   "RUNTIME_ROOT=$runtime_root" \
+  "BROWSER_BRIDGE_SCRIPT=$application_root/packages/browser-bridge/dist/index.js" \
+  "ELECTRON_NET_WORKER=$application_root/scripts/electron-net-worker.cjs" \
+  "ELECTRON_NET_USER_DATA_DIR=$runtime_root/electron-network" \
   /usr/bin/node "$application_root/apps/host/dist/main.js"
 
 for _attempt in $(seq 1 45); do

@@ -14,6 +14,16 @@ import {
 } from 'node:fs/promises';
 import { basename, dirname, isAbsolute, join, posix, relative, resolve } from 'node:path';
 
+import {
+  officialDesktopStateExportNames,
+  readQualifiedOfficialVersion,
+} from './official-export-contract.js';
+import {
+  loadQualifiedProjectlessInstructions,
+  type OfficialProjectlessInstructions,
+} from './official-main-contract.js';
+import { resolveOfficialSharedModulePath } from './official-shared-module.js';
+
 interface WorkerRequest {
   type: 'request';
   id: number;
@@ -47,17 +57,11 @@ interface OfficialDesktopStateModule {
   Jl: (mode: string, roots: string[], config: Record<string, unknown>) => Record<string, unknown>;
   Ql: (requirements: unknown, config: Record<string, unknown>) => string[];
   Xl: (config: Record<string, unknown>) => unknown;
-  Yl: (approvalPolicy: string) => { sandboxPolicy: unknown };
   Zl: (value: unknown) => boolean;
   rn: (input: {
     baseInstructions: string;
     isNonGitWorkspace: boolean;
     threadToolsEnabled: boolean;
-  }) => string;
-  Xa: (input: {
-    cwd: string;
-    projectlessOutputDirectory: string;
-    projectlessWorkspaceBrowserRoot: string;
   }) => string;
   wr: () => unknown[];
   _r: (input: unknown, compatibilityCwds?: string[]) => unknown;
@@ -77,7 +81,6 @@ interface OfficialDesktopStateModule {
   Wr: (threadId: string, archivedReason?: string) => boolean;
   Hr: (threadId: string) => boolean;
   Rr: (input: { codexHome: string; threadId: string }) => Promise<boolean | null>;
-  il: number;
   zo: (bytes: Uint8Array) => Promise<string | null>;
   Rt: (options: {
     appServerClient: OfficialLocalExecutionHost;
@@ -97,6 +100,11 @@ interface OfficialDesktopStateModule {
   Sc: (marketplaceName: string) => boolean;
   xc: (buildFlavor: string) => string;
   Jr: () => void;
+  autoDenyPermissions: (input: {
+    homeDirectory: string;
+    permissions: unknown;
+    threadDetailLevel: unknown;
+  }) => unknown;
 }
 
 interface OfficialLocalExecutionHost {
@@ -149,9 +157,26 @@ if (typeof sourceRootValue !== 'string' || sourceRootValue.length === 0) {
 }
 const sourceRoot = resolve(sourceRootValue);
 const officialRequire = createRequire(join(sourceRoot, 'package.json'));
-const official = officialRequire(
-  join(sourceRoot, '.vite', 'build', 'src-DChWimf7.js'),
+const rawOfficial = officialRequire(resolveOfficialSharedModulePath(sourceRoot)) as Record<
+  string,
+  unknown
+>;
+const officialVersion = readQualifiedOfficialVersion(sourceRoot);
+const exportNames = officialDesktopStateExportNames(officialVersion);
+const official = Object.fromEntries(
+  Object.entries(exportNames).map(([semanticName, exportName]) => [
+    semanticName,
+    rawOfficial[exportName],
+  ]),
 ) as Partial<OfficialDesktopStateModule>;
+const projectlessInstructions =
+  officialVersion === '26.721.81911'
+    ? (rawOfficial.Xa as OfficialProjectlessInstructions)
+    : loadQualifiedProjectlessInstructions(sourceRoot);
+const qualifiedMaxFileBytes = 256 * 1024 * 1024;
+if (typeof projectlessInstructions !== 'function') {
+  throw new Error('qualified official projectless instruction export changed');
+}
 
 for (const exportName of [
   'E',
@@ -173,10 +198,8 @@ for (const exportName of [
   'Jl',
   'Ql',
   'Xl',
-  'Yl',
   'Zl',
   'rn',
-  'Xa',
   'wr',
   '_r',
   'Ar',
@@ -198,6 +221,7 @@ for (const exportName of [
   'Sc',
   'xc',
   'Jr',
+  'autoDenyPermissions',
 ] as const) {
   if (typeof official[exportName] !== 'function') {
     throw new Error(`qualified official desktop state export changed: ${exportName}`);
@@ -206,10 +230,6 @@ for (const exportName of [
 if (official.Di !== 'none') {
   throw new Error('qualified official automation summary constant changed');
 }
-if (official.il !== 256 * 1024 * 1024) {
-  throw new Error('qualified official workspace file size limit changed');
-}
-
 const state = official as OfficialDesktopStateModule;
 const codexHome = requiredEnvironmentPath('CODEX_HOME');
 const configuredUserRuntimeRoot = dirname(codexHome);
@@ -297,7 +317,15 @@ async function execute(request: WorkerRequest): Promise<unknown> {
     case 'file.detect-kind':
       return state.zo(bytesValue(params.bytes, 'file sample'));
     case 'file.max-bytes':
-      return { maxBytes: state.il };
+      return { maxBytes: qualifiedMaxFileBytes };
+    case 'permissions.auto-deny':
+      return {
+        permissions: state.autoDenyPermissions({
+          homeDirectory: configuredUserRuntimeRoot,
+          permissions: params.permissions,
+          threadDetailLevel: params.threadDetailLevel,
+        }),
+      };
     case 'custom-avatars.load':
       return state.Rt({
         appServerClient: localExecutionHost,
@@ -432,7 +460,7 @@ async function execute(request: WorkerRequest): Promise<unknown> {
       return {
         instructions: [
           primary,
-          state.Xa({
+          projectlessInstructions({
             cwd,
             projectlessOutputDirectory: outputDirectory,
             projectlessWorkspaceBrowserRoot: workspaceRoot,

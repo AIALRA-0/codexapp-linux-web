@@ -11,7 +11,7 @@ if (executablePath === undefined || executablePath.length === 0) {
 }
 const officialSourceRoot =
   process.env.OFFICIAL_SOURCE_ROOT ??
-  join(process.cwd(), '.official', 'releases', '26.721.31836', 'source');
+  join(process.cwd(), '.official', 'releases', '26.730.61639', 'source');
 
 const temporaryRoot = await mkdtemp(join(tmpdir(), 'codex-browser-smoke-'));
 const viewMessages = [];
@@ -124,11 +124,14 @@ try {
     conversationId: 'smoke-thread',
     viewportPoint: { x: 120, y: 30 },
   });
-  await waitFor(() =>
-    viewMessages.some(
-      (message) =>
-        message.type === 'browser-sidebar-comment-overlay-session' && message.visible === true,
-    ),
+  await waitFor(
+    () =>
+      viewMessages.some(
+        (message) =>
+          message.type === 'browser-sidebar-comment-overlay-session' && message.visible === true,
+      ),
+    15_000,
+    () => ({ errors, recentViewMessages: viewMessages.slice(-12) }),
   );
   const overlay = viewMessages.findLast(
     (message) =>
@@ -205,11 +208,12 @@ try {
   await rm(temporaryRoot, { recursive: true, force: true });
 }
 
-async function waitFor(predicate, timeoutMs = 15_000) {
+async function waitFor(predicate, timeoutMs = 15_000, diagnostics = undefined) {
   const deadline = Date.now() + timeoutMs;
   while (Date.now() < deadline) {
     if (predicate()) return;
     await new Promise((resolve) => setTimeout(resolve, 20));
   }
-  throw new Error(`timed out after ${String(timeoutMs)}ms`);
+  const detail = diagnostics === undefined ? '' : `: ${JSON.stringify(diagnostics())}`;
+  throw new Error(`timed out after ${String(timeoutMs)}ms${detail}`);
 }

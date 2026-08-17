@@ -19,7 +19,7 @@ const { positionals, values } = parseArgs({
       default:
         process.env.OFFICIAL_SOURCE_MANIFEST ??
         process.env.SOURCE_MANIFEST ??
-        '.official/releases/26.721.31836/qualification/source-manifest.json',
+        '.official/releases/26.730.61639/qualification/source-manifest.json',
     },
   },
 });

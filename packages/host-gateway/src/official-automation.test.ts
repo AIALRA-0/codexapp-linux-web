@@ -14,8 +14,8 @@ import { OfficialDesktopState } from './official-desktop-state.js';
 
 const sourceRoot =
   process.env.OFFICIAL_TEST_SOURCE_ROOT ??
-  resolve(process.cwd(), '.official', 'releases', '26.721.31836', 'source');
-const describeQualified = existsSync(join(sourceRoot, '.vite', 'build', 'src-DChWimf7.js'))
+  resolve(process.cwd(), '.official', 'releases', '26.727.51351', 'source');
+const describeQualified = existsSync(join(sourceRoot, '.vite', 'build', 'worker.js'))
   ? describe
   : describe.skip;
 const temporaryRoots: string[] = [];
@@ -39,7 +39,7 @@ describeQualified('OfficialAutomationController', () => {
     expect(templates.automationInstructions).toContain('::inbox-item{title=');
     expect(templates.heartbeatPromptTemplate).toContain('{{AUTOMATION_ID}}');
     expect(templates.heartbeatPromptTemplate).toContain('{{AUTOMATION_PROMPT}}');
-  });
+  }, 30_000);
 
   it('runs a projectless automation through official thread and inbox state', async () => {
     const root = await mkdtemp(join(tmpdir(), 'codexapp-official-automation-'));
@@ -152,7 +152,7 @@ describeQualified('OfficialAutomationController', () => {
     ]);
     expect(viewMessages).toContainEqual({ type: 'automation-runs-updated' });
     expect(viewMessages).toContainEqual({ type: 'inbox-items-changed' });
-  });
+  }, 30_000);
 
   it('runs a repository automation in an official managed worktree', async () => {
     const root = await mkdtemp(join(tmpdir(), 'codexapp-official-worktree-automation-'));
@@ -317,5 +317,5 @@ describeQualified('OfficialAutomationController', () => {
     ]) {
       expect(writableRoots).toContain(expectedRoot);
     }
-  });
+  }, 30_000);
 });

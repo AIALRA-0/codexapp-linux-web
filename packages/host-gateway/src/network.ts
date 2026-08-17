@@ -1,3 +1,6 @@
+import { fetch as undiciFetch, ProxyAgent, type Dispatcher } from 'undici';
+import { createHash } from 'node:crypto';
+
 const DEFAULT_CHATGPT_API_BASE = 'https://chatgpt.com/backend-api/';
 const DEFAULT_MAX_RESPONSE_BYTES = 32 * 1024 * 1024;
 const MAX_REDIRECTS = 5;
@@ -38,6 +41,8 @@ const FORBIDDEN_OUTBOUND_HEADERS = new Set([
 
 const FORBIDDEN_RESPONSE_HEADERS = new Set(['set-cookie', 'set-cookie2']);
 
+const RESPONSE_CACHE_VARY_HEADERS = new Set(['accept', 'accept-language']);
+
 const ALLOWED_HOST_SUFFIXES = [
   'chatgpt.com',
   'openai.com',
@@ -47,6 +52,8 @@ const ALLOWED_HOST_SUFFIXES = [
   'statsigapi.net',
   'mapbox.com',
 ] as const;
+
+const SHARED_EGRESS_PROXY_AGENTS = new Map<string, ProxyAgent>();
 
 export interface RendererFetchRequest {
   requestId: string;
@@ -67,8 +74,10 @@ export interface RendererFetchProxyOptions {
   storeIntegrityState?: (expected: string | null, value: string) => Promise<boolean>;
   appVersion: string;
   chatGptApiBase?: string;
+  egressProxyUrl?: string;
   maxResponseBytes?: number;
   fetchImplementation?: typeof fetch;
+  electronFetchImplementation?: typeof fetch;
 }
 
 export interface HostDownloadRequest {
@@ -131,6 +140,10 @@ export class RendererFetchError extends Error {
 
 export class RendererFetchProxy {
   readonly options: RendererFetchProxyOptions;
+  readonly #responseCache = new Map<
+    string,
+    { expiresAtMs: number; response: RendererFetchResponse }
+  >();
 
   constructor(options: RendererFetchProxyOptions) {
     this.options = options;
@@ -145,6 +158,27 @@ export class RendererFetchProxy {
         this.options.chatGptApiBase ?? DEFAULT_CHATGPT_API_BASE,
       );
       assertAllowedRendererFetchUrl(resolvedUrl);
+      if (rendererFetchMutatesCachedSettings(request, resolvedUrl)) {
+        this.invalidateResponseCache();
+      }
+      const responseCache = rendererFetchResponseCachePolicy(request, resolvedUrl);
+      if (responseCache !== null) {
+        const cached = this.#responseCache.get(responseCache.key);
+        if (cached !== undefined && cached.expiresAtMs > Date.now()) {
+          return { ...cached.response, requestId: request.requestId };
+        }
+        if (cached !== undefined) this.#responseCache.delete(responseCache.key);
+      }
+      if (isDiscardableTelemetryIngest(request, resolvedUrl)) {
+        return {
+          type: 'fetch-response',
+          responseType: 'success',
+          requestId: request.requestId,
+          status: 204,
+          headers: {},
+          bodyJsonString: 'null',
+        };
+      }
       const response = await this.#performWithAuth(request, resolvedUrl, signal);
       const headers = responseHeaders(response.headers);
       const bytes = await readResponseBytes(
@@ -174,7 +208,7 @@ export class RendererFetchProxy {
           });
         }
       }
-      return {
+      const result: RendererFetchResponse = {
         type: 'fetch-response',
         responseType: 'success',
         requestId: request.requestId,
@@ -182,6 +216,14 @@ export class RendererFetchProxy {
         headers,
         bodyJsonString,
       };
+      if (responseCache !== null) {
+        this.#responseCache.set(responseCache.key, {
+          expiresAtMs: Date.now() + responseCache.ttlMs,
+          response: result,
+        });
+        this.#pruneResponseCache();
+      }
+      return result;
     } catch (error) {
       const status = error instanceof RendererFetchError ? error.status : 500;
       const errorCode = error instanceof RendererFetchError ? error.errorCode : undefined;
@@ -193,6 +235,22 @@ export class RendererFetchProxy {
         error: error instanceof Error ? error.message : 'Unknown fetch proxy error',
         ...(errorCode === undefined ? {} : { errorCode }),
       };
+    }
+  }
+
+  invalidateResponseCache(): void {
+    this.#responseCache.clear();
+  }
+
+  #pruneResponseCache(): void {
+    const now = Date.now();
+    for (const [key, cached] of this.#responseCache) {
+      if (cached.expiresAtMs <= now) this.#responseCache.delete(key);
+    }
+    while (this.#responseCache.size > 100) {
+      const first = this.#responseCache.keys().next().value;
+      if (first === undefined) break;
+      this.#responseCache.delete(first);
     }
   }
 
@@ -330,17 +388,36 @@ export class RendererFetchProxy {
       this.options.appVersion,
       integrityState,
     );
-    const fetchImplementation = this.options.fetchImplementation ?? fetch;
     const requestSignal = combineWithTimeout(signal);
 
     for (let redirectCount = 0; ; redirectCount += 1) {
-      const response = await fetchImplementation(url, {
+      const requestInit: RequestInit & { dispatcher?: Dispatcher } = {
         method,
         headers,
         ...(body === undefined ? {} : { body }),
         redirect: 'manual',
         signal: requestSignal,
-      });
+      };
+      const useOfficialElectronNetwork =
+        this.options.fetchImplementation === undefined &&
+        this.options.electronFetchImplementation !== undefined &&
+        shouldUseOfficialElectronNetwork(url);
+      const proxyAgent = useOfficialElectronNetwork
+        ? undefined
+        : rendererEgressProxyAgent(url, this.options.egressProxyUrl);
+      if (proxyAgent !== undefined) requestInit.dispatcher = proxyAgent;
+      let fetchImplementation = this.options.fetchImplementation;
+      if (fetchImplementation === undefined) {
+        if (useOfficialElectronNetwork) {
+          fetchImplementation = this.options.electronFetchImplementation;
+          if (fetchImplementation === undefined) {
+            throw new RendererFetchError('official Electron network is unavailable', 503);
+          }
+        } else {
+          fetchImplementation = proxyAgent === undefined ? fetch : (undiciFetch as typeof fetch);
+        }
+      }
+      const response = await fetchImplementation(url, requestInit);
       if (![301, 302, 303, 307, 308].includes(response.status)) {
         if (request.attachIntegrityState) {
           const nextState = validIntegrityState(response.headers.get(INTEGRITY_UPDATE_HEADER));
@@ -382,6 +459,47 @@ export class RendererFetchProxy {
       headers = createOutboundHeaders(request, url, token, this.options.appVersion, integrityState);
     }
   }
+}
+
+export function rendererFetchResponseCachePolicy(
+  request: RendererFetchRequest,
+  url: URL,
+): { key: string; ttlMs: number } | null {
+  if (request.method !== 'GET' || !request.attachAuth) return null;
+  let ttlMs: number | null = null;
+  if (url.pathname.startsWith('/backend-api/settings/')) ttlMs = 60_000;
+  else if (url.pathname.startsWith('/backend-api/accounts/')) ttlMs = 60_000;
+  else if (url.pathname.startsWith('/backend-api/wham/')) ttlMs = 15_000;
+  if (ttlMs === null) return null;
+  const requestIdentity = JSON.stringify({
+    attachDesktopSurface: request.attachDesktopSurface,
+    attachIntegrityState: request.attachIntegrityState,
+    binaryResponse: request.binaryResponse,
+    headers: Object.fromEntries(
+      Object.entries(request.headers)
+        .map(([name, value]) => [name.toLowerCase(), value] as const)
+        .filter(([name]) => RESPONSE_CACHE_VARY_HEADERS.has(name))
+        .sort(([left], [right]) => left.localeCompare(right)),
+    ),
+    url: url.href,
+  });
+  return {
+    key: createHash('sha256').update(requestIdentity).digest('hex'),
+    ttlMs,
+  };
+}
+
+export function rendererFetchMutatesCachedSettings(
+  request: RendererFetchRequest,
+  url: URL,
+): boolean {
+  return (
+    request.attachAuth &&
+    request.method !== 'GET' &&
+    request.method !== 'HEAD' &&
+    (url.pathname.startsWith('/backend-api/settings/') ||
+      url.pathname.startsWith('/backend-api/accounts/'))
+  );
 }
 
 export function parseRendererFetchRequest(
@@ -435,18 +553,48 @@ export function parseRendererFetchRequest(
   };
 }
 
+export function shouldUseRendererEgressProxy(url: URL): boolean {
+  return (
+    url.protocol === 'https:' &&
+    url.port.length === 0 &&
+    url.hostname === 'chatgpt.com' &&
+    url.pathname === '/backend-api/gizmos/snorlax/sidebar'
+  );
+}
+
+export function shouldUseOfficialElectronNetwork(url: URL): boolean {
+  return (
+    url.protocol === 'https:' &&
+    url.username.length === 0 &&
+    url.password.length === 0 &&
+    url.port.length === 0 &&
+    url.hostname === 'chatgpt.com' &&
+    url.pathname.startsWith('/backend-api/') &&
+    url.hash.length === 0
+  );
+}
+
+function rendererEgressProxyAgent(url: URL, proxyUrl: string | undefined): ProxyAgent | undefined {
+  if (proxyUrl === undefined || !shouldUseRendererEgressProxy(url)) return undefined;
+  let agent = SHARED_EGRESS_PROXY_AGENTS.get(proxyUrl);
+  if (agent === undefined) {
+    agent = new ProxyAgent(proxyUrl);
+    SHARED_EGRESS_PROXY_AGENTS.set(proxyUrl, agent);
+  }
+  return agent;
+}
+
 export function resolveRendererFetchUrl(value: string, chatGptApiBase: string): URL {
   if (/^https?:\/\//iu.test(value)) return new URL(value);
   if (value.startsWith('data:')) {
     throw new RendererFetchError('data URL fetches are not proxied by the browser host', 400);
   }
   const base = new URL(chatGptApiBase);
-  const basePath = base.pathname.replace(/\/+$/u, '');
-  const relativePath = value.replace(/^\/+/u, '');
-  base.pathname = `${basePath}/${relativePath}`;
-  base.search = '';
-  base.hash = '';
-  return base;
+  if (!base.pathname.endsWith('/')) base.pathname = `${base.pathname}/`;
+  // The renderer sends backend paths such as `/conversations?limit=20`. URL
+  // resolution must parse the query separately; assigning that whole value to
+  // `pathname` percent-encodes `?` as `%3F` and changes the upstream endpoint.
+  return new URL(value.replace(/^\/+/u, ''), base);
 }
 
 export function assertAllowedRendererFetchUrl(url: URL): void {
@@ -733,6 +881,14 @@ function isOpenAiAuthAllowedUrl(url: URL): boolean {
     hostname.endsWith('.openai.com') ||
     ((hostname === 'chatgpt.com' || hostname.endsWith('.chatgpt.com')) &&
       !hostname.startsWith('ab.'))
+  );
+}
+
+function isDiscardableTelemetryIngest(request: RendererFetchRequest, url: URL): boolean {
+  return (
+    request.method === 'POST' &&
+    url.hostname.toLowerCase() === 'chatgpt.com' &&
+    url.pathname === '/ces/v1/rgstr'
   );
 }
 

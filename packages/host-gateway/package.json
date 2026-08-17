@@ -12,12 +12,14 @@
     "@codexapp/contracts": "0.1.0",
     "@codexapp/official-package": "0.1.0",
     "@fastify/websocket": "11.3.0",
+    "better-sqlite3": "12.9.0",
     "capnweb": "0.10.0",
     "fastify": "5.10.0",
     "node-pty": "1.1.0",
     "pino": "10.3.1",
     "playwright-core": "1.58.2",
     "smol-toml": "1.7.1",
+    "undici": "8.9.0",
     "yjs": "13.6.27",
     "zod": "4.4.3"
   }

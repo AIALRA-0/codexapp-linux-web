@@ -1,0 +1,18 @@
+{
+  "product": "ChatGPT",
+  "bundleIdentifier": "com.openai.codex",
+  "alternateProductName": "Codex",
+  "version": "26.727.51351",
+  "buildNumber": "6119",
+  "electron": "42.3.0",
+  "chromium": "150.0.7871.182",
+  "vite": "8.1.5",
+  "codexCli": "0.146.0-alpha.9.2",
+  "asarBytes": 218370611,
+  "asarSha256": "a529edd72e10b08931c0d695b5e3e6a0be7f51874610dafc04f578436ab7d74d",
+  "asarHeaderIntegritySha256": "916544f2df789af8046a9d31016018a72c89d8ec5af09c9a99375eeb1cac9e47",
+  "signedBy": "OpenAI OpCo, LLC",
+  "signedAt": "2026-08-01",
+  "source": "/Applications/ChatGPT.app/Contents/Resources/app.asar",
+  "redistributable": false
+}

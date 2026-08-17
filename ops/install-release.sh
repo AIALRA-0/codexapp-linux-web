@@ -36,18 +36,63 @@ fi
 cleanup() {
   local exit_code=$?
   if (( exit_code != 0 )) && [[ -d "$incomplete" && ! -L "$incomplete" ]]; then
-    rm -rf --one-file-system -- "$incomplete"
+    find "$incomplete" -xdev -depth -delete
   fi
   exit "$exit_code"
 }
 trap cleanup EXIT
 
 mkdir "$incomplete"
-cp -a "$source_root/." "$incomplete/"
+if ! command -v rsync >/dev/null 2>&1; then
+  echo "rsync is required to prepare a release" >&2
+  exit 1
+fi
+rsync -a \
+  --exclude='/.git/' \
+  --exclude='/.git' \
+  --exclude='/node_modules/' \
+  --exclude='/.official/' \
+  --exclude='/artifacts/' \
+  --exclude='/coverage/' \
+  --exclude='/reports/generated/' \
+  --exclude='/runtime/' \
+  --exclude='/secrets/' \
+  --exclude='/state/' \
+  "$source_root/" "$incomplete/"
+# rsync preserves the source directory mode on the destination root. Sources
+# prepared with mktemp are intentionally private, so normalize only the release
+# root before making the completed tree immutable.
+chmod 0755 "$incomplete"
+for forbidden_path in .git .official artifacts coverage node_modules runtime secrets state; do
+  if [[ -e "$incomplete/$forbidden_path" || -L "$incomplete/$forbidden_path" ]]; then
+    echo "forbidden build input entered the release: $forbidden_path" >&2
+    exit 1
+  fi
+done
 (
   cd "$incomplete"
   qualified_official_source_root="${QUALIFIED_OFFICIAL_SOURCE_ROOT:?QUALIFIED_OFFICIAL_SOURCE_ROOT is required}"
+  qualified_source_manifest="$(
+    realpath "$qualified_official_source_root/../qualification/source-manifest.json"
+  )"
+  if [[ ! -f "$qualified_source_manifest" || -L "$qualified_source_manifest" ]]; then
+    echo "qualified official source manifest is missing or symbolic" >&2
+    exit 1
+  fi
+  jq -e \
+    --slurpfile source "$qualified_source_manifest" \
+    '
+      .version == $source[0].package.version
+      and .buildNumber == $source[0].package.buildNumber
+      and .asarSha256 == $source[0].package.asarSha256
+      and .rendererTreeSha256 == $source[0].renderer.treeSha256
+      and .hostTreeSha256 == $source[0].host.treeSha256
+      and .preloadSourceSha256 == $source[0].preload.sourceSha256
+    ' \
+    manifests/current-official.json >/dev/null
+  npm ci --include=dev
   npm run ci
+  OFFICIAL_TEST_SOURCE_ROOT="$qualified_official_source_root" npm test
   OFFICIAL_SOURCE_ROOT="$qualified_official_source_root" npm run contracts:check
   npm audit --audit-level=high
   npm audit --omit=dev --audit-level=high
@@ -57,7 +102,7 @@ cp -a "$source_root/." "$incomplete/"
   sha256sum -c --quiet RELEASE-SHA256SUMS
 )
 chown -R root:root "$incomplete"
-chmod -R a-w "$incomplete"
+chmod -R a+rX,a-w "$incomplete"
 mv "$incomplete" "$target"
 
 if [[ "$activate" == "--stage" ]]; then
@@ -66,39 +111,6 @@ if [[ "$activate" == "--stage" ]]; then
   exit 0
 fi
 
-previous_target=""
-if [[ -L "$current_link" ]]; then
-  previous_target="$(readlink -f "$current_link")"
-fi
-next_link="$application_root/.current.${release_id}.next"
-ln -s "$target" "$next_link"
-mv -Tf "$next_link" "$current_link"
-
-rollback() {
-  local exit_code=$?
-  if (( exit_code != 0 )); then
-    if [[ -n "$previous_target" && -d "$previous_target" ]]; then
-      rollback_link="$application_root/.current.rollback"
-      ln -s "$previous_target" "$rollback_link"
-      mv -Tf "$rollback_link" "$current_link"
-      systemctl restart "$service_name" || true
-    elif [[ -L "$current_link" && "$(readlink -f "$current_link")" == "$target" ]]; then
-      rm -- "$current_link"
-      systemctl stop "$service_name" || true
-    fi
-  fi
-  exit "$exit_code"
-}
-trap rollback EXIT
-
-systemctl restart "$service_name"
-for _attempt in $(seq 1 30); do
-  if curl -fs "$health_url" >/dev/null 2>&1; then
-    trap - EXIT
-    printf '{"ok":true,"active":"%s","previous":"%s"}\n' "$target" "$previous_target"
-    exit 0
-  fi
-  sleep 1
-done
-echo "new release did not become ready" >&2
-exit 1
+trap - EXIT
+APPLICATION_ROOT="$target" "$target/ops/install-host-service.sh"
+exec "$target/ops/promote-release.sh" "$release_id"

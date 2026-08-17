@@ -48,6 +48,7 @@ describe('browser session reconnect protocol', () => {
     session.detach(firstSocket as unknown as WebSocket);
 
     const offlineMessage = session.send({ type: 'view-message', message: { value: 2 } });
+    expect(session.pendingHostFrames).toBe(1);
     const secondSocket = new SocketHarness();
     session.attach(secondSocket as unknown as WebSocket, 2);
 
@@ -100,6 +101,65 @@ describe('browser session reconnect protocol', () => {
       result: { accepted: true },
     });
     expect(replay?.sequence).toBeGreaterThan(original.sequence);
+    session.dispose();
+  });
+
+  it('bounds disconnected replay memory without throwing into an active task', () => {
+    const session = createSession();
+    for (let index = 0; index < 10_001; index += 1) {
+      expect(() => session.send({ type: 'view-message', message: { index } })).not.toThrow();
+    }
+    expect(session.pendingHostFrames).toBe(0);
+
+    const socket = new SocketHarness();
+    expect(session.attach(socket as unknown as WebSocket, 0)).toBe(false);
+    expect(socket.closes).toEqual([{ code: 4410, reason: 'browser session replay unavailable' }]);
+    session.dispose();
+  });
+
+  it('delivers a targeted renderer response only to its owning browser session', () => {
+    const runtime = new RuntimeHarness();
+    const first = new BrowserSession('session-first', runtime as unknown as UserRuntime);
+    const second = new BrowserSession('session-second', runtime as unknown as UserRuntime);
+
+    runtime.emit('view-message-for-session', {
+      browserSessionId: 'session-second',
+      message: { type: 'mcp-response', message: { id: 7, result: { ok: true } } },
+    });
+
+    expect(first.pendingHostFrames).toBe(0);
+    expect(second.pendingHostFrames).toBe(1);
+    first.dispose();
+    second.dispose();
+  });
+
+  it('sends large renderer messages as acknowledged official chunks', () => {
+    const session = createSession();
+    const socket = new SocketHarness();
+    session.attach(socket as unknown as WebSocket, 0);
+    session.acknowledge(socket.frames.at(-1)?.sequence ?? 0);
+    session.send({
+      type: 'view-message',
+      message: { type: 'mcp-response', body: 'x'.repeat(2 * 1024 * 1024) },
+    });
+
+    expect(socket.frames.at(-1)).toMatchObject({
+      type: 'view-message',
+      message: { marker: 'codex-host-chunked-message-v1', kind: 'start', sequence: 0 },
+    });
+    let chunkFrameCount = 1;
+    while (session.pendingHostFrames > 0 && chunkFrameCount < 100) {
+      const sequence = socket.frames.at(-1)?.sequence;
+      if (sequence === undefined) throw new Error('chunk frame is missing');
+      session.acknowledge(sequence);
+      chunkFrameCount += 1;
+    }
+    expect(chunkFrameCount).toBeGreaterThan(3);
+    expect(session.pendingHostFrames).toBe(0);
+    expect(socket.frames.at(-1)).toMatchObject({
+      type: 'view-message',
+      message: { marker: 'codex-host-chunked-message-v1', kind: 'end' },
+    });
     session.dispose();
   });
 });

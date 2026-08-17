@@ -1,104 +1,338 @@
-# CodexApp Official Web Host
+<div align="center">
 
-This repository replaces the old custom CodexApp web client. It hosts the
-**unchanged, version-locked official ChatGPT/Codex desktop renderer** behind a
-browser compatibility layer and the matching official Codex app-server. It does
-not reimplement the user interface.
+# CodexApp Linux Web
 
-## Non-negotiable invariants
+把官方 ChatGPT / Codex 桌面界面放到 Linux 服务器上，让同一批任务可以在浏览器中持续使用
 
-- Official renderer JavaScript, CSS, images, fonts, and source HTML are immutable
-  build inputs. A byte-for-byte manifest is checked before serving. The host may
-  produce a deterministic runtime copy of the HTML containing only the audited
-  bridge bootstrap tag; the signed source remains untouched.
-- Official packages, extracted assets, user conversations, credentials, traces,
-  and generated runtime state are never committed to Git.
-- Every browser-to-host method is explicit and versioned. Unknown methods fail
-  loudly and block promotion.
-- Each authenticated user gets one isolated runtime and one `CODEX_HOME`.
-- The existing OpenCodexApp is outside this project's ownership and deletion scope.
-- Releases promote from qualification to staging to production; production always
-  has a tested rollback version.
+[![CI](https://github.com/AIALRA-0/codexapp-linux-web/actions/workflows/ci.yml/badge.svg)](https://github.com/AIALRA-0/codexapp-linux-web/actions/workflows/ci.yml)
+[![Node.js 24](https://img.shields.io/badge/Node.js-24-339933?logo=nodedotjs&logoColor=white)](https://nodejs.org/)
+[![Official renderer](https://img.shields.io/badge/renderer-26.810.41047-111111)](./manifests/official-26.810.41047.json)
+[![License: MIT](https://img.shields.io/badge/code-MIT-blue.svg)](./LICENSE)
 
-The official ChatGPT application, renderer, images, fonts, and Codex binaries are
-not part of this repository and are not covered by this repository's MIT license.
-Operators must supply and qualify their own authorized official package.
+[它解决什么](#它解决什么) · [真实界面](#真实界面) · [实现方式](#实现方式) · [验证结果](#验证结果) · [部署与升级](#部署与升级) · [数据边界](#数据边界)
 
-## Qualified version
+</div>
 
-- ChatGPT/Codex renderer: `26.721.31836`, build `5828`
-- Electron/Chromium declared by the package: `42.3.0` / `150.0.7871.128`
-- Codex app-server: `0.146.0-alpha.3.1`
-- Preload surface: 19 methods, pinned in
-  `manifests/preload-contracts/preload-26.721.31836.json`
+## 它解决什么
 
-The host fails closed if package identity, renderer bytes, host bytes, preload
-contract, or app-server version differs from qualification.
+桌面端离线或设备不在身边时，任务会停在某一台电脑上
 
-## Architecture
+CodexApp Linux Web 把官方界面、官方 Codex app-server 和每个用户自己的运行目录放到服务器上，浏览器只负责显示和交互
 
-1. Existing AIALRA unified authentication verifies the outer browser session.
-2. Nginx forwards an immutable Authentik subject plus a private proxy proof.
-3. Each subject receives an isolated runtime, workspace, `CODEX_HOME`, browser
-   profile, terminal set, and app-server process.
-4. The unchanged official renderer calls a versioned browser bridge that
-   reproduces the qualified desktop preload contract.
-5. Official app-server owns conversations, turns, approvals, MCP, skills,
-   models, login, and configuration. Host-only desktop services are explicit,
-   audited adapters.
+项目坚持三条边界：
 
-Outer AIALRA login and the official OpenAI account login remain separate. The
-OpenAI flow uses the official device authorization route and does not depend on
-a browser callback to a developer laptop. The unmodified official renderer
-receives the official `chatgptDeviceCode` result directly, displays its device
-code, and opens the verification page only when the user selects its own
-**Open browser** action.
+- 不重写一套相似的网页界面
+- 不自建对话协议、历史索引或插件协议
+- 不把官方安装包、账号凭据、真实对话和服务器状态提交到 GitHub
 
-## Validation
+## 真实界面
+
+下面两张图来自真实部署界面，只裁掉了包含账号和任务列表的侧栏，没有重绘界面或替换组件
+
+### 对话、输入和消息操作
+
+![真实对话界面](./docs/assets/codexapp-conversation.jpg)
+
+### 插件、技能和连接应用
+
+![真实插件界面](./docs/assets/codexapp-plugins.jpg)
+
+## 实现方式
+
+项目直接加载经过版本锁定和哈希校验的官方 renderer，也就是官方桌面客户端负责显示界面的那部分代码
+
+浏览器兼容层只补齐桌面环境原本提供的能力，例如文件选择、终端、Git、工作树、浏览器控制和权限确认
+
+```mermaid
+flowchart TD
+    A["浏览器打开 CodexApp"] --> B["统一登录确认访问者"]
+    B --> C["按稳定用户标识进入隔离运行目录"]
+    C --> D["加载未经重写的官方界面"]
+    D --> E["版本锁定的兼容层转发桌面能力"]
+    E --> F["官方 Codex app-server 处理任务、模型、MCP 和设置"]
+    F --> G["对话、文件和配置写入服务器用户目录"]
+```
+
+这条链路让界面升级仍然以官方包为准，也让宿主代码可以单独测试、回滚和审计
+
+## A / B 双站分工
+
+生产环境把“维护系统”和“日常工作系统”拆开，避免 Codex 一边运行，一边改写承载自己的服务
+
+| 站点                        | 用途            | 版本策略                             | 活动数据                 |
+| --------------------------- | --------------- | ------------------------------------ | ------------------------ |
+| `newcodexapp.aialra.online` | A：维护和迭代 B | 固定在已验证稳定版，升级必须单独验收 | CodexApp 开发任务        |
+| `codexapp.aialra.online`    | B：日常工作     | 跟进通过完整验收的最新官方界面和引擎 | 当前只保留 Trillium Note |
+
+两个站点的进程、用户状态、工作区、资源上限和发布链接完全分开。B 升级失败时可以直接回滚，不会把 A 一起带坏
+
+## 已验证功能
+
+| 范围     | 已验证结果                                                           |
+| -------- | -------------------------------------------------------------------- |
+| 登录     | 统一登录与 OpenAI 官方设备登录分离，用户之间不能互用会话票据         |
+| 任务     | 新建、发送、读取、搜索、分支、归档、恢复、删除和服务重启后恢复       |
+| 历史记录 | 最近任务、搜索结果、长任务读取和浏览器断线重连                       |
+| 文件     | 上传、附件、文件夹、图片、预览、下载和跨用户下载拒绝                 |
+| 开发工具 | 终端、Git 状态、差异、分支和受管工作树                               |
+| 权限     | 命令批准、拒绝、浏览器来源权限和完全控制开关                         |
+| MCP      | MCP 模型上下文协议（Model Context Protocol）发现、握手和真实工具调用 |
+| 插件     | 插件目录、已安装插件、技能页和连接应用读取                           |
+| 页面     | 新任务、拉取请求、站点、已安排、插件和全部设置页面                   |
+| 运维     | 备份、恢复、不可变发布、健康检查和失败自动回滚                       |
+
+最新候选版分别通过了普通环境 272 项和官方包环境 283 项自动化测试，另有 12 项和 1 项按环境条件跳过
+
+真实运行环境还会执行官方窗口、任务生命周期、MCP、权限、文件、终端、Git、浏览器、备份恢复和持久化烟雾测试
+
+完整证据与未执行的高风险操作见 [端到端验收记录](./docs/USER-JOURNEY-AUDIT-2026-07-29.md)
+
+## 性能边界
+
+宿主曾把所有桌面调用排成一条队列，导致一个慢网络请求拖住本地按钮、历史记录和发送操作
+
+修复后，独立调用可以并发执行，同时保留需要顺序处理的确认和端口消息
+
+| 项目                           |                  验收结果 |
+| ------------------------------ | ------------------------: |
+| 服务器本地桥接延迟中位数       |                   13.0 ms |
+| 服务器本地桥接延迟第 95 百分位 |                   25.9 ms |
+| 已登录任务切换                 |                 44–162 ms |
+| 发送到收到准确回复             | 3.56–4.41 s，包含模型生成 |
+| 创建对话分支                   |                    342 ms |
+| 归档测试分支                   |                    771 ms |
+
+另外从 Mac 取一条约 450 MiB 的真实旧任务，经过逐字节校验后放入服务器隔离目录封测：
+
+| 约 450 MiB 真实旧任务       | 服务器内部耗时 |
+| --------------------------- | -------------: |
+| 启动官方 app-server         |         0.59 s |
+| 列出最近任务                |          16 ms |
+| 读取任务元数据              |          23 ms |
+| 按最新官方界面恢复最近 5 轮 |         31.6 s |
+| 返回页面数据                |        6.37 MB |
+| app-server 进程树峰值内存   |        1.23 GB |
+
+这条任务可以完整读取，不丢内容，也没有超时，但不适合当作日常在线任务
+
+瓶颈是官方 app-server 重复解析超大 JSONL 文件，不是浏览器桥接或公网往返
+
+项目不会为了掩盖这个上游限制再维护一套私有历史数据库，旧任务应先备份，需要时再恢复
+
+2026-08-11 又用约 613 MB（约 585 MiB）的真实 Trillium Note 任务做了完整读取：官方引擎返回 131 轮、约 168 MB 页面数据。旧传输会因为单条消息过大而断开；现在改用最新版官方界面已经支持的分块协议，并逐块确认，不修改官方组件，也不维护第二份对话数据
+
+| 约 613 MB Trillium Note 真实任务 | 实测结果 |
+| -------------------------------- | -------: |
+| 官方引擎读取原任务               |   74.9 s |
+| 宿主分块传输与页面组装           |   38.2 s |
+| 完整读取                         |  113.1 s |
+| 页面断开、白屏、服务重启         |     0 次 |
+
+这个结果证明超大任务可以完整打开，但当时还不够快
+
+2026-08-12 增加了受限的最近页面缓存。它只保存官方引擎已经返回的“空闲任务最近 5 轮”，不保存完整历史，也不替代官方任务文件。发送消息、分支、压缩、归档、恢复、删除和设置变化都会让相关缓存失效；运行中的任务不进入缓存
+
+同一份约 613 MB 的 Trillium Note 任务实测：
+
+| 打开阶段                      |  冷启动 | 24 小时保温期内再次打开 |
+| ----------------------------- | ------: | ----------------------: |
+| 最新正文出现在官方页面        |  16.1 s |                  15.1 s |
+| 页面退出“正在加载任务”状态    | 118.4 s |                  29.4 s |
+| 服务器再次取得最近 5 轮的响应 |  96.9 s |                    1 ms |
+
+另一轮直接生产预热中，官方引擎第一次扫描用时 49.4 秒，同一结果第二次返回用时 125 毫秒；两次读取前后原始任务文件哈希一致
+
+生产服务会把已打开且空闲的官方引擎保留 24 小时，因此关闭网页或换浏览器后不会立刻丢掉这次加速。活动任务由独立机制保护，不依赖这个时间窗口。缓存最多保留 32 条、每条不超过 8 MiB，服务整体仍受 6 GiB 内存上限约束
+
+2026-08-13 又补齐了超大旧任务的翻页缓存。它只在当前用户的运行内存中保存官方引擎已经返回的只读页面，不写入另一套历史数据库；发送、分支、改名、归档和删除等对话变更会立即让相关页面失效。即使旧的慢读取和新消息并发，旧结果也不能在失效后重新进入缓存
+
+同一份 Trillium Note 任务的最近 5 轮实测：第一次读取 55.37 秒，第二次读取 0.53 秒；触发一次受控的对话变更后，第一次重新读取 54.68 秒，随后再读 0.11 秒。四次页面数据的哈希完全一致。翻页缓存最多 64 页、合计最多 64 MiB、单页最多 8 MiB
+
+首屏的 13.19 MB 官方 JavaScript 主文件原先没有压缩。现在由 Nginx 只对带哈希的官方静态资源启用 gzip，实测传输量约 4.03 MB；官方文件内容和浏览器运行结果不变。真实生产状态烟雾测试中，服务器本地从打开页面到可见外壳为 8.59 秒，到 Trillium Note 对话标题出现为 11.87 秒，没有白屏、资源失败或页面错误
+
+语言切换也使用官方设置和官方语言包。生产界面已连续验证日语、繁体中文（台湾）、法语（法国）和简体中文：每次都加载对应官方资源、页面语言立即改变，最后的简体中文设置在完整刷新后仍然保留
+
+2026-08-14，B 站升级到官方 renderer `26.810.41047` 和 Codex app-server `0.148.0-alpha.9`。这次没有把“服务在线”当成验收完成，而是在真实登录页面上打开约 613 MB 的 Trillium Note 任务、发送消息、关闭页面、恢复后台任务，并逐个切换五种官方语言
+
+| 最新 B 站真实测试                | 实测结果                 |
+| -------------------------------- | ------------------------ |
+| 冷启动到页面外壳可见             | 6.8 秒                   |
+| 冷启动到 Trillium Note 最新正文  | 64.5 秒                  |
+| 热运行时到页面外壳可见           | 5.0 秒                   |
+| 热运行时到最新正文               | 10.5 秒                  |
+| 完整刷新后恢复同一正文           | 8.8 秒                   |
+| 发送请求被服务端接受             | 15 毫秒                  |
+| 发送后第一段模型输出             | 4.28 秒                  |
+| 测试回复完整结束                 | 4.52 秒                  |
+| 关闭页面后 12 秒后台任务继续完成 | 通过                     |
+| 英文、简中、繁中、日语、法语切换 | 全部通过，刷新后保持设置 |
+
+超大任务第一次冷读仍然可能超过一分钟，这是当前明确保留的性能边界。加速缓存只复用官方 app-server 已经返回、版本与请求条件完全一致的结果，不建立第二份对话数据库；服务重启后仍需重新冷读
+
+完整版本、备份、MCP 和资源证据见 [2026-08-14 官方 26.810 发布复验](./docs/VALIDATION-2026-08-14.md)
+
+2026-08-03 的真实使用复验还定位并清除了三段额外延迟：官方文件读取通道缺失、动态工具能力没有传给官方界面，以及公网 WebSocket 每约 60 秒被回收。修复后真实账号页面连续在线超过 190 秒，新任务正常启动，期间没有再次出现这三类错误。完整证据和剩余人工授权项见 [2026-08-03 发布复验](./docs/VALIDATION-2026-08-03.md)
+
+## ChatGPT 项目列表
+
+VPS 使用普通服务器网络请求访问 ChatGPT 项目列表时会收到 Cloudflare 403 挑战
+
+项目没有伪造项目数据，也没有改写官方接口，而是为官方 renderer 的完整
+`https://chatgpt.com/backend-api/` 边界启动版本锁定的 Electron 网络进程：
+
+- 只允许官方 `chatgpt.com` 主机和 `/backend-api/` 路径，拒绝自定义端口、Cookie 和跳转到其他主机
+- 按官方请求保留 `GET`、`POST`、`PUT`、`PATCH`、`DELETE`、`HEAD` 和 `OPTIONS`，并支持流式响应
+- 使用独立、锁定版本的 Electron 43.2.0 和 Chromium 150.0.7871.129；它只负责项目列表网络请求，不渲染界面，也不读写对话
+- 进程长期复用，避免每次点击都重新启动浏览器内核
+- 不继承宿主服务的账号和服务器密钥，OpenAI 访问令牌只通过父子进程管道传递
+- 不保存或携带浏览器 Cookie，不复用账号相关响应缓存
+- 保留 Chromium 用户命名空间沙箱，不使用 `--no-sandbox`
+- Ubuntu 只对这个不可变、由 root 管理的可执行文件开放用户命名空间，系统全局限制保持开启
+
+官方 macOS 包声明 Electron 42.3.0 / Chromium 151.0.7922.71，但公开 Linux Electron 42.3.0 实际携带的是更旧的 Chromium，不能冒充官方包的组合。Linux 网络进程继续使用已经真实验证的 [Electron 43.2.0](https://releases.electronjs.org/release/v43.2.0)；Ubuntu 的按文件开放方式来自 [Chromium 官方 AppArmor 说明](https://chromium.googlesource.com/chromium/src/+/main/docs/security/apparmor-userns-restrictions.md)
+
+真实登录态下，普通请求返回 403；同一账号通过生产 renderer 路由返回 200 和有效 JSON
+
+`.08` 发布后的真实复验中，冷启动约 1.36 秒，复用连接约 1.04 秒，完整宿主路由约 0.89 秒
+
+ChatGPT Projects 不依赖 Cloudflare WARP，而是通过上面的受控 Chromium
+通道访问官方接口。官方 Apps 和开发者文档仍通过只监听本机的窄范围
+WARP 转发访问 OpenAI 域名，其他网站和 VPS 流量不经过该代理
+
+## 验证结果
+
+仓库级检查：
 
 ```sh
+# 安装锁定依赖
 npm ci
+
+# 运行安全、格式、静态检查、类型检查和全部单元测试
 npm run ci
+
+# 用获得授权的官方包核对版本、哈希和桌面契约
 npm run contracts:check
 ```
 
-The repository also contains real-runtime smoke suites for the official main
-window, in-app browser, authenticated user isolation, and app-server
-conversation lifecycle:
+服务器候选版本还必须通过以下真实链路：
 
 ```sh
+# 官方主窗口和浏览器兼容层
 npm run smoke:official-ui
 npm run smoke:browser
+
+# 登录隔离、任务持久化和完整生命周期
 npm run smoke:auth-isolation
 npm run smoke:core-lifecycle
+
+# 文件、终端、Git、工作树和权限
 npm run smoke:desktop-tools
 npm run smoke:approvals
+
+# MCP 真实服务发现和调用
+npm run smoke:mcp
 ```
 
-They require the qualified private package and are executed in staging before
-promotion. The main-window smoke requires a loopback reverse proxy because the
-browser must never possess the private Nginx-to-host proof header; the same rule
-applies to production WebSocket upgrades.
+GitHub 的 CI 持续集成（Continuous Integration）只验证不依赖私有官方包的部分
 
-The approval smoke uses the real, version-locked app-server and complete browser
-bridge in an isolated runtime. It proves that approval executes the proposed
-command, rejection does not execute it, both responses return to the model, and
-both turns complete without touching the production runtime.
+正式发布不能用 CI 代替服务器上的官方包、真实浏览器、备份恢复和重启持久化验收
 
-GitHub CI runs the package-independent repository checks on Node.js 24. Private
-official-package integrity, real renderer, browser, app-server, persistence, and
-recovery gates remain mandatory staging checks and are never replaced by CI.
+## 部署与升级
 
-## Operations
+仓库不包含官方安装包
 
-See:
+部署者需要提供自己有权使用的官方包，并先生成来源清单、renderer 哈希和 preload 契约
 
-- [`docs/IMPLEMENTATION.md`](docs/IMPLEMENTATION.md)
-- [`docs/RELEASE-GATES.md`](docs/RELEASE-GATES.md)
-- [`docs/DEPLOYMENT.md`](docs/DEPLOYMENT.md)
-- [`docs/OLD-CODEXAPP-BACKUP.md`](docs/OLD-CODEXAPP-BACKUP.md)
+发布流程按以下顺序执行：
 
-Production uses immutable releases and an atomic `current` link. A failed
-promotion automatically restores the previous version. User state lives outside
-release directories. The old CodexApp and OpenCodexApp are outside this
-project's deletion boundary.
+1. 在独立目录构建候选版本
+2. 执行仓库检查和官方包契约检查
+3. 在隔离用户和临时端口上执行真实运行测试
+4. 把通过验收的目录设为只读版本
+5. 原子切换 `current` 链接并检查健康状态
+6. 健康检查失败时自动切回上一版本
+
+部署细节见 [部署与回滚](./docs/DEPLOYMENT.md)
+
+## 登录与用户隔离
+
+外层统一登录决定谁能进入站点，内层 OpenAI 登录决定 Codex 使用哪个 OpenAI 账号
+
+两层登录不共用令牌
+
+每个稳定用户标识对应独立的：
+
+- `CODEX_HOME`
+- 工作目录
+- 对话和设置
+- 浏览器配置
+- 终端
+- 下载票据
+- GitHub CLI 登录
+
+用户名变化不会改变稳定用户标识，因此不会让原任务消失
+
+## 数据边界
+
+仓库允许提交：
+
+- 宿主源代码
+- 版本与契约清单
+- 部署脚本
+- 脱敏后的测试证据
+- 裁掉账号和任务侧栏的公开截图
+
+仓库禁止提交：
+
+- 官方 ChatGPT / Codex 安装包及其解包文件
+- OpenAI、GitHub、Authentik 或代理凭据
+- 真实对话、附件和浏览器资料
+- 用户运行目录、数据库、日志和备份
+- 服务器私有密钥、内部地址和临时授权码
+
+提交前检查由 [`ops/check-source-boundaries.sh`](./ops/check-source-boundaries.sh) 执行
+
+## 当前外部边界
+
+以下能力不能靠改写官方界面解决：
+
+- 公开插件目录的在线刷新仍可能被 OpenAI 拒绝机房出口；已安装插件、连接应用和官方缓存不受影响
+- 语音和 Computer Use 需要连接设备提供麦克风、摄像头或屏幕权限
+- 付费操作、账号删除和不可恢复删除不会进入无人值守测试
+
+Codex 的 GitHub 连接应用已经通过真实只读调用。服务器里的 `gh` 命令行登录属于另一套凭据，需要使用它的服务账号单独授权，不能用连接应用的成功代替
+
+ChatGPT 项目列表的真实登录态业务响应已经通过，不再依赖 WARP 或自建项目数据库
+
+## 文档
+
+- [实现与模块边界](./docs/IMPLEMENTATION.md)
+- [发布关卡](./docs/RELEASE-GATES.md)
+- [部署与回滚](./docs/DEPLOYMENT.md)
+- [Codex 统一工作区规则](./ops/workspace/README.md)
+- [MCP 迁移与重新连接](./docs/MCP-MIGRATION-2026-08-03.md)
+- [生产端到端验收记录](./docs/USER-JOURNEY-AUDIT-2026-07-29.md)
+- [2026-08-04 官方 26.727.51351 发布复验](./docs/VALIDATION-2026-08-04.md)
+- [2026-08-10 状态与加载修复复验](./docs/VALIDATION-2026-08-10.md)
+- [2026-08-11 A / B 上线与 Trillium Note 大任务复验](./docs/VALIDATION-2026-08-11.md)
+- [2026-08-14 官方 26.810 发布复验](./docs/VALIDATION-2026-08-14.md)
+- [2026-08-03 发布复验](./docs/VALIDATION-2026-08-03.md)
+- [2026-07-31 发布复验](./docs/VALIDATION-2026-07-31.md)
+- [2026-07-30 发布复验](./docs/VALIDATION-2026-07-30.md)
+- [旧 CodexApp 备份边界](./docs/OLD-CODEXAPP-BACKUP.md)
+
+## 已锁定上游版本
+
+- ChatGPT / Codex renderer：`26.810.41047`
+- 官方构建号：`6570`
+- Codex app-server：`0.148.0-alpha.9`
+- preload 契约：21 个方法
+- 项目列表网络进程：Electron `43.2.0`、Chromium `150.0.7871.129`
+
+宿主发现版本、哈希、品牌、构建号或契约不一致时会拒绝启动
+
+## 许可
+
+本仓库自有代码使用 [MIT License](./LICENSE)
+
+官方 ChatGPT / Codex 界面、图片、字体、安装包和二进制文件不属于本仓库，也不受本仓库 MIT 许可覆盖

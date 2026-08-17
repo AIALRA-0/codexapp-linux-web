@@ -3,6 +3,31 @@ import { resolve } from 'node:path';
 
 import { z } from 'zod';
 
+const loopbackProxyUrlSchema = z
+  .string()
+  .url()
+  .superRefine((value, context) => {
+    const url = new URL(value);
+    if (!['http:', 'https:'].includes(url.protocol)) {
+      context.addIssue({
+        code: 'custom',
+        message: 'OpenAI egress proxy must use HTTP or HTTPS',
+      });
+    }
+    if (!['127.0.0.1', '[::1]', 'localhost'].includes(url.hostname)) {
+      context.addIssue({
+        code: 'custom',
+        message: 'OpenAI egress proxy must listen on loopback',
+      });
+    }
+    if (url.username.length > 0 || url.password.length > 0) {
+      context.addIssue({
+        code: 'custom',
+        message: 'OpenAI egress proxy URL must not contain credentials',
+      });
+    }
+  });
+
 const configSchema = z.object({
   host: z.string().default('127.0.0.1'),
   port: z.coerce.number().int().min(1).max(65535).default(13010),
@@ -20,6 +45,12 @@ const configSchema = z.object({
   expectedAppBrand: z.string().min(1).default('chatgpt'),
   sourceManifest: z.string().min(1),
   browserBridgeScript: z.string().min(1),
+  electronNetBin: z.string().min(1).optional(),
+  electronNetWorker: z.string().min(1).optional(),
+  electronNetUserDataDir: z.string().min(1).optional(),
+  expectedElectronNetVersion: z.string().min(1).optional(),
+  expectedElectronNetChromiumVersion: z.string().min(1).optional(),
+  openAiEgressProxyUrl: loopbackProxyUrlSchema.optional(),
   sessionSigningKeyFile: z.string().min(1),
   authSubjectHeader: z.string().min(1).default('x-authentik-uid'),
   authUsernameHeader: z.string().min(1).default('x-authentik-username'),
@@ -36,9 +67,11 @@ const configSchema = z.object({
     .positive()
     .default(100 * 1024 * 1024),
   sessionTtlSeconds: z.coerce.number().int().min(300).max(86_400).default(43_200),
+  bridgeReconnectSeconds: z.coerce.number().int().min(1).max(3_600).default(600),
   idleRuntimeSeconds: z.coerce.number().int().min(60).default(900),
   maxSessions: z.coerce.number().int().min(10).max(10_000).default(1_000),
   maxSessionsPerUser: z.coerce.number().int().min(2).max(100).default(20),
+  startupThreadPrewarmCount: z.coerce.number().int().min(0).max(3).default(0),
   maxBridgeMessagesPerSecond: z.coerce.number().int().min(50).max(5_000).default(500),
   minimumFreeBytes: z.coerce
     .number()
@@ -71,6 +104,12 @@ export function loadConfig(environment: NodeJS.ProcessEnv = process.env): Gatewa
     expectedAppBrand: environment.EXPECTED_APP_BRAND,
     sourceManifest: environment.SOURCE_MANIFEST,
     browserBridgeScript: environment.BROWSER_BRIDGE_SCRIPT,
+    electronNetBin: environment.ELECTRON_NET_BIN,
+    electronNetWorker: environment.ELECTRON_NET_WORKER,
+    electronNetUserDataDir: environment.ELECTRON_NET_USER_DATA_DIR,
+    expectedElectronNetVersion: environment.ELECTRON_NET_EXPECTED_VERSION,
+    expectedElectronNetChromiumVersion: environment.ELECTRON_NET_EXPECTED_CHROMIUM_VERSION,
+    openAiEgressProxyUrl: environment.OPENAI_EGRESS_PROXY_URL,
     sessionSigningKeyFile: environment.SESSION_SIGNING_KEY_FILE,
     authSubjectHeader: environment.AUTH_SUBJECT_HEADER,
     authUsernameHeader: environment.AUTH_HEADER,
@@ -83,13 +122,32 @@ export function loadConfig(environment: NodeJS.ProcessEnv = process.env): Gatewa
     authProxySecretFile: environment.AUTH_PROXY_SECRET_FILE,
     maxUploadBytes: environment.MAX_UPLOAD_BYTES,
     sessionTtlSeconds: environment.SESSION_TTL_SECONDS,
+    bridgeReconnectSeconds: environment.BRIDGE_RECONNECT_SECONDS,
     idleRuntimeSeconds: environment.IDLE_RUNTIME_SECONDS,
     maxSessions: environment.MAX_SESSIONS,
     maxSessionsPerUser: environment.MAX_SESSIONS_PER_USER,
+    startupThreadPrewarmCount: environment.STARTUP_THREAD_PREWARM_COUNT,
     maxBridgeMessagesPerSecond: environment.MAX_BRIDGE_MESSAGES_PER_SECOND,
     minimumFreeBytes: environment.MINIMUM_FREE_BYTES,
     devIdentity: environment.NODE_ENV === 'development' ? environment.DEV_IDENTITY : undefined,
   });
+  const electronNetworkValues = [
+    values.electronNetBin,
+    values.electronNetWorker,
+    values.electronNetUserDataDir,
+    values.expectedElectronNetVersion,
+    values.expectedElectronNetChromiumVersion,
+  ];
+  const configuredElectronNetworkValues = electronNetworkValues.filter(
+    (value) => value !== undefined,
+  ).length;
+  if (configuredElectronNetworkValues !== 0 && configuredElectronNetworkValues !== 5) {
+    throw new Error(
+      'Electron network requires ELECTRON_NET_BIN, ELECTRON_NET_WORKER, ' +
+        'ELECTRON_NET_USER_DATA_DIR, ELECTRON_NET_EXPECTED_VERSION, and ' +
+        'ELECTRON_NET_EXPECTED_CHROMIUM_VERSION',
+    );
+  }
   const sessionSigningKey = readFileSync(resolve(values.sessionSigningKeyFile));
   if (sessionSigningKey.length < 32) {
     throw new Error('session signing key must contain at least 32 bytes');
@@ -112,6 +170,15 @@ export function loadConfig(environment: NodeJS.ProcessEnv = process.env): Gatewa
       : { browserExecutable: resolve(values.browserExecutable) }),
     sourceManifest: resolve(values.sourceManifest),
     browserBridgeScript: resolve(values.browserBridgeScript),
+    ...(values.electronNetBin === undefined
+      ? {}
+      : {
+          electronNetBin: resolve(values.electronNetBin),
+          electronNetWorker: resolve(values.electronNetWorker as string),
+          electronNetUserDataDir: resolve(values.electronNetUserDataDir as string),
+          expectedElectronNetVersion: values.expectedElectronNetVersion,
+          expectedElectronNetChromiumVersion: values.expectedElectronNetChromiumVersion,
+        }),
     sessionSigningKeyFile: resolve(values.sessionSigningKeyFile),
     sessionSigningKey,
     ...(values.authProxySecretFile === undefined

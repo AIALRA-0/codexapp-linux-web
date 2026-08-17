@@ -23,6 +23,7 @@ const bridge = await connectOfficialBridge({
   publicOrigin,
 });
 let createdDirectory = null;
+let threadId = null;
 let workspaceRoot = null;
 
 try {
@@ -52,14 +53,66 @@ try {
     threadToolsEnabled: false,
   });
   const instructions = requiredString(developerInstructions.instructions, 'developer instructions');
+  const modelProviderCapabilities = await bridge.mcpRequest('modelProvider/capabilities/read', {});
+  if (modelProviderCapabilities?.namespaceTools !== true) {
+    throw new Error('App-server namespace tools are unavailable');
+  }
+  const rendererModelProviderCapabilities = await bridge.desktopFetch(
+    'read-model-provider-capabilities-for-host',
+    { hostId: 'local' },
+  );
+  if (rendererModelProviderCapabilities?.namespaceTools !== true) {
+    throw new Error('Renderer host did not expose namespace tool support');
+  }
 
-  const started = await bridge.mcpRequest('thread/start', {
+  const started = await bridge.prewarmThreadStart({
     cwd: workspaceRoot,
     developerInstructions: instructions,
     ephemeral: true,
     experimentalRawEvents: false,
+    dynamicTools: [
+      {
+        type: 'namespace',
+        name: 'codexapp_smoke',
+        description: 'Synthetic namespace used only by the release smoke test.',
+        tools: [
+          {
+            type: 'function',
+            name: 'never_called',
+            description: 'Synthetic deferred tool that must never be called.',
+            inputSchema: {
+              type: 'object',
+              properties: {},
+              additionalProperties: false,
+            },
+            deferLoading: true,
+          },
+        ],
+      },
+    ],
   });
-  const threadId = requiredString(started?.thread?.id ?? started?.threadId, 'thread id');
+  threadId = requiredString(started?.thread?.id ?? started?.threadId, 'thread id');
+  const leakedBeforeTurnStart = await bridge
+    .waitForViewMessage(
+      (message) =>
+        message?.type === 'mcp-notification' &&
+        message.method === 'thread/started' &&
+        message.params?.thread?.id === threadId,
+      750,
+    )
+    .then(
+      () => true,
+      () => false,
+    );
+  if (leakedBeforeTurnStart) {
+    throw new Error('prewarmed thread became visible before its first turn');
+  }
+  const visibleThreadStarted = bridge.waitForViewMessage(
+    (message) =>
+      message?.type === 'mcp-notification' &&
+      message.method === 'thread/started' &&
+      message.params?.thread?.id === threadId,
+  );
   const turn = await bridge.mcpRequest('turn/start', {
     threadId,
     input: [
@@ -70,6 +123,7 @@ try {
       },
     ],
   });
+  await visibleThreadStarted;
   await bridge.mcpRequest('thread/read', { threadId, includeTurns: false });
 
   process.stdout.write(
@@ -82,13 +136,20 @@ try {
         'git-origins',
         'mcp-codex-config',
         'developer-instructions',
+        'modelProvider/capabilities/read cache',
+        'read-model-provider-capabilities-for-host',
       ],
-      appServer: ['thread/start', 'turn/start', 'thread/read'],
+      appServer: ['thread-prewarm-start', 'turn/start', 'thread/read', 'thread/delete'],
       gitOriginCount: gitOrigins.origins.length,
+      prewarmHiddenUntilTurnStart: true,
+      namespaceToolsAccepted: true,
       turnAccepted: turn !== null,
     })}\n`,
   );
 } finally {
+  if (threadId !== null) {
+    await bridge.mcpRequest('thread/delete', { threadId }).catch(() => undefined);
+  }
   bridge.close();
   if (
     workspaceRoot !== null &&

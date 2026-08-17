@@ -1,10 +1,14 @@
-import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
+import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { runInNewContext } from 'node:vm';
 
 import { afterEach, describe, expect, it } from 'vitest';
 
-import { OfficialBrowserRuntime } from './browser-runtime.js';
+import {
+  OfficialBrowserRuntime,
+  QUALIFIED_COMMENT_PRELOAD_ELECTRON_SHIM,
+} from './browser-runtime.js';
 
 const temporaryRoots: string[] = [];
 const runtimes: OfficialBrowserRuntime[] = [];
@@ -17,6 +21,26 @@ afterEach(async () => {
 });
 
 describe('OfficialBrowserRuntime', () => {
+  it('provides only the Electron surfaces required by the qualified official comment preload', () => {
+    const sandbox = {
+      __codexOfficialCommentRuntimeHost: () => undefined,
+      globalThis: undefined as unknown,
+    };
+    sandbox.globalThis = sandbox;
+    runInNewContext(QUALIFIED_COMMENT_PRELOAD_ELECTRON_SHIM, sandbox, { timeout: 1_000 });
+    const exposed = sandbox as unknown as {
+      process: { argv: unknown[]; emit: () => boolean };
+      require: (name: string) => {
+        webFrame: { setVisualZoomLevelLimits: () => void };
+      };
+    };
+
+    expect(exposed.process.argv).toEqual([]);
+    expect(exposed.process.emit()).toBe(false);
+    expect(() => exposed.require('electron').webFrame.setVisualZoomLevelLimits()).not.toThrow();
+    expect(() => exposed.require('node:fs')).toThrow(/Unsupported module/u);
+  });
+
   it('registers the official renderer generation and publishes a new-tab snapshot', async () => {
     const { messages, runtime } = await createRuntime();
     expect(runtime.registerRendererSession('surface-1', 'renderer-1')).toBe(true);
@@ -202,6 +226,23 @@ describe('OfficialBrowserRuntime', () => {
       pages: unknown[];
     };
     expect(raw.pages).toEqual([]);
+  });
+
+  it('validates browsing-data requests and clears server download history storage', async () => {
+    const { root, runtime } = await createRuntime();
+    const downloads = join(root, 'browser-downloads');
+    const profile = join(root, 'browser-profile', 'Default');
+    await mkdir(downloads, { recursive: true });
+    await mkdir(profile, { recursive: true });
+    await writeFile(join(downloads, 'synthetic-download.txt'), 'synthetic');
+    await writeFile(join(profile, 'History'), 'synthetic');
+
+    await expect(runtime.clearBrowsingData(['downloads', 'history'])).resolves.toBeUndefined();
+    await expect(readFile(join(downloads, 'synthetic-download.txt'))).rejects.toThrow();
+    await expect(readFile(join(profile, 'History'))).rejects.toThrow();
+    await expect(runtime.clearBrowsingData(['invalid'])).rejects.toThrow(
+      'browsing data types are invalid',
+    );
   });
 });
 

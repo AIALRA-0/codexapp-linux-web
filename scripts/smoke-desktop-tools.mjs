@@ -122,6 +122,48 @@ try {
   if (persistedImage?.blob !== Buffer.from(imageBytes).toString('base64')) {
     throw new Error('persisted image contents changed');
   }
+  const desktopImage = await bridge.desktopFetch('read-file-binary', {
+    hostId: 'local',
+    maxBytes: 1_000_000,
+    path: persistedImagePath,
+  });
+  if (
+    desktopImage?.contentsBase64 !== persistedImage.blob ||
+    desktopImage.mimeType !== 'image/png'
+  ) {
+    throw new Error('official desktop binary file response changed');
+  }
+  const desktopText = await bridge.desktopFetch('read-file', {
+    hostId: 'local',
+    path: textPath,
+  });
+  if (desktopText?.contents !== `${textMarker}\n`) {
+    throw new Error('official desktop text file response changed');
+  }
+  const desktopMetadata = await bridge.desktopFetch('read-file-metadata', {
+    contentSampleByteLimit: 4_096,
+    contentSampleMaxFileBytes: 1_000_000,
+    hostId: 'local',
+    path: textPath,
+  });
+  if (
+    desktopMetadata?.isFile !== true ||
+    desktopMetadata.contentKind !== 'text' ||
+    desktopMetadata.sizeBytes !== Buffer.byteLength(`${textMarker}\n`)
+  ) {
+    throw new Error('official desktop file metadata response changed');
+  }
+  const existingPaths = await bridge.desktopFetch('paths-exist', {
+    hostId: 'local',
+    paths: [textPath, `${textPath}.missing`],
+  });
+  if (
+    !Array.isArray(existingPaths?.existingPaths) ||
+    existingPaths.existingPaths.length !== 1 ||
+    existingPaths.existingPaths[0] !== textPath
+  ) {
+    throw new Error('official desktop path existence response changed');
+  }
 
   const temporary = await services.workspaceFiles.createTemporaryFile({
     bytes: new TextEncoder().encode(textMarker),

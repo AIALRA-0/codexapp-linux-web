@@ -17,6 +17,12 @@
    models, configuration, authentication status, and account operations.
 7. Host-only features (filesystem, PTY, Git, menus, file drag, system integration)
    are delegated through explicit capability handlers.
+8. One shared, sandboxed Electron 43.2.0 network process carries only the
+   official renderer's `https://chatgpt.com/backend-api/` traffic when Node.js
+   receives an OpenAI Cloudflare challenge. The exact official URLs, methods,
+   request bodies, and streaming responses remain unchanged; tokens travel only
+   through the parent-child pipe, and app-server model turns keep the direct
+   route.
 
 ## Delivery order
 
