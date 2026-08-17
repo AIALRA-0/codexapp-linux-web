@@ -7,6 +7,7 @@ import {
   pickBrowserFiles,
 } from './browser-file-picker.js';
 import { browserFileResourceUrl, rewriteOfficialResourceAttribute } from './file-protocol.js';
+import { installAtomicFirstPaint } from './first-paint.js';
 import { officialExternalNavigationUrl } from './navigation.js';
 import { installOfficialHistorySnapshotGate } from './official-feature-gates.js';
 import { OrderedBuffer } from './ordered-buffer.js';
@@ -334,6 +335,7 @@ export class BrowserHostTransport extends EventTarget {
           link.remove();
           break;
         }
+        this.dispatchEvent(new CustomEvent('view-message', { detail: frame.message }));
         window.dispatchEvent(new MessageEvent('message', { data: frame.message }));
         break;
       case 'worker-message':
@@ -455,8 +457,14 @@ function installBridge(): void {
 
   installOfficialHistorySnapshotGate(window as unknown as Record<string, unknown>);
   installOfficialFileProtocolAdapter();
+  const firstPaint = installAtomicFirstPaint(bootstrap);
   const preloadStartedAt = performance.timeOrigin;
   const transport = new BrowserHostTransport(bootstrap);
+  transport.addEventListener('ready', () => firstPaint.markTransportReady());
+  transport.addEventListener('view-message', (event) => {
+    firstPaint.observeRendererMessage((event as CustomEvent<unknown>).detail);
+  });
+  transport.addEventListener('fatal', () => firstPaint.fail('与服务器的连接已断开'));
   installRemoteWebviewAdapter(bootstrap, (message) => transport.sendViewMessage(message));
   const themeListeners = new Set<() => void>();
   const media = window.matchMedia('(prefers-color-scheme: dark)');
@@ -538,6 +546,7 @@ function installBridge(): void {
     acknowledgeChunkedMessage: () => undefined,
     getPreloadStartedAtMs: () => preloadStartedAt,
     sendMessageFromView: async (message) => {
+      firstPaint.observeRendererRequest(message);
       const pickFilesRequest = parseBrowserPickFilesRequest(message);
       if (pickFilesRequest !== null) {
         const selected = await pickBrowserFiles(pickFilesRequest.imagesOnly);

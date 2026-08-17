@@ -40,6 +40,22 @@ describe('official renderer feature overrides', () => {
       name: 'unrelated',
       __value: { enabled: false },
     });
+    const dynamicConfigOverride = statsig.firstInstance.overrideAdapter
+      ?.getDynamicConfigOverride as (config: Record<string, unknown>) => Record<string, unknown>;
+    const paginatedHistory = dynamicConfigOverride({
+      name: '1865103671',
+      __value: { enabled: false, page_size: 5 },
+      details: { reason: 'Network' },
+      get: (key: string, fallback: unknown) =>
+        key === 'page_size' ? 5 : key === 'enabled' ? false : fallback,
+    });
+    expect(paginatedHistory).toMatchObject({
+      __value: { enabled: true, page_size: 5 },
+      details: { reason: 'LocalOverride' },
+    });
+    const paginatedHistoryGet = paginatedHistory.get as (key: string, fallback: unknown) => unknown;
+    expect(paginatedHistoryGet('enabled', false)).toBe(true);
+    expect(paginatedHistoryGet('page_size', 0)).toBe(5);
 
     restore();
     expect('__STATSIG__' in scope).toBe(false);
@@ -54,9 +70,15 @@ describe('official renderer feature overrides', () => {
       ...layer,
       __value: { official: true },
     }));
+    const originalDynamicConfigOverride = vi.fn((config: Record<string, unknown>) => ({
+      ...config,
+      __value: { official: true },
+      get: (key: string, fallback: unknown) => (key === 'official' ? true : fallback),
+    }));
     const client = {
       overrideAdapter: {
         getGateOverride: originalOverride,
+        getDynamicConfigOverride: originalDynamicConfigOverride,
         getLayerOverride: originalLayerOverride,
         marker: 'official',
       },
@@ -77,6 +99,15 @@ describe('official renderer feature overrides', () => {
     ).toMatchObject({ __value: { enable_i18n: true, official: true } });
     expect(client.overrideAdapter.marker).toBe('official');
     expect(originalOverride).toHaveBeenCalledTimes(2);
+    const paginatedHistory = client.overrideAdapter.getDynamicConfigOverride?.({
+      name: '1865103671',
+      __value: { enabled: false },
+    }) as Record<string, unknown>;
+    expect(paginatedHistory).toMatchObject({ __value: { enabled: true, official: true } });
+    expect(
+      (paginatedHistory.get as (key: string, fallback: unknown) => unknown)('official', false),
+    ).toBe(true);
+    expect(originalDynamicConfigOverride).toHaveBeenCalledOnce();
     expect(originalLayerOverride).toHaveBeenCalledTimes(1);
   });
 

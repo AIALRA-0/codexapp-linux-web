@@ -465,15 +465,19 @@ codexapp_set_expected_official_version() {
 
 codexapp_set_operational_limits() {
   local temporary
+  # B intentionally keeps only the most recent thread warm.  Its retained
+  # Trillium rollout is hundreds of MiB, so a 15-minute runtime eviction turns
+  # ordinary visits into repeated minute-long official App Server scans.
   if [[ "$(grep -c '^MAX_SESSIONS=' "$codexapp_environment_file")" -ne 1 ]] ||
     [[ "$(grep -c '^MAX_SESSIONS_PER_USER=' "$codexapp_environment_file")" -ne 1 ]] ||
+    [[ "$(grep -c '^IDLE_RUNTIME_SECONDS=' "$codexapp_environment_file")" -gt 1 ]] ||
     [[ "$(grep -c '^STARTUP_THREAD_PREWARM_COUNT=' "$codexapp_environment_file")" -gt 1 ]]; then
     echo "B production session settings are not unique" >&2
     return 1
   fi
   temporary="$(mktemp "$(dirname -- "$codexapp_environment_file")/.codexapp-limits.XXXXXXXX")"
   awk '
-    BEGIN { prewarm = 0 }
+    BEGIN { idle_runtime = 0; prewarm = 0 }
     /^MAX_SESSIONS=/ {
       print "MAX_SESSIONS=10"
       next
@@ -482,14 +486,20 @@ codexapp_set_operational_limits() {
       print "MAX_SESSIONS_PER_USER=4"
       next
     }
+    /^IDLE_RUNTIME_SECONDS=/ {
+      print "IDLE_RUNTIME_SECONDS=86400"
+      idle_runtime = 1
+      next
+    }
     /^STARTUP_THREAD_PREWARM_COUNT=/ {
-      print "STARTUP_THREAD_PREWARM_COUNT=0"
+      print "STARTUP_THREAD_PREWARM_COUNT=1"
       prewarm = 1
       next
     }
     { print }
     END {
-      if (prewarm == 0) print "STARTUP_THREAD_PREWARM_COUNT=0"
+      if (idle_runtime == 0) print "IDLE_RUNTIME_SECONDS=86400"
+      if (prewarm == 0) print "STARTUP_THREAD_PREWARM_COUNT=1"
     }
   ' "$codexapp_environment_file" >"$temporary"
   chown --reference="$codexapp_environment_file" "$temporary"

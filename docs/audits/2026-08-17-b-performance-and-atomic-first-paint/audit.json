@@ -1,0 +1,413 @@
+{
+  "meta": {
+    "contract_version": "1.0",
+    "title": "B 站大对话性能与原子首屏审计",
+    "mode": "standard",
+    "as_of": "2026-08-17",
+    "status": "complete",
+    "scope": "评估 B 站首次打开、超大对话恢复、历史分页、语言资源和首屏一致性；只允许复用官方渲染器、官方 App Server 分页与现有宿主合同。",
+    "exclusions": [
+      "不承诺 VPS、OpenAI、Cloudflare 或用户网络永不故障",
+      "不创建第二套对话数据库或修改官方渲染器文件",
+      "不把隔离登录页通过解释为所有付费、麦克风、删除和外部写操作均已验收"
+    ]
+  },
+  "decision_problem": {
+    "project_classification": "高风险、可回滚的生产性能与显示一致性修正",
+    "risk_level": "high",
+    "decision_owner": "AIALRA",
+    "desired_outcome": "首屏只在项目、目标对话、最新正文和输入区一致后一次显示；超大对话不再自动遍历全部历史；常用对话保持热状态。",
+    "current_state": "正式 B 仍运行上一不可变版本。候选已通过隔离浏览器、真实生产状态两轮读取和仅预热最近线程的对照测试。",
+    "decision": "是否发布原子首屏、官方按需历史分页、最近线程预热和 24 小时运行时保温。",
+    "success_metrics": [
+      "原子首屏事件触发时项目名、目标对话最新正文和输入区已经同时可见",
+      "超大对话首次恢复后不再自动请求所有 thread/turns/list 页面",
+      "热打开最新正文不慢于此前生产热路径，且无白屏、空项目或正文缺失",
+      "英文、简体中文资源和刷新状态保持正常；其他已验收语言不被改动",
+      "候选不新增对话存储、不修改官方包字节、不重启 A 或共享出口",
+      "发布前生成可校验的 B 状态快照，失败时同时恢复程序、环境和状态"
+    ],
+    "constraints": [
+      "官方 26.810.41047 渲染器和 0.148.0-alpha.9 App Server 保持版本锁定",
+      "服务器不扩容；B 受 8 GiB 内存、2 GiB swap 和 4 核 CPU 上限约束",
+      "A 有活动任务时仍允许一个 A turn，但不允许待处理服务器请求或高资源压力",
+      "首屏可以显示真实加载状态，但不能提前显示不完整工作区"
+    ],
+    "irreversible_actions": [
+      "没有一致性快照就让新 App Server 写生产状态",
+      "活跃 B turn 期间停止服务",
+      "把身份、会话内容、密钥或生产截图原图提交到公开仓库"
+    ],
+    "research_budget": {
+      "overall_limit": "完成代码机制、官方协议、真实 622 MB 级线程、隔离鉴权、生产两次加载和资源门禁；任一最新正文缺失、重复分页、白屏或 A 健康恶化即停止。",
+      "parallel_capacity": 1,
+      "paid_or_private_access": [
+        "AIALRA VPS",
+        "Authentik 后的 B 生产状态",
+        "已资格校验的官方 Codex Linux 包"
+      ],
+      "cutoff_policy": "候选必须先隔离通过，再临时读取真实 B 状态；正式发布仍需独立状态快照和自动回滚。"
+    },
+    "reversal_evidence": [
+      "上一不可变 B 应用版本和官方包链接",
+      "候选 RELEASE-SHA256SUMS",
+      "切换前 B 状态、环境和链接快照",
+      "生产 exact-state 浏览器测试日志"
+    ]
+  },
+  "questions": [
+    {
+      "id": "Q1",
+      "question": "为什么用户会先看到空项目和空对话？",
+      "critical": true,
+      "internal_probe": "追踪官方启动动画、React 外壳、侧边栏 bootstrap、thread/resume、输入区和最新正文的到达顺序",
+      "external_probe": "核对官方 App Server 的 excludeTurns、initialTurnsPage 与 thread/turns/list 语义",
+      "internal_status": "answered",
+      "external_status": "answered",
+      "internal_source_ids": ["S1", "S3"],
+      "external_source_ids": ["S5", "S6"],
+      "internal_gap": "",
+      "external_gap": ""
+    },
+    {
+      "id": "Q2",
+      "question": "为什么超大对话打开后仍持续几十秒到数分钟？",
+      "critical": true,
+      "internal_probe": "记录真实大线程的 renderer、App Server 和外部网络逐方法耗时，并检查是否持续自动翻页",
+      "external_probe": "检查官方 renderer 的动态配置和 App Server 分页合同",
+      "internal_status": "answered",
+      "external_status": "answered",
+      "internal_source_ids": ["S2", "S3"],
+      "external_source_ids": ["S5", "S6"],
+      "internal_gap": "",
+      "external_gap": ""
+    },
+    {
+      "id": "Q3",
+      "question": "怎样降低重复冷启动而不再增加一套缓存数据库？",
+      "critical": true,
+      "internal_probe": "对照无预热、最近一线程预热和同进程热打开，并检查内存与 PSI",
+      "external_probe": "优先复用官方 thread/read、thread/resume 和现有进程内缓存边界",
+      "internal_status": "answered",
+      "external_status": "answered",
+      "internal_source_ids": ["S1", "S3", "S4"],
+      "external_source_ids": ["S5"],
+      "internal_gap": "",
+      "external_gap": ""
+    }
+  ],
+  "source_map": [
+    {
+      "id": "M1",
+      "question_ids": ["Q1", "Q2", "Q3"],
+      "origin": "internal",
+      "channel": "源码、目标官方包与发布脚本",
+      "target": "首屏协调、动态配置、线程预热、空闲回收和回滚",
+      "decision_use": "限定最小改动并检查维护成本",
+      "priority": "high",
+      "access_status": "searched"
+    },
+    {
+      "id": "M2",
+      "question_ids": ["Q1", "Q2", "Q3"],
+      "origin": "internal",
+      "channel": "隔离和生产真实浏览器",
+      "target": "登录页、Trillium Note 最新正文、中文资源、压缩、鉴权和任务启动",
+      "decision_use": "验证真实用户路径而不是仅验证 HTTP 200",
+      "priority": "high",
+      "access_status": "searched"
+    },
+    {
+      "id": "M3",
+      "question_ids": ["Q1", "Q2"],
+      "origin": "external",
+      "channel": "OpenAI 官方源码文档",
+      "target": "线程恢复和历史分页合同",
+      "decision_use": "确认方案沿用上游边界而非自造轮子",
+      "priority": "high",
+      "access_status": "searched"
+    }
+  ],
+  "sources": [
+    {
+      "id": "S1",
+      "origin": "internal",
+      "title": "26.810 宿主与官方 renderer 控制流审查",
+      "location": "repository:packages/browser-bridge/src/first-paint.ts,official-feature-gates.ts;packages/host-gateway/src/startup-thread-prewarmer.ts,runtime.ts",
+      "source_type": "source-code",
+      "date": "2026-08-17",
+      "accessed_at": "2026-08-17",
+      "applicability": "直接覆盖首屏揭示、官方动态配置、线程恢复缓存和运行时回收",
+      "limitations": "代码审查不能单独证明生产时序",
+      "retrieval_method": "逐行追踪目标包调用点和宿主消息流",
+      "observed_content": "renderer 已使用 excludeTurns 和最近 5 turns，但动态配置关闭时仍自动排空所有历史页；运行时默认 15 分钟回收且生产关闭预热。",
+      "direct": true,
+      "independence_group": "repository-source"
+    },
+    {
+      "id": "S2",
+      "origin": "internal",
+      "title": "修复前真实大线程方法级日志",
+      "location": "private:production-b-method-latency-20260817",
+      "source_type": "behavioral-data",
+      "date": "2026-08-17",
+      "accessed_at": "2026-08-17",
+      "applicability": "直接解释用户观察到的两分钟冷打开和持续加载",
+      "limitations": "单台 VPS、一个极端大线程，不代表普通线程分布",
+      "retrieval_method": "真实 B 状态临时候选、官方 renderer、方法级耗时和浏览器可见正文联合记录",
+      "observed_content": "冷 thread/resume 53.675 秒、并发 thread/read 34.427 秒；外部 ChatGPT 请求最高 56.567 秒；旧路径还会产生大量 28–55 秒的历史分页。",
+      "direct": true,
+      "independence_group": "production-runtime"
+    },
+    {
+      "id": "S3",
+      "origin": "internal",
+      "title": "候选 exact-state Trillium 浏览器对照",
+      "location": "private:production-ui-smoke-20260817",
+      "source_type": "test-observation",
+      "date": "2026-08-17",
+      "accessed_at": "2026-08-17",
+      "applicability": "在真实生产状态验证项目、最新正文、中文资源、输入区和首屏事件",
+      "limitations": "自动浏览器位于 VPS，本次不等同于国内最后一公里网络测量",
+      "retrieval_method": "候选临时替代 B 服务，两次加载相同真实线程并自动恢复原生产版本",
+      "observed_content": "无预热冷页面 122.898 秒完整揭示；同进程热页面 13.458 秒；最近一线程预热冷页面 61.254 秒。三次均在最新正文可见后才移除遮罩，无资源失败和页面错误。",
+      "direct": true,
+      "independence_group": "production-browser"
+    },
+    {
+      "id": "S4",
+      "origin": "internal",
+      "title": "候选完整 CI、隔离鉴权和任务启动",
+      "location": "repository:release-20260817.1435-b2-atomic-first-paint",
+      "source_type": "test-observation",
+      "date": "2026-08-17",
+      "accessed_at": "2026-08-17",
+      "applicability": "验证首屏改动未破坏官方包合同、鉴权边界和真实 turn/start",
+      "limitations": "条件跳过项目仍需在其适用平台单独验收",
+      "retrieval_method": "不可变 release 安装、普通与官方源两套测试、21 方法合同、npm audit、隔离浏览器",
+      "observed_content": "普通模式 275 项通过、12 项条件跳过；官方模式 286 项通过、1 项条件跳过；21 方法合同通过；两次 npm audit 为 0 漏洞。",
+      "direct": true,
+      "independence_group": "candidate-ci"
+    },
+    {
+      "id": "S5",
+      "origin": "external",
+      "title": "OpenAI Codex App Server README",
+      "location": "https://github.com/openai/codex/blob/main/codex-rs/app-server/README.md",
+      "source_type": "official-doc",
+      "date": "2026-08-17",
+      "accessed_at": "2026-08-17",
+      "applicability": "定义 thread/resume、excludeTurns、initialTurnsPage 与 thread/turns/list 的官方分页边界",
+      "limitations": "main 分支可能领先目标包，已用 26.810 资格包和合同测试复核",
+      "retrieval_method": "读取 OpenAI 官方 GitHub 文档",
+      "observed_content": "线程可以在 resume 时排除完整 turns，并以有界 initialTurnsPage 和后续 thread/turns/list 分页读取历史。",
+      "direct": true,
+      "independence_group": "openai-official"
+    },
+    {
+      "id": "S6",
+      "origin": "external",
+      "title": "OpenAI App Server thread v2 protocol source",
+      "location": "https://github.com/openai/codex/blob/main/codex-rs/app-server-protocol/src/protocol/v2/thread.rs",
+      "source_type": "official-source",
+      "date": "2026-08-17",
+      "accessed_at": "2026-08-17",
+      "applicability": "复核目标请求字段与分页方向、游标和视图结构",
+      "limitations": "仍需目标打包版本运行时验证",
+      "retrieval_method": "读取 OpenAI 官方协议源码并与目标 schema 对比",
+      "observed_content": "协议原生支持有界初始 turns 页和独立的 turns list 分页。",
+      "direct": true,
+      "independence_group": "openai-official"
+    }
+  ],
+  "claims": [
+    {
+      "id": "C1",
+      "claim": "主要架构延迟来自 renderer 自动排空历史，而不是首屏必须拥有完整历史。",
+      "status": "supported",
+      "support_source_ids": ["S1", "S2", "S5", "S6"],
+      "counter_source_ids": [],
+      "confidence": "high"
+    },
+    {
+      "id": "C2",
+      "claim": "原子遮罩能消除空项目和空对话的误导，但不能把上游冷解析或网络耗时变成零。",
+      "status": "supported",
+      "support_source_ids": ["S2", "S3"],
+      "counter_source_ids": [],
+      "confidence": "high"
+    },
+    {
+      "id": "C3",
+      "claim": "最近一线程预热加 24 小时保温是在不新增持久存储前提下最小、可逆的重复冷启动修正。",
+      "status": "supported-with-boundary",
+      "support_source_ids": ["S1", "S3", "S4"],
+      "counter_source_ids": ["S2"],
+      "confidence": "medium-high"
+    }
+  ],
+  "assumptions": [
+    {
+      "id": "A1",
+      "assumption": "B 近期仍只保留一个主要超大线程，因此预热数量 1 足够。",
+      "risk_if_false": "多个大线程轮流使用时仍会遇到冷解析。",
+      "validation": "每次迁移新主线程或线程数量变化时重跑候选性能门禁。"
+    },
+    {
+      "id": "A2",
+      "assumption": "24 小时保温的约 1–2 GiB 常驻成本在现有 8 GiB B 上限内可接受。",
+      "risk_if_false": "主机 swap 或 PSI 上升并影响 A。",
+      "validation": "发布后记录 B memory.events、RSS、swap 和 A 延迟；达到门槛即恢复 15 分钟。"
+    }
+  ],
+  "search_branches": [
+    {
+      "name": "adjacent",
+      "status": "complete",
+      "reason": "检查既有预热与进程缓存",
+      "round_ids": ["R1"]
+    },
+    {
+      "name": "code",
+      "status": "complete",
+      "reason": "定位目标 renderer 配置与宿主回收",
+      "round_ids": ["R1"]
+    },
+    {
+      "name": "failure",
+      "status": "complete",
+      "reason": "复现登录遮罩不退和超大线程冷加载",
+      "round_ids": ["R2"]
+    },
+    {
+      "name": "mechanism",
+      "status": "complete",
+      "reason": "对照分页、预热和热运行时",
+      "round_ids": ["R2"]
+    },
+    {
+      "name": "patent",
+      "status": "not-applicable",
+      "reason": "本次不是新颖性或专利判断",
+      "round_ids": []
+    },
+    {
+      "name": "problem",
+      "status": "complete",
+      "reason": "覆盖用户报告的空首屏和慢对话",
+      "round_ids": ["R1", "R2"]
+    },
+    {
+      "name": "product",
+      "status": "complete",
+      "reason": "验证完整首屏与可见进度体验",
+      "round_ids": ["R3"]
+    },
+    {
+      "name": "research",
+      "status": "complete",
+      "reason": "核对 OpenAI 官方协议",
+      "round_ids": ["R1"]
+    }
+  ],
+  "search_rounds": [
+    { "id": "R1", "focus": "官方协议与目标代码", "result": "确认有界初始页和按需分页是官方路径。" },
+    {
+      "id": "R2",
+      "focus": "真实大线程和失败机制",
+      "result": "量化 App Server、外部网络和历史翻页耗时。"
+    },
+    {
+      "id": "R3",
+      "focus": "候选浏览器与运维门禁",
+      "result": "隔离、exact-state、预热对照、资源和回滚均通过候选门槛。"
+    }
+  ],
+  "candidates": [
+    {
+      "id": "P1",
+      "name": "持久化第二套对话快照",
+      "decision": "rejected",
+      "reason": "增加一致性、失效和恢复复杂度，历史上已出现 metadata-only 空壳。"
+    },
+    {
+      "id": "P2",
+      "name": "原子首屏 + 官方分页 + 最近线程预热 + 24 小时保温",
+      "decision": "selected",
+      "reason": "沿用官方协议、改动小、真实对照有效且可一键回滚。"
+    },
+    {
+      "id": "P3",
+      "name": "继续逐项显示并仅加文字提示",
+      "decision": "rejected",
+      "reason": "仍会让用户把暂未加载误判为资源消失。"
+    }
+  ],
+  "novelty": {
+    "applicable": false,
+    "applicability_reason": "本次选择既有官方分页和宿主生命周期配置，不提出原创性主张。",
+    "assessment": "not-applicable",
+    "stop_reason": "无原创性决策需求",
+    "saturation_round_ids": [],
+    "languages": ["zh-CN", "en-US"],
+    "regions": ["VPS", "web"],
+    "access_gaps": [],
+    "scope_statement": "仅评估工程正确性、性能和可维护性。"
+  },
+  "perspectives": [
+    {
+      "name": "证据与机制",
+      "independent": false,
+      "finding": "方法日志与 renderer 代码相互印证：完整历史排空是多余架构延迟，冷文件解析是真实剩余成本。"
+    },
+    {
+      "name": "上游与复用",
+      "independent": false,
+      "finding": "官方协议已经提供 bounded initial page 和 turns list，不需要创建新会话模型。"
+    },
+    {
+      "name": "运维与回滚",
+      "independent": false,
+      "finding": "只预热一线程和 24 小时保温受 cgroup 上限保护；状态快照、B-only 切换和 A 健康门禁必须保留。"
+    }
+  ],
+  "real_world_validations": [
+    {
+      "id": "V1",
+      "name": "隔离官方登录页",
+      "result": "8.391 秒完整揭示；鉴权隔离和真实 task/start 通过。",
+      "source_ids": ["S4"]
+    },
+    {
+      "id": "V2",
+      "name": "真实生产大线程冷/热读取",
+      "result": "冷 122.898 秒、热 13.458 秒；最新正文和简体中文均在遮罩移除前可见。",
+      "source_ids": ["S3"]
+    },
+    {
+      "id": "V3",
+      "name": "最近一线程预热对照",
+      "result": "冷路径降至 61.254 秒，未出现历史自动排空、页面错误或资源失败。",
+      "source_ids": ["S3"]
+    }
+  ],
+  "alignment_questions": [],
+  "recommendation": {
+    "verdict": "proceed-with-guardrails",
+    "action": "发布 P2；首屏保持遮罩直到真实完整状态，历史按需分页，最近一线程预热并保温 24 小时。",
+    "rationale": "候选解决资源消失错觉并去掉可避免的全历史加载，真实大线程热路径和预热路径均改善，且没有增加第二套持久状态。",
+    "strongest_counterevidence": "服务器或 App Server 真正冷启动仍可能约 61 秒；外部 OpenAI 冷请求曾达到 56.567 秒。",
+    "minimum_test": "发布后连续验证冷/热 Trillium、发送接受、刷新、语言保持、离网页面后台任务和 A/B 资源。",
+    "failure_response": "任一最新正文缺失、白屏、语言 no-op、memory.max 增量、持续 swap-out 或 A 延迟恶化时立即恢复上一应用、环境和状态快照。",
+    "reversal_condition": "B 24 小时保温导致主机 memory PSI full avg60 >= 1%、IO PSI full avg60 >= 2% 或持续 swap-out。",
+    "support_source_ids": ["S1", "S3", "S4", "S5", "S6"],
+    "counter_source_ids": ["S2"]
+  },
+  "review_triggers": [
+    "B 增加第二个常用超大线程",
+    "官方 renderer 或 App Server 版本升级",
+    "大线程超过当前数量级",
+    "A 或 B 出现持续 swap-out、PSI 或 memory.max 增长",
+    "用户再次观察到空项目、空对话或最新正文缺失"
+  ]
+}

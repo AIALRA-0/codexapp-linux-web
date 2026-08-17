@@ -56,6 +56,26 @@ const context = await browser.newContext({
   },
   viewport: { width: 1440, height: 1000 },
 });
+await context.addInitScript(
+  ({ expectedText, expectedConversationText }) => {
+    window.__CODEX_FIRST_PAINT_AUDIT__ = { readyEvents: [] };
+    window.addEventListener('codex:first-paint-ready', (event) => {
+      const bodyText = document.body.innerText;
+      window.__CODEX_FIRST_PAINT_AUDIT__.readyEvents.push({
+        detail: event.detail,
+        expectedTextVisible: expectedText === null || bodyText.includes(expectedText),
+        expectedConversationTextVisible:
+          expectedConversationText === null || bodyText.includes(expectedConversationText),
+        observedAtMs: performance.now(),
+        overlayPresent: document.querySelector('#__codex-atomic-first-paint') !== null,
+      });
+    });
+  },
+  {
+    expectedText: expectedText ?? null,
+    expectedConversationText: expectedConversationText ?? null,
+  },
+);
 const page = await context.newPage();
 const pageErrors = [];
 const failedLocalRequests = [];
@@ -185,6 +205,12 @@ try {
     await page.waitForTimeout(Math.min(postAssertWaitMs, 180_000));
     reportProgress('post-assert-wait-completed');
   }
+  await page.waitForFunction(
+    () => window.__CODEX_FIRST_PAINT_AUDIT__?.readyEvents?.length === 1,
+    undefined,
+    { timeout: contentTimeoutMs },
+  );
+  reportProgress('atomic-first-paint-ready');
 
   const renderer = await page.evaluate(() => ({
     bootstrapVersion: window.__CODEX_BROWSER_BOOTSTRAP__?.rendererVersion,
@@ -196,6 +222,10 @@ try {
       document.querySelector('[data-reactroot]')?.innerHTML.length ??
       0,
     hasOfficialRoot: document.querySelector('#root') !== null,
+    atomicFirstPaint: {
+      audit: window.__CODEX_FIRST_PAINT_AUDIT__,
+      overlayPresent: document.querySelector('#__codex-atomic-first-paint') !== null,
+    },
     bodyStyle: {
       backgroundColor: getComputedStyle(document.body).backgroundColor,
       color: getComputedStyle(document.body).color,
@@ -231,6 +261,10 @@ try {
           overrideMarker: client.overrideAdapter?.__codexLinuxHistorySnapshotOverride === true,
           checkedValue:
             typeof client.checkGate === 'function' ? client.checkGate('416252813') : null,
+          paginatedHistoryDrainSuppressed:
+            typeof client.getDynamicConfig === 'function'
+              ? client.getDynamicConfig('1865103671').get('enabled', false)
+              : null,
           internationalizationOverride:
             typeof client.overrideAdapter?.getLayerOverride === 'function'
               ? client.overrideAdapter.getLayerOverride({
@@ -280,11 +314,23 @@ try {
       (client) =>
         client.overrideMarker !== true ||
         client.checkedValue !== expectedHistorySnapshotGate ||
+        client.paginatedHistoryDrainSuppressed !== true ||
         client.internationalizationOverride !== true,
     )
   ) {
     throw new Error(
       `official renderer feature overrides are unsafe: ${JSON.stringify(renderer.historySnapshotGate)}`,
+    );
+  }
+  const firstPaintEvents = renderer.atomicFirstPaint.audit?.readyEvents ?? [];
+  if (
+    renderer.atomicFirstPaint.overlayPresent ||
+    firstPaintEvents.length !== 1 ||
+    firstPaintEvents[0].expectedTextVisible !== true ||
+    firstPaintEvents[0].expectedConversationTextVisible !== true
+  ) {
+    throw new Error(
+      `official renderer exposed an incomplete first paint: ${JSON.stringify(renderer.atomicFirstPaint)}`,
     );
   }
   if (requireCompressedMainAsset && mainAssetEncoding !== 'gzip') {

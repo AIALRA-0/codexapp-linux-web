@@ -117,6 +117,7 @@ const CSP = [
 export const BROWSER_BRIDGE_MODULES = [
   'browser-file-picker.js',
   'file-protocol.js',
+  'first-paint.js',
   'index.js',
   'navigation.js',
   'official-feature-gates.js',

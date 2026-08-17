@@ -1,4 +1,5 @@
 const APP_SERVER_HISTORY_SNAPSHOTS_GATE = '416252813';
+const PAGINATED_HISTORY_DRAIN_CONFIG = '1865103671';
 const INTERNATIONALIZATION_LAYER = '72216192';
 
 interface FeatureGate {
@@ -14,11 +15,24 @@ interface OverrideAdapter {
     user?: unknown,
     options?: unknown,
   ) => FeatureGate | null | undefined;
+  getDynamicConfigOverride?: (
+    config: FeatureDynamicConfig,
+    user?: unknown,
+    options?: unknown,
+  ) => FeatureDynamicConfig | null | undefined;
   getLayerOverride?: (
     layer: FeatureLayer,
     user?: unknown,
     options?: unknown,
   ) => FeatureLayer | null | undefined;
+  [key: string]: unknown;
+}
+
+interface FeatureDynamicConfig {
+  __value?: Record<string, unknown>;
+  details?: Record<string, unknown>;
+  get?: (key: string, fallback: unknown) => unknown;
+  name?: string;
   [key: string]: unknown;
 }
 
@@ -46,9 +60,14 @@ type StatsigScope = Record<string, unknown>;
  * path and an experimental recent-history snapshot path. The snapshot path can
  * leave a cold, migrated thread at its metadata-only shell when no authorized
  * snapshot exists, so the browser host keeps that rollout off and lets the
- * renderer use its established App Server path. The same official Statsig seam
- * enables the renderer's bundled locale catalogs: without it, a saved locale
- * changes document.lang but leaves every label in English.
+ * renderer use its established App Server path. The renderer already resumes
+ * with `excludeTurns` and a five-turn `initialTurnsPage`; its official
+ * paginated-history configuration prevents it from immediately draining every
+ * older page in the background. Enabling that configuration preserves normal
+ * on-demand scrolling while keeping a very large thread's initial load bounded.
+ * The same official Statsig seam enables the renderer's bundled locale
+ * catalogs: without it, a saved locale changes document.lang but leaves every
+ * label in English.
  */
 export function installOfficialHistorySnapshotGate(scope: StatsigScope): () => void {
   const existingDescriptor = Object.getOwnPropertyDescriptor(scope, '__STATSIG__');
@@ -171,6 +190,24 @@ function decorateStatsigClient(client: StatsigClient | undefined): void {
         reason: 'LocalOverride',
       },
       value: false,
+    };
+  };
+  adapter.getDynamicConfigOverride = (config, user, options) => {
+    const officialOverride = previous?.getDynamicConfigOverride?.(config, user, options) ?? config;
+    if (officialOverride.name !== PAGINATED_HISTORY_DRAIN_CONFIG) return officialOverride;
+    const officialGet = officialOverride.get?.bind(officialOverride);
+    return {
+      ...officialOverride,
+      __value: {
+        ...officialOverride.__value,
+        enabled: true,
+      },
+      details: {
+        ...officialOverride.details,
+        reason: 'LocalOverride',
+      },
+      get: (key, fallback) =>
+        key === 'enabled' ? true : (officialGet?.(key, fallback) ?? fallback),
     };
   };
   adapter.getLayerOverride = (layer, user, options) => {

@@ -45,6 +45,7 @@ describe('browser bridge module boundary', () => {
 
   it('serves every local module imported by the production browser bridge', () => {
     expect(BROWSER_BRIDGE_MODULES).toContain('official-feature-gates.js');
+    expect(BROWSER_BRIDGE_MODULES).toContain('first-paint.js');
     expect(
       findMissingBrowserBridgeImports(
         new Map([
