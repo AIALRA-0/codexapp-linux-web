@@ -36,6 +36,7 @@
     "smoke:auth-isolation": "node scripts/smoke-auth-isolation.mjs",
     "smoke:approvals": "node scripts/smoke-approvals.mjs",
     "smoke:core-lifecycle": "node scripts/smoke-core-lifecycle.mjs",
+    "smoke:concurrent-thread-viewers": "node scripts/smoke-concurrent-thread-viewers.mjs",
     "smoke:host-persistence": "node scripts/smoke-host-persistence.mjs",
     "smoke:large-thread": "node scripts/smoke-large-thread.mjs",
     "smoke:projects-egress": "node scripts/smoke-projects-egress.mjs",

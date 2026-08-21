@@ -27,9 +27,14 @@ describe('CodexAppServerClient', () => {
   it('initializes using newline-delimited JSON-RPC', async () => {
     const { child, stdout } = fakeChild();
     const writes: string[] = [];
+    let spawnOptions: SpawnOptions | undefined;
     child.stdin.on('data', (chunk: Buffer) => {
       writes.push(chunk.toString());
-      const request = JSON.parse(chunk.toString()) as { id?: number; method: string };
+      const request = JSON.parse(chunk.toString()) as {
+        id?: number;
+        method: string;
+        params?: { clientInfo?: { name?: string; title?: string; version?: string } };
+      };
       if (request.id !== undefined) {
         stdout.write(`${JSON.stringify({ id: request.id, result: {} })}\n`);
       }
@@ -39,7 +44,14 @@ describe('CodexAppServerClient', () => {
       codexHome: '/tmp/codex-home',
       cwd: '/tmp',
       clientVersion: '0.1.0',
-      spawnProcess: () => child,
+      environment: {
+        HOME: '/tmp/user-home',
+        XDG_CONFIG_HOME: '/tmp/user-home/.config',
+      },
+      spawnProcess: (_command, _args, options) => {
+        spawnOptions = options;
+        return child;
+      },
     });
 
     await client.start();
@@ -47,6 +59,19 @@ describe('CodexAppServerClient', () => {
     expect(client.ready).toBe(true);
     expect(writes).toHaveLength(2);
     expect(writes[0]).toContain('"method":"initialize"');
+    const initializeRequest = JSON.parse(writes[0]!) as {
+      params?: { clientInfo?: { name?: string; title?: string; version?: string } };
+    };
+    expect(initializeRequest.params?.clientInfo).toEqual({
+      name: 'codex_desktop',
+      title: 'Codex Desktop',
+      version: '0.1.0',
+    });
+    expect(spawnOptions?.env).toMatchObject({
+      CODEX_HOME: '/tmp/codex-home',
+      HOME: '/tmp/user-home',
+      XDG_CONFIG_HOME: '/tmp/user-home/.config',
+    });
     expect(writes[1]).toContain('"method":"initialized"');
   });
 

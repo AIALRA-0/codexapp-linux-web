@@ -2,7 +2,11 @@ import { open, readFile, readdir, realpath, stat } from 'node:fs/promises';
 import { extname, isAbsolute, join, relative, sep } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
-import { resolveRuntimePath, type RuntimePathScope } from './runtime-path.js';
+import {
+  portableWorkspaceAttachmentPath,
+  resolveRuntimePath,
+  type RuntimePathScope,
+} from './runtime-path.js';
 
 const OFFICIAL_DESKTOP_FILE_MAX_BYTES = 256 * 1024 * 1024;
 const OFFICIAL_CONTENT_SAMPLE_MAX_BYTES = 1024 * 1024;
@@ -186,7 +190,13 @@ async function resolveDesktopPath(runtime: RuntimePathScope, input: unknown): Pr
       throw new Error('Desktop file URL is invalid', { cause: error });
     }
   }
-  return resolveRuntimePath(runtime, path, false);
+  try {
+    return await resolveRuntimePath(runtime, path, false);
+  } catch (error) {
+    const portableAttachment = portableWorkspaceAttachmentPath(path, runtime.workspaceRoot);
+    if (portableAttachment === null) throw error;
+    return resolveRuntimePath(runtime, portableAttachment, false);
+  }
 }
 
 async function readFileSample(path: string, maxBytes: number): Promise<Uint8Array> {

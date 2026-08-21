@@ -16,6 +16,19 @@ import { dirname, isAbsolute, join, relative, resolve } from 'node:path';
 
 const codexHome = requiredAbsoluteArgument('--codex-home');
 const pluginRoot = requiredAbsoluteArgument('--plugin-root');
+const userRoot = dirname(codexHome);
+const profileDirectory = join(
+  userRoot,
+  'home',
+  '.local',
+  'share',
+  'aialra-shopping-browser',
+  'profile',
+);
+const outputDirectory = join(userRoot, 'home', '.cache', 'aialra-shopping-browser', 'mcp');
+const browserName = process.env.AIALRA_SHOPPING_BROWSER_BROWSER ?? 'chrome';
+const browserExecutable =
+  process.env.AIALRA_SHOPPING_BROWSER_EXECUTABLE ?? '/usr/bin/google-chrome-stable';
 const configPath = join(codexHome, 'config.toml');
 const launcherPath = join(pluginRoot, 'scripts', 'launch-playwright-mcp.mjs');
 const backupPath = join(codexHome, 'config.toml.before-shopping-browser-mcp');
@@ -36,7 +49,8 @@ const section = [
   `cwd = ${JSON.stringify(`${pluginRoot}/.`)}`,
   'startup_timeout_sec = 60',
   'tool_timeout_sec = 120',
-  'env_vars = ["AIALRA_SHOPPING_BROWSER_PROFILE_DIR", "AIALRA_SHOPPING_BROWSER_OUTPUT_DIR", "AIALRA_SHOPPING_BROWSER_BROWSER", "AIALRA_SHOPPING_BROWSER_EXECUTABLE", "AIALRA_SHOPPING_BROWSER_KEEP_BROWSER_ALIVE", "DISPLAY", "HTTPS_PROXY", "NO_PROXY"]',
+  `env = { AIALRA_SHOPPING_BROWSER_PROFILE_DIR = ${JSON.stringify(profileDirectory)}, AIALRA_SHOPPING_BROWSER_OUTPUT_DIR = ${JSON.stringify(outputDirectory)}, AIALRA_SHOPPING_BROWSER_BROWSER = ${JSON.stringify(browserName)}, AIALRA_SHOPPING_BROWSER_EXECUTABLE = ${JSON.stringify(browserExecutable)}, AIALRA_SHOPPING_BROWSER_KEEP_BROWSER_ALIVE = "true" }`,
+  'env_vars = ["DISPLAY", "HTTPS_PROXY", "NO_PROXY"]',
 ].join('\n');
 const next = `${withoutManagedSection.trimEnd()}\n\n${section}\n`;
 
@@ -58,7 +72,9 @@ process.stdout.write(
     changed: next !== original,
     startupTimeoutSeconds: 60,
     toolTimeoutSeconds: 120,
-    forwardedEnvironmentNames: 8,
+    forwardedEnvironmentNames: 3,
+    isolatedProfileDirectory: profileDirectory,
+    isolatedOutputDirectory: outputDirectory,
   })}\n`,
 );
 

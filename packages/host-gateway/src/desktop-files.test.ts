@@ -75,6 +75,82 @@ describe('official desktop file requests', () => {
     ).resolves.toEqual({ contentsBase64: null });
   });
 
+  it('reads a migrated attachment from the current workspace without exposing the old root', async () => {
+    const runtime = await createRuntime();
+    const attachment = join(
+      runtime.workspaceRoot,
+      '.codex',
+      'attachments',
+      'thread-1',
+      'pixel.png',
+    );
+    const bytes = Buffer.from(
+      'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=',
+      'base64',
+    );
+    await mkdir(join(runtime.workspaceRoot, '.codex', 'attachments', 'thread-1'), {
+      recursive: true,
+    });
+    await mkdir(join(runtime.workspaceRoot, '.codex', 'attachments', 'legacy-imports'), {
+      recursive: true,
+    });
+    await writeFile(attachment, bytes);
+    const legacyClipboardName = 'codex-clipboard-04ddab70-23c0-455d-8a2f-307f37995f62.png';
+    await writeFile(
+      join(runtime.workspaceRoot, '.codex', 'attachments', 'legacy-imports', legacyClipboardName),
+      bytes,
+    );
+    const outsideRoot = await mkdtemp(join(tmpdir(), 'codexapp-portable-attachment-outside-'));
+    roots.push(outsideRoot);
+    const outsidePath = join(outsideRoot, 'outside.png');
+    await writeFile(outsidePath, bytes);
+    await symlink(
+      outsidePath,
+      join(runtime.workspaceRoot, '.codex', 'attachments', 'thread-1', 'linked.png'),
+    );
+
+    const legacyPath = '/srv/legacy/users/old-user/workspace/.codex/attachments/thread-1/pixel.png';
+    await expect(
+      readOfficialDesktopFileBinary(runtime, { hostId: 'local', path: legacyPath }),
+    ).resolves.toEqual({ contentsBase64: bytes.toString('base64'), mimeType: 'image/png' });
+    await expect(
+      readOfficialDesktopFileBinary(runtime, {
+        hostId: 'local',
+        path: `/var/folders/3p/legacy-session/T/${legacyClipboardName}`,
+      }),
+    ).resolves.toEqual({ contentsBase64: bytes.toString('base64'), mimeType: 'image/png' });
+    await expect(
+      readOfficialDesktopFileBinary(runtime, {
+        hostId: 'local',
+        path: `/srv/aialra/state/old-host/users/${'a'.repeat(64)}/tmp/${legacyClipboardName}`,
+      }),
+    ).resolves.toEqual({ contentsBase64: bytes.toString('base64'), mimeType: 'image/png' });
+    await expect(
+      readOfficialDesktopFileBinary(runtime, {
+        hostId: 'local',
+        path: '/srv/legacy/users/old-user/workspace/private.txt',
+      }),
+    ).rejects.toThrow('outside the user root');
+    await expect(
+      readOfficialDesktopFileBinary(runtime, {
+        hostId: 'local',
+        path: '/srv/legacy/users/old-user/workspace/.codex/attachments/thread-1/linked.png',
+      }),
+    ).rejects.toThrow('resolves outside the user root');
+    await expect(
+      readOfficialDesktopFileBinary(runtime, {
+        hostId: 'local',
+        path: '/srv/legacy/users/old-user/workspace/.codex/attachments/thread-1/../../secret.txt',
+      }),
+    ).rejects.toThrow('outside the user root');
+    await expect(
+      readOfficialDesktopFileBinary(runtime, {
+        hostId: 'local',
+        path: '/var/folders/3p/legacy-session/T/private.png',
+      }),
+    ).rejects.toThrow('outside the user root');
+  });
+
   it('returns only root-confined paths that currently exist', async () => {
     const runtime = await createRuntime();
     const existingPath = join(runtime.workspaceRoot, 'existing.txt');

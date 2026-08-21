@@ -1,9 +1,10 @@
 import { EventEmitter } from 'node:events';
+import { realpathSync } from 'node:fs';
 
 import { describe, expect, it, vi } from 'vitest';
 import { mkdir, mkdtemp, rm, symlink, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { dirname, join } from 'node:path';
 
 import {
   BROWSER_BRIDGE_MODULES,
@@ -264,6 +265,50 @@ describe('authenticated official file protocol route', () => {
       expect(resolveBrowserFileAsset(outside.replace(/^[/\\]+/u, ''), root)).toBeNull();
       expect(resolveBrowserFileAsset(linked.replace(/^[/\\]+/u, ''), root)).toBeNull();
       expect(resolveBrowserFileAsset('../outside.txt', root)).toBeNull();
+    } finally {
+      await rm(parent, { force: true, recursive: true });
+    }
+  });
+
+  it('maps migrated workspace attachments into the current user root without widening access', async () => {
+    const parent = await mkdtemp(join(tmpdir(), 'codex-browser-file-migration-'));
+    try {
+      const root = join(parent, 'current-user');
+      const attachment = join(root, 'workspace', '.codex', 'attachments', 'thread-1', 'image.png');
+      const legacyClipboardName = 'codex-clipboard-04ddab70-23c0-455d-8a2f-307f37995f62.png';
+      const legacyClipboard = join(
+        root,
+        'workspace',
+        '.codex',
+        'attachments',
+        'legacy-imports',
+        legacyClipboardName,
+      );
+      const outside = join(parent, 'outside.txt');
+      const linked = join(root, 'workspace', '.codex', 'attachments', 'thread-1', 'linked.png');
+      await Promise.all([
+        mkdir(dirname(attachment), { recursive: true }),
+        mkdir(dirname(legacyClipboard), { recursive: true }),
+      ]);
+      await Promise.all([
+        writeFile(attachment, 'image'),
+        writeFile(legacyClipboard, 'legacy-image'),
+        writeFile(outside, 'outside'),
+      ]);
+      await symlink(outside, linked);
+
+      const legacyRoot = '/srv/legacy/users/old-user/workspace/.codex/attachments/thread-1';
+      expect(resolveBrowserFileAsset(`${legacyRoot}/image.png`, root)).toBe(
+        realpathSync(attachment),
+      );
+      expect(
+        resolveBrowserFileAsset(`var/folders/3p/legacy-session/T/${legacyClipboardName}`, root),
+      ).toBe(realpathSync(legacyClipboard));
+      expect(resolveBrowserFileAsset(`${legacyRoot}/linked.png`, root)).toBeNull();
+      expect(resolveBrowserFileAsset(`${legacyRoot}/../../../../../outside.txt`, root)).toBeNull();
+      expect(
+        resolveBrowserFileAsset('/srv/legacy/users/old-user/workspace/private.txt', root),
+      ).toBeNull();
     } finally {
       await rm(parent, { force: true, recursive: true });
     }
