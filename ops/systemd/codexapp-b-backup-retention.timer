@@ -1,0 +1,12 @@
+[Unit]
+Description=Enforce single-snapshot retention for CodexApp B
+
+[Timer]
+OnBootSec=5min
+OnUnitActiveSec=5min
+AccuracySec=30s
+Persistent=true
+Unit=codexapp-b-backup-retention.service
+
+[Install]
+WantedBy=timers.target

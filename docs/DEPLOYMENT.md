@@ -20,6 +20,23 @@ that lacks this endpoint requires the operator to verify that release is idle
 and set `CODEXAPP_CONFIRMED_LEGACY_IDLE=1`; later releases fail closed without an
 override.
 
+## B rollback snapshot retention
+
+B keeps exactly one finalized upgrade snapshot: the snapshot created before the
+currently active release. Older finalized snapshots are not a history archive
+and are removed by `codexapp-b-backup-retention.timer` within five minutes.
+The retention job shares the release lock, verifies that the newest snapshot
+belongs to the active release, and checks its metadata and rollback release pair
+before deleting anything. Conversation archives and non-upgrade backups are
+outside its fixed backup root and are never considered.
+
+Install or refresh the rule with:
+
+```sh
+APPLICATION_ROOT=/srv/aialra/releases/codexapp-official-web-host/VERSION \
+  /srv/aialra/releases/codexapp-official-web-host/VERSION/ops/install-b-backup-retention.sh
+```
+
 ## Browser loss and background turns
 
 The browser connection is not the lifetime owner of an official Codex turn.
