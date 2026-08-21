@@ -6,12 +6,26 @@
 
 [![CI](https://github.com/AIALRA-0/codexapp-linux-web/actions/workflows/ci.yml/badge.svg)](https://github.com/AIALRA-0/codexapp-linux-web/actions/workflows/ci.yml)
 [![Node.js 24](https://img.shields.io/badge/Node.js-24-339933?logo=nodedotjs&logoColor=white)](https://nodejs.org/)
-[![Official renderer](https://img.shields.io/badge/renderer-26.803.81509-111111)](./manifests/official-26.803.81509.json)
+[![B renderer](https://img.shields.io/badge/B_renderer-26.810.41047-111111)](./manifests/official-26.810.41047.json)
 [![License: MIT](https://img.shields.io/badge/code-MIT-blue.svg)](./LICENSE)
 
 [它解决什么](#它解决什么) · [真实界面](#真实界面) · [实现方式](#实现方式) · [验证结果](#验证结果) · [部署与升级](#部署与升级) · [数据边界](#数据边界)
 
 </div>
+
+## 当前状态（2026-08-21）
+
+A、B 两个生产站都保持原版本正常运行，官方 Codex `0.149.0` 只部署在隔离候选站，还没有
+升级到 B。
+
+原因很简单：候选版的大多数功能已经通过，但 349MB 真实旧对话到达最新内容仍需
+46.7–127.4 秒，超过 15 秒硬门禁；Google Drive 也还没完成用户授权。现在的日常路线是
+使用轻量续接对话，把超大对话保留为只读可搜索档案。
+
+不要把“候选功能能用”误读成“已经允许升级生产”。完整证据见
+[0.149 隔离资格结果](./docs/audits/2026-08-20-official-149-isolated-rollout/qualification-results.json)，
+当前放行结论见
+[0.149 隔离升级交接](./docs/handoffs/2026-08-20-codexapp-official-149.md)。
 
 ## 它解决什么
 
@@ -66,7 +80,10 @@ flowchart TD
 
 两个站点的进程、用户状态、工作区、资源上限和发布链接完全分开。B 升级失败时可以直接回滚，不会把 A 一起带坏
 
-## 已验证功能
+## 既有生产基线已验证功能
+
+下表记录 A、B 既有生产基线曾经通过的范围。新官方版本仍需重新通过自己的完整门禁，
+不能因为旧版本通过就自动继承结论。
 
 | 范围     | 已验证结果                                                           |
 | -------- | -------------------------------------------------------------------- |
@@ -81,7 +98,7 @@ flowchart TD
 | 页面     | 新任务、拉取请求、站点、已安排、插件和全部设置页面                   |
 | 运维     | 备份、恢复、不可变发布、健康检查和失败自动回滚                       |
 
-自动化仓库检查当前覆盖 51 个测试文件和 269 个测试
+自动化仓库检查当前覆盖 53 个测试文件和 285 个测试
 
 真实运行环境还会执行官方窗口、任务生命周期、MCP、权限、文件、终端、Git、浏览器、备份恢复和持久化烟雾测试
 
