@@ -105,8 +105,8 @@ export class CodexAppServerClient extends EventEmitter {
 
     await this.request('initialize', {
       clientInfo: {
-        name: 'codexapp-official-web-host',
-        title: 'CodexApp Official Web Host',
+        name: 'codex_desktop',
+        title: 'Codex Desktop',
         version: this.options.clientVersion,
       },
       capabilities: {

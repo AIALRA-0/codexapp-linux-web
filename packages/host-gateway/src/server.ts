@@ -46,6 +46,7 @@ import {
 } from './identity.js';
 import { ConnectionRateLimiter } from './rate-limit.js';
 import { RuntimeRegistry, type UserRuntime } from './runtime.js';
+import { portableWorkspaceAttachmentPath } from './runtime-path.js';
 import { BrowserSession } from './session.js';
 import { readStorageHealth } from './storage.js';
 
@@ -1049,10 +1050,26 @@ function browserDownloadDisposition(filename: string): string {
 export function resolveBrowserFileAsset(requested: string, userRoot: string): string | null {
   try {
     const decoded = decodeURIComponent(requested);
+    const canonicalRoot = realpathSync(userRoot);
     const candidate = resolve('/', decoded.replace(/^[/\\]+/u, ''));
+    const direct = resolveContainedBrowserFileAsset(candidate, canonicalRoot);
+    if (direct !== null) return direct;
+
+    const portableAttachment = portableWorkspaceAttachmentPath(
+      decoded,
+      join(canonicalRoot, 'workspace'),
+    );
+    if (portableAttachment === null) return null;
+    return resolveContainedBrowserFileAsset(portableAttachment, canonicalRoot);
+  } catch {
+    return null;
+  }
+}
+
+function resolveContainedBrowserFileAsset(candidate: string, canonicalRoot: string): string | null {
+  try {
     const entryStats = lstatSync(candidate);
     if (!entryStats.isFile() || entryStats.isSymbolicLink()) return null;
-    const canonicalRoot = realpathSync(userRoot);
     const canonicalPath = realpathSync(candidate);
     const relation = relative(canonicalRoot, canonicalPath);
     if (

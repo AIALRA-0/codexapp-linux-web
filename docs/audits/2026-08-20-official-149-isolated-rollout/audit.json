@@ -1,0 +1,440 @@
+{
+  "meta": {
+    "contract_version": "1.0",
+    "title": "CodexApp 官方 0.149 隔离升级资格审计",
+    "mode": "checkpoint",
+    "as_of": "2026-08-21",
+    "status": "complete",
+    "scope": "判断隔离候选版是否可以升级到 B 站；覆盖官方版本、349MB 大对话、交互与后台任务、多语言、附件、Skill、MCP、生产隔离和磁盘回滚能力。",
+    "exclusions": [
+      "不升级或修改 A 站与 B 站",
+      "不把历史 /tmp 测试文件扩大为可读取的用户附件",
+      "不发布用户身份哈希、账号、对话原文或服务器私密路径",
+      "不声称已经达到绝对稳定或不存在新缺陷"
+    ]
+  },
+  "decision_problem": {
+    "project_classification": "可回滚的隔离升级资格检查，但候选一旦进入生产会影响主要工作入口",
+    "risk_level": "high",
+    "decision_owner": "AIALRA",
+    "desired_outcome": "使用官方 Codex 0.149.0 与官方网页界面，同时让主要对话在服务器网页端可靠、快速、可后台继续运行。",
+    "current_state": "A、B 生产站保持原版本；隔离候选版已完成大部分功能回归，但 349MB 对话到达最新内容仍需 46.7 至 127.4 秒，Google Drive 尚未连接。",
+    "decision": "现在是否允许把隔离候选版升级到 B 站，还是先改用轻量续接对话并继续优化官方恢复路径。",
+    "success_metrics": [
+      "349MB 对话冷启动到最新内容不超过 15 秒",
+      "连续刷新不白屏、不丢失、不重复对话",
+      "发送在 1 秒内被服务器接受，关闭网页后任务继续运行",
+      "简中、繁中、日语、法语均能切换并在刷新后保持",
+      "Skill、MCP、附件与权限不退化",
+      "A、B 服务与原对话文件在隔离测试期间保持不变"
+    ],
+    "constraints": [
+      "严禁用自制历史解析、伪造恢复结果或隐藏加载状态来通过门禁",
+      "只采用稳定版，不把 Alpha 版本推入生产",
+      "对外提交必须脱敏",
+      "生产升级必须保留一个可验证的上一版本"
+    ],
+    "irreversible_actions": [
+      "已清理确认不再被服务引用的旧发布目录和重复备份；代码仍由 Git 保存，但这些服务器副本不可直接恢复。"
+    ],
+    "research_budget": {
+      "overall_limit": "持续到隔离版完成资格检查并形成明确放行或不放行结论",
+      "parallel_capacity": 1,
+      "paid_or_private_access": ["AIALRA VPS 的只读与隔离环境访问", "已登录的 CodexApp 测试会话"],
+      "cutoff_policy": "任何硬门禁失败即停止生产升级；继续工作只限隔离环境、证据整理和可回滚修复。"
+    },
+    "reversal_evidence": [
+      "若同一正式候选连续 5 次冷启动均在 15 秒内到达最新内容，并通过全部功能回归，可重新评估升级 B。",
+      "若 Google Drive 完成用户授权且真实桥接调用通过，可移除对应 MCP 阻断项。"
+    ]
+  },
+  "questions": [
+    {
+      "id": "Q1",
+      "question": "隔离版是否确实使用目标官方界面与稳定引擎，并带来相关官方修复？",
+      "critical": true,
+      "internal_probe": "核对运行服务、发布产物、版本号、渲染器哈希和完整资格测试。",
+      "external_probe": "核对 OpenAI 官方 0.149.0 发布说明和对应 app-server 源码。",
+      "internal_status": "answered",
+      "external_status": "answered",
+      "internal_source_ids": ["S1", "S2"],
+      "external_source_ids": ["S3", "S4"],
+      "internal_gap": "",
+      "external_gap": ""
+    },
+    {
+      "id": "Q2",
+      "question": "349MB 对话能否在 15 秒门禁内完整恢复到最新内容？",
+      "critical": true,
+      "internal_probe": "用真实大对话执行多轮冷启动、最新内容、旧内容和服务日志计时。",
+      "external_probe": "核对官方版本对旧历史扫描和可见内容渲染的改动边界，确认它不是性能保证。",
+      "internal_status": "answered",
+      "external_status": "answered",
+      "internal_source_ids": ["S1", "S5", "S7"],
+      "external_source_ids": ["S3", "S4"],
+      "internal_gap": "",
+      "external_gap": ""
+    },
+    {
+      "id": "Q3",
+      "question": "核心交互、多语言、附件、后台执行、Skill 和 MCP 是否无退化？",
+      "critical": true,
+      "internal_probe": "执行仓库回归、真实浏览器、后台断连、附件哈希、多语言和 MCP 桥接测试。",
+      "external_probe": "以官方发布说明和 app-server 接口实现核对目标能力与兼容边界。",
+      "internal_status": "answered",
+      "external_status": "answered",
+      "internal_source_ids": ["S1", "S6"],
+      "external_source_ids": ["S3", "S4"],
+      "internal_gap": "",
+      "external_gap": ""
+    },
+    {
+      "id": "Q4",
+      "question": "现有证据是否足以允许升级 B 站？",
+      "critical": true,
+      "internal_probe": "把硬门禁、真实用户观察、生产隔离和可回滚状态合并评估。",
+      "external_probe": "检查官方资料是否承诺解决本环境的大对话性能或仅提供相关改进。",
+      "internal_status": "answered",
+      "external_status": "answered",
+      "internal_source_ids": ["S1", "S5", "S6", "S7"],
+      "external_source_ids": ["S3", "S4"],
+      "internal_gap": "",
+      "external_gap": ""
+    }
+  ],
+  "source_map": [
+    {
+      "id": "M1",
+      "question_ids": ["Q1", "Q2", "Q3", "Q4"],
+      "origin": "internal",
+      "channel": "隔离服务、真实浏览器、服务器日志和自动化测试",
+      "target": "版本资格结果、真实大对话计时、功能回归和生产隔离状态",
+      "decision_use": "判断候选是否达到生产门禁",
+      "priority": "high",
+      "access_status": "searched"
+    },
+    {
+      "id": "M2",
+      "question_ids": ["Q1", "Q2", "Q3", "Q4"],
+      "origin": "external",
+      "channel": "OpenAI 官方 GitHub 发布页和源码仓库",
+      "target": "0.149.0 发布说明与 app-server 对应实现",
+      "decision_use": "确认版本身份、官方改动范围和不能从内部测试推出的边界",
+      "priority": "high",
+      "access_status": "searched"
+    }
+  ],
+  "sources": [
+    {
+      "id": "S1",
+      "origin": "internal",
+      "title": "0.149 隔离候选资格测试结果",
+      "location": "docs/audits/2026-08-20-official-149-isolated-rollout/qualification-results.json",
+      "source_type": "test-observation",
+      "date": "2026-08-21",
+      "accessed_at": "2026-08-21",
+      "applicability": "记录候选版本、自动化测试、真实浏览器、大对话、附件、并发、后台执行、多语言、MCP 和磁盘结果。",
+      "limitations": "只覆盖本次候选和已执行路径，不能证明未来不存在缺陷。",
+      "retrieval_method": "读取本轮测试汇总并反查原始命令、浏览器和服务日志。",
+      "observed_content": "功能资格大部分通过，但 349MB 对话性能门禁失败，Google Drive 未连接。",
+      "direct": true,
+      "independence_group": "isolated-qualification"
+    },
+    {
+      "id": "S2",
+      "origin": "internal",
+      "title": "隔离候选发布产物",
+      "location": "controlled-server-release:codexapp-official-149-isolated/current",
+      "source_type": "internal-artifact",
+      "date": "2026-08-21",
+      "accessed_at": "2026-08-21",
+      "applicability": "核对实际运行的 Codex、官方渲染器、服务端口与发布边界。",
+      "limitations": "产物存在与版本一致不能单独证明运行时体验。",
+      "retrieval_method": "读取只读发布链接、服务属性、版本输出和渲染器文件树哈希。",
+      "observed_content": "隔离服务运行 Codex 0.149.0 和官方渲染器 26.818.31338 build 6892。",
+      "direct": true,
+      "independence_group": "candidate-runtime"
+    },
+    {
+      "id": "S3",
+      "origin": "external",
+      "title": "OpenAI Codex 0.149.0 官方发布说明",
+      "location": "https://github.com/openai/codex/releases/tag/rust-v0.149.0",
+      "source_type": "official-doc",
+      "date": "2026-08-20",
+      "accessed_at": "2026-08-21",
+      "applicability": "确认稳定版本身份和与历史扫描、可见内容渲染、队列及权限恢复相关的官方改动。",
+      "limitations": "发布说明不承诺本项目的 349MB 对话达到 15 秒，也不能替代本地实测。",
+      "retrieval_method": "直接读取 OpenAI 官方 GitHub 发布页。",
+      "observed_content": "0.149.0 包含限制旧历史预览扫描、仅渲染可见转录行和约束非活跃回放缓冲等改动。",
+      "direct": true,
+      "independence_group": "openai-release"
+    },
+    {
+      "id": "S4",
+      "origin": "external",
+      "title": "OpenAI Codex 0.149.0 app-server 源码",
+      "location": "https://github.com/openai/codex/tree/rust-v0.149.0/codex-rs/app-server",
+      "source_type": "source-code",
+      "date": "2026-08-20",
+      "accessed_at": "2026-08-21",
+      "applicability": "核对候选所依赖的官方会话恢复与服务接口来源。",
+      "limitations": "源码结构不能替代部署环境中的端到端性能测量。",
+      "retrieval_method": "直接读取官方标签对应源码目录。",
+      "observed_content": "候选所调用的会话与回合接口来自官方 app-server，而非新增自制历史协议。",
+      "direct": true,
+      "independence_group": "openai-source"
+    },
+    {
+      "id": "S5",
+      "origin": "internal",
+      "title": "真实用户对 A、B 站加载与交互的连续观察",
+      "location": "conversation-record:codexapp-rollout-2026-08",
+      "source_type": "interview-record",
+      "date": "2026-08-21",
+      "accessed_at": "2026-08-21",
+      "applicability": "提供登录、列表、对话、语言切换和发送延迟的真实体验基线，并定义不可接受的失败形态。",
+      "limitations": "观察网络环境会变化，需与服务器计时和浏览器测量配对。",
+      "retrieval_method": "读取用户在本任务中的原始反馈，不复制对话正文。",
+      "observed_content": "用户多次观察到 30 至 50 秒登录/首屏、空白对话、语言无反应和发送延迟，要求架构延迟尽可能低。",
+      "direct": true,
+      "independence_group": "real-user"
+    },
+    {
+      "id": "S6",
+      "origin": "internal",
+      "title": "生产 MCP 桥接实测",
+      "location": "runtime-test:verify-production-mcp-via-bridge",
+      "source_type": "test-observation",
+      "date": "2026-08-21",
+      "accessed_at": "2026-08-21",
+      "applicability": "验证已配置的 Skills 和 MCP 是否能从候选真实调用。",
+      "limitations": "Google Drive 仍需要用户完成 OAuth；邮件运行时的依赖漏洞需要单独处理。",
+      "retrieval_method": "通过候选桥接逐一调用已配置连接器并记录返回。",
+      "observed_content": "67 个 Skill 已加载；OpenAI 文档、GitHub、Gmail、Outlook、两套 AIALRA 邮箱与购物浏览器通过；Google Drive 返回未连接。",
+      "direct": true,
+      "independence_group": "mcp-bridge"
+    },
+    {
+      "id": "S7",
+      "origin": "internal",
+      "title": "隔离服务会话恢复耗时日志",
+      "location": "controlled-service-log:codexapp-official-149-isolated",
+      "source_type": "behavioral-data",
+      "date": "2026-08-21",
+      "accessed_at": "2026-08-21",
+      "applicability": "区分原始网络延迟、网页静态资源和 app-server 会话恢复耗时。",
+      "limitations": "当前样本来自单台 VPS 和有限轮次，不能代表所有地区网络。",
+      "retrieval_method": "读取隔离服务的结构化请求计时，并与浏览器里程碑对齐。",
+      "observed_content": "大对话的 thread/resume 约 32.4 秒、turns/list 约 29.7 秒，而缓存页约 0.7 至 2.5 秒，主要等待发生在服务器会话恢复路径。",
+      "direct": true,
+      "independence_group": "candidate-timing"
+    }
+  ],
+  "claims": [
+    {
+      "id": "C1",
+      "statement": "隔离候选确实运行 Codex 0.149.0 和官方渲染器 26.818.31338 build 6892，并通过仓库与官方资格测试。",
+      "kind": "fact",
+      "impact": "high",
+      "confidence": "high",
+      "support_source_ids": ["S1", "S2", "S3"],
+      "contradict_source_ids": [],
+      "falsifier": "运行产物版本、哈希或资格测试无法复现。"
+    },
+    {
+      "id": "C2",
+      "statement": "349MB 对话当前未达到 15 秒生产门禁；到达最新内容的实测为 46.7 至 127.4 秒。",
+      "kind": "fact",
+      "impact": "high",
+      "confidence": "high",
+      "support_source_ids": ["S1", "S5", "S7"],
+      "contradict_source_ids": [],
+      "falsifier": "同一候选连续 5 次冷启动均在 15 秒内完整到达最新内容。"
+    },
+    {
+      "id": "C3",
+      "statement": "现阶段大对话的主要额外延迟来自服务器会话恢复和回合列表处理，不是单纯的浏览器到 VPS 网络往返。",
+      "kind": "inference",
+      "impact": "high",
+      "confidence": "medium",
+      "support_source_ids": ["S1", "S7"],
+      "contradict_source_ids": [],
+      "falsifier": "分段追踪显示网络传输占总等待的大多数，而 app-server 处理在不同网络下始终低于门禁。"
+    },
+    {
+      "id": "C4",
+      "statement": "发送接受、后台继续、多语言、迁移附件、并发查看器和多数 MCP 已通过，但 Google Drive 尚未连接，因此全功能门禁仍未完成。",
+      "kind": "fact",
+      "impact": "high",
+      "confidence": "high",
+      "support_source_ids": ["S1", "S6"],
+      "contradict_source_ids": [],
+      "falsifier": "复测出现上述已通过能力退化，或 Google Drive 完成授权并通过真实调用。"
+    },
+    {
+      "id": "C5",
+      "statement": "当前不应把隔离候选升级到 B；日常工作应使用轻量续接对话，大对话保持只读可搜索档案。",
+      "kind": "inference",
+      "impact": "high",
+      "confidence": "high",
+      "support_source_ids": ["S1", "S3", "S5", "S6", "S7"],
+      "contradict_source_ids": [],
+      "falsifier": "大对话性能与未连接 MCP 同时通过既定门禁，且 A、B 回滚证据仍有效。"
+    }
+  ],
+  "assumptions": [
+    {
+      "id": "A1",
+      "statement": "15 秒是大对话可进入 B 站的硬门禁，而不是可被平均值或主观感觉替代的目标。",
+      "critical": true,
+      "status": "supported",
+      "decision_impact": "如果放宽门禁，升级决定会改变；当前按用户确认的严格标准执行。",
+      "falsifier": "决定所有者明确修改该门禁并接受相应体验风险。",
+      "support_source_ids": ["S5"],
+      "contradict_source_ids": []
+    },
+    {
+      "id": "A2",
+      "statement": "轻量续接对话加只读归档能保留工作连续性，而无需每次解析 349MB 原文。",
+      "critical": true,
+      "status": "uncertain",
+      "decision_impact": "如果轻量续接仍无法稳定工作，就不能把它作为当前日常路线。",
+      "falsifier": "连续真实工作出现关键上下文缺失、无法检索旧决定或轻量对话仍长期超过 10 秒。",
+      "support_source_ids": ["S1"],
+      "contradict_source_ids": []
+    },
+    {
+      "id": "A3",
+      "statement": "历史对话里提到的已删除 /tmp 测试截图不属于需要恢复的用户附件。",
+      "critical": false,
+      "status": "supported",
+      "decision_impact": "保持用户目录边界，避免为了消除无害警告扩大任意服务器文件读取权限。",
+      "falsifier": "用户确认该文件是必须保留的真实附件且能提供受控原件。",
+      "support_source_ids": ["S1"],
+      "contradict_source_ids": []
+    }
+  ],
+  "search_branches": [
+    { "name": "adjacent", "status": "pending", "reason": "", "round_ids": [] },
+    { "name": "code", "status": "pending", "reason": "", "round_ids": [] },
+    { "name": "failure", "status": "pending", "reason": "", "round_ids": [] },
+    { "name": "mechanism", "status": "pending", "reason": "", "round_ids": [] },
+    { "name": "patent", "status": "pending", "reason": "", "round_ids": [] },
+    { "name": "problem", "status": "pending", "reason": "", "round_ids": [] },
+    { "name": "product", "status": "pending", "reason": "", "round_ids": [] },
+    { "name": "research", "status": "pending", "reason": "", "round_ids": [] }
+  ],
+  "search_rounds": [],
+  "candidates": [],
+  "novelty": {
+    "applicable": false,
+    "applicability_reason": "本次任务是对已选官方版本进行部署资格验证，不包含原创性、竞品或唯一性主张。",
+    "assessment": "not-assessed",
+    "stop_reason": "not-applicable",
+    "saturation_round_ids": [],
+    "languages": [],
+    "regions": [],
+    "access_gaps": [],
+    "scope_statement": ""
+  },
+  "perspectives": [
+    {
+      "id": "P1",
+      "lens": "真实用户体验",
+      "producer": "lead-agent-user-evidence-review",
+      "producer_type": "lead-agent",
+      "producer_reference": "本轮用户反馈与浏览器计时",
+      "limitations": "不是独立代理复核，且网络地点有限。",
+      "independent": false,
+      "context_isolated": false,
+      "findings": [
+        "白屏和长时间等待仍是阻断日常工作的核心问题。",
+        "平均值不能掩盖最坏 127 秒的恢复。"
+      ],
+      "source_ids": ["S1", "S5"]
+    },
+    {
+      "id": "P2",
+      "lens": "系统维护与安全",
+      "producer": "lead-agent-maintainer-review",
+      "producer_type": "lead-agent",
+      "producer_reference": "服务隔离、附件边界与回滚检查",
+      "limitations": "与实施者同源，不构成独立审查。",
+      "independent": false,
+      "context_isolated": false,
+      "findings": ["A、B 未被升级，回滚边界仍在。", "不应为旧 /tmp 测试文件扩大读取权限。"],
+      "source_ids": ["S1", "S2"]
+    },
+    {
+      "id": "P3",
+      "lens": "官方路线一致性",
+      "producer": "lead-agent-official-source-review",
+      "producer_type": "lead-agent",
+      "producer_reference": "官方发布说明、源码与候选版本核对",
+      "limitations": "官方改进不等于本部署环境的性能承诺。",
+      "independent": false,
+      "context_isolated": false,
+      "findings": ["候选使用目标官方稳定引擎。", "现有实测仍必须优先于发布说明。"],
+      "source_ids": ["S2", "S3", "S4"]
+    }
+  ],
+  "real_world_validations": [
+    {
+      "id": "V1",
+      "role": "主要使用者",
+      "participant_reference": "AIALRA 决定所有者",
+      "method": "从真实网络登录并操作 A、B 网站，报告首屏、列表、对话、语言和发送体验。",
+      "conducted_at": "2026-08-21",
+      "outcome": "确认现有长等待、白屏和状态不同步不可接受，要求先通过明确门禁再升级。",
+      "limitations": "用户尚未在最终隔离候选上完成长周期日常工作封测。",
+      "status": "completed",
+      "evidence_source_ids": ["S5"]
+    },
+    {
+      "id": "V2",
+      "role": "隔离环境操作者",
+      "participant_reference": "自动化浏览器与服务器探针",
+      "method": "打开真实 349MB 对话、并发查看、发送、关闭浏览器后继续执行并切换四种语言。",
+      "conducted_at": "2026-08-21",
+      "outcome": "功能路径大部分成功，但大对话性能门禁失败。",
+      "limitations": "自动化不能替代数日的人工真实工作。",
+      "status": "completed",
+      "evidence_source_ids": ["S1", "S7"]
+    }
+  ],
+  "alignment_questions": [
+    {
+      "id": "U1",
+      "question": "大对话未通过 15 秒门禁时是否仍允许升级 B？",
+      "decision_changing": true,
+      "status": "answered",
+      "answer": "不允许；先保持 A、B 原样并使用轻量续接。"
+    },
+    {
+      "id": "U2",
+      "question": "是否可以用更多磁盘代替大对话恢复架构修复？",
+      "decision_changing": false,
+      "status": "answered",
+      "answer": "不可以；磁盘只保留必要回滚和用户数据。"
+    }
+  ],
+  "recommendation": {
+    "verdict": "reframe",
+    "action": "不升级 B。把日常工作入口改为轻量续接对话，把 349MB 原对话保留为只读可搜索档案；继续在隔离环境定位官方恢复链路的服务器耗时，并完成 Google Drive 授权复测。",
+    "rationale": "候选的版本、完整性、交互、多语言、附件、后台执行和多数 MCP 已有直接证据，但最重要的 349MB 性能门禁明确失败，且一个用户要求的 MCP 尚未连接。",
+    "strongest_counterevidence": "官方 0.149.0 已包含与旧历史扫描和可见行渲染相关的改进，轻量对话也能工作；这说明升级路线有价值，但不足以覆盖本环境 46.7 至 127.4 秒的真实大对话结果。",
+    "minimum_test": "同一正式候选连续 5 次冷启动 349MB 对话均在 15 秒内到达最新内容；刷新、重启、发送、后台、多语言、附件、权限、Skill 和所有 MCP 同时通过且不产生重复对话。",
+    "failure_response": "任一硬门禁失败就停止生产升级，保留隔离证据，继续使用 A 和轻量续接；不向 0.147 堆补丁，也不扩大文件权限。",
+    "reversal_condition": "大对话性能和 Google Drive 两个当前阻断项全部通过，且 A、B 服务、对话校验值和上一版本回滚证据仍完好时，重新审计是否升级 B。",
+    "support_source_ids": ["S1", "S2", "S5", "S6", "S7"],
+    "counter_source_ids": ["S3", "S4"]
+  },
+  "review_triggers": [
+    "同一候选出现连续 5 次大对话冷启动不超过 15 秒的证据。",
+    "Google Drive 完成 OAuth 并通过真实文件读取测试。",
+    "轻量续接对话连续两次打开超过 10 秒或出现上下文缺失。",
+    "候选出现白屏、重复对话、后台任务中断、附件或语言退化。",
+    "OpenAI 发布新的稳定 Codex 引擎或官方网页版本。"
+  ]
+}

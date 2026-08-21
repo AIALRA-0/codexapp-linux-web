@@ -1,0 +1,144 @@
+{
+  "asOf": "2026-08-21T02:55:00-07:00",
+  "candidate": {
+    "service": "codexapp-official-149-isolated.service",
+    "port": 13027,
+    "release": "20260821T113900Z-149-legacy-browser-path",
+    "officialRendererVersion": "26.818.31338",
+    "officialRendererBuild": "6892",
+    "officialRendererTreeSha256": "5beb226fd5404f19cae411d98a62f65ffa1221ae46c6c014fc12cea56ac6eb91",
+    "codexVersion": "0.149.0"
+  },
+  "releaseQualification": {
+    "sourceBoundaryAndCredentialScan": "passed",
+    "format": "passed",
+    "lint": "passed",
+    "typecheck": "passed",
+    "repositoryTests": {
+      "passed": 277,
+      "skipped": 12,
+      "total": 289
+    },
+    "officialQualificationTests": {
+      "passed": 288,
+      "skipped": 1,
+      "total": 289
+    },
+    "contractMethods": 21,
+    "contractSourceVerified": true,
+    "developmentDependencyVulnerabilities": 0,
+    "productionDependencyVulnerabilities": 0
+  },
+  "largeConversation": {
+    "identifier": "archived-large-conversation",
+    "bytes": 349158350,
+    "sourceAndCandidateSha256Match": true,
+    "coldAndNearColdRunsMs": [
+      {
+        "visibleShell": 2598,
+        "titleOrFirstText": 11662,
+        "latestKnownText": 57232,
+        "olderKnownText": 103514
+      },
+      {
+        "visibleShell": 3816,
+        "titleOrFirstText": 10654,
+        "latestKnownText": 46666,
+        "olderKnownText": 95111
+      }
+    ],
+    "worstObservedLatestKnownTextMs": 127444,
+    "pageErrors": 0,
+    "failedLocalAssets": 0,
+    "olderHistoryLoadedOnDemand": true,
+    "promotionThresholdMs": 15000,
+    "promotionPerformanceGate": "failed"
+  },
+  "attachments": {
+    "migratedServerAttachment": {
+      "bytes": 105238,
+      "sourceAndServedSha256Match": true,
+      "httpStatus": 200,
+      "desktopReadObservedWithoutCorrespondingFailure": true
+    },
+    "migratedMacClipboardAttachment": {
+      "bytes": 202007,
+      "sourceAndServedSha256Match": true,
+      "httpStatus": 200
+    },
+    "intentionallyRejectedHistoricalTestArtifact": {
+      "pathKind": "server-temporary",
+      "basename": "codexapp-production-ui-open-thread-smoke.png",
+      "reason": "The historical transcript contains a command mentioning a removed /tmp test screenshot; it is not a user attachment and remains outside the user root."
+    }
+  },
+  "lightweightConversation": {
+    "identifier": "lightweight-continuation",
+    "coldRunsMs": [15590, 21997, 13224],
+    "reloadRunsMs": [8000, 11600],
+    "secondBrowserRunMs": 12512,
+    "concurrentViewerQualification": {
+      "attempts": 3,
+      "passed": 3,
+      "firstViewerVisibleMs": [18261, 24281, 13164],
+      "secondViewerVisibleMs": [20915, 30152, 21874],
+      "activeWriterConflicts": 0,
+      "pageOrHttpErrors": 0
+    }
+  },
+  "interaction": {
+    "sendAcceptedMs": 108,
+    "firstOutputMs": 4706,
+    "turnCompleteMs": 5190,
+    "backgroundCompletionAfterBrowserDisconnectMs": 24754,
+    "backgroundCompletionPassed": true
+  },
+  "locales": {
+    "tested": ["zh-CN", "zh-TW", "ja-JP", "fr-FR"],
+    "allAppliedAndPersistedAfterReload": true
+  },
+  "skillsAndMcp": {
+    "skillCount": 67,
+    "passed": [
+      "OpenAI developer documentation",
+      "GitHub",
+      "Gmail",
+      "Outlook Email",
+      "AIALRA Google Email account 1",
+      "AIALRA Google Email account 2",
+      "AIALRA Shopping Browser"
+    ],
+    "failed": ["Google Drive: not connected"],
+    "aialraEmailRuntimeDependencyVulnerabilities": {
+      "moderate": 3,
+      "high": 4
+    }
+  },
+  "productionIsolation": {
+    "aService": "newcodexapp-controller.service",
+    "bService": "codexapp-official-web-host.service",
+    "aAndBPromoted": false,
+    "aBAndCandidateActive": true,
+    "aBAndCandidateAutomaticRestartCount": 0
+  },
+  "storage": {
+    "filesystemTotal": "387GB",
+    "usedBeforeCleanup": "289GB",
+    "availableBeforeCleanup": "98GB",
+    "usedAfterCleanup": "223GB",
+    "availableAfterCleanup": "165GB",
+    "obsoleteReleaseDirectoriesRemoved": 79,
+    "retainedReleasePolicy": "current plus one previous for A, B, and the isolated candidate",
+    "retainedDataBackups": [
+      "A previous state: 586MB",
+      "B previous state: 8.7GB",
+      "unique encrypted old-conversation archive: 1.9GB"
+    ]
+  },
+  "decision": {
+    "verdict": "reframe",
+    "promoteCandidateToB": false,
+    "dailyWorkRoute": "Use a lightweight continuation conversation and keep the 349MB transcript as a read-only searchable archive.",
+    "reason": "Functional integrity is substantially verified, but the 349MB conversation needs 46.7-127.4 seconds to reach its latest content and Google Drive remains disconnected."
+  }
+}

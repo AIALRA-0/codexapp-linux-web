@@ -4,16 +4,19 @@ import sharp from 'sharp';
 const baseUrl = process.env.SMOKE_BASE_URL;
 const browserExecutable = process.env.BROWSER_EXECUTABLE;
 const proxySecret = process.env.SMOKE_PROXY_SECRET;
+const proxySecretHeader = process.env.SMOKE_PROXY_SECRET_HEADER ?? 'X-Aialra-Proxy-Secret';
 const screenshotPath = process.env.SMOKE_SCREENSHOT_PATH;
 const initialPath = process.env.SMOKE_INITIAL_PATH ?? '/';
 const expectedText = optionalEnvironmentValue('SMOKE_EXPECTED_TEXT');
 const expectedConversationText = optionalEnvironmentValue('SMOKE_EXPECTED_CONVERSATION_TEXT');
+const olderConversationText = optionalEnvironmentValue('SMOKE_OLDER_CONVERSATION_TEXT');
 const clickText = optionalEnvironmentValue('SMOKE_CLICK_TEXT');
 const afterClickText = optionalEnvironmentValue('SMOKE_AFTER_CLICK_TEXT');
 const expectedLocale = optionalEnvironmentValue('SMOKE_EXPECTED_LOCALE');
 const waitForTextGone = optionalEnvironmentValue('SMOKE_WAIT_FOR_TEXT_GONE');
 const postAssertWaitMs = Number(process.env.SMOKE_POST_ASSERT_WAIT_MS ?? '0');
 const contentTimeoutMs = Number(process.env.SMOKE_CONTENT_TIMEOUT_MS ?? '120000');
+const olderHistoryTimeoutMs = Number(process.env.SMOKE_OLDER_HISTORY_TIMEOUT_MS ?? '180000');
 const smokeSubject = process.env.SMOKE_SUBJECT ?? 'official-ui-smoke-subject';
 const smokeUsername = process.env.SMOKE_USERNAME ?? 'official-ui-smoke';
 const smokeEmail = process.env.SMOKE_EMAIL ?? 'official-ui-smoke@example.invalid';
@@ -29,8 +32,15 @@ const switchLocaleSequence = parseLocaleSwitchSequence(
 );
 const verifyLocaleAfterReload = process.env.SMOKE_VERIFY_LOCALE_AFTER_RELOAD === '1';
 const requireCompressedMainAsset = process.env.SMOKE_REQUIRE_COMPRESSED_MAIN_ASSET === '1';
+const reloadCount = Number(process.env.SMOKE_RELOAD_COUNT ?? '0');
 if (baseUrl === undefined || browserExecutable === undefined) {
   throw new Error('SMOKE_BASE_URL and BROWSER_EXECUTABLE are required');
+}
+if (!/^[!#$%&'*+.^_`|~0-9A-Za-z-]+$/u.test(proxySecretHeader)) {
+  throw new Error('SMOKE_PROXY_SECRET_HEADER must be a valid HTTP header name');
+}
+if (!Number.isInteger(reloadCount) || reloadCount < 0 || reloadCount > 10) {
+  throw new Error('SMOKE_RELOAD_COUNT must be an integer from 0 through 10');
 }
 
 const browser = await chromium.launch({
@@ -41,7 +51,7 @@ const browser = await chromium.launch({
 const context = await browser.newContext({
   extraHTTPHeaders: {
     'X-Aialra-Authenticated': '1',
-    ...(proxySecret === undefined ? {} : { 'X-Aialra-Proxy-Secret': proxySecret }),
+    ...(proxySecret === undefined ? {} : { [proxySecretHeader]: proxySecret }),
     'X-Aialra-Sub': smokeSubject,
     'X-Aialra-User': smokeUsername,
     'X-Aialra-Email': smokeEmail,
@@ -68,6 +78,9 @@ let clickedAtMs;
 let afterClickTextVisibleAtMs;
 let waitedTextGoneAtMs;
 let settingsMenuInspection;
+const reloadResults = [];
+let olderTextVisibleAtMs;
+let olderScrollAttempts = 0;
 
 page.on('pageerror', (error) => pageErrors.push(error.message));
 page.on('response', (response) => {
@@ -176,6 +189,68 @@ try {
     );
     reportProgress('conversation-text-visible');
   }
+  if (olderConversationText !== undefined) {
+    const olderHistoryDeadline = Date.now() + olderHistoryTimeoutMs;
+    while (Date.now() < olderHistoryDeadline) {
+      const olderTextVisible = await page.evaluate(
+        (text) =>
+          Array.from(document.querySelectorAll('body *')).some((element) => {
+            if (!(element instanceof HTMLElement)) return false;
+            if (!(element.innerText ?? '').includes(text)) return false;
+            const rect = element.getBoundingClientRect();
+            const style = getComputedStyle(element);
+            return (
+              rect.width > 0 &&
+              rect.height > 0 &&
+              rect.left >= 275 &&
+              rect.bottom > 100 &&
+              rect.top < innerHeight &&
+              style.display !== 'none' &&
+              style.visibility !== 'hidden' &&
+              style.opacity !== '0'
+            );
+          }),
+        olderConversationText,
+      );
+      if (olderTextVisible) {
+        olderTextVisibleAtMs = Date.now();
+        reportProgress('older-conversation-text-visible');
+        break;
+      }
+      olderScrollAttempts += 1;
+      await page.mouse.move(850, 420);
+      await page.mouse.wheel(0, -1_200);
+      await page.evaluate(() => {
+        const candidates = Array.from(document.querySelectorAll('body *'))
+          .filter((element) => {
+            if (!(element instanceof HTMLElement)) return false;
+            const style = getComputedStyle(element);
+            return (
+              element.scrollHeight > element.clientHeight + 100 &&
+              (style.overflowY === 'auto' || style.overflowY === 'scroll')
+            );
+          })
+          .sort(
+            (left, right) =>
+              right.scrollHeight - right.clientHeight - (left.scrollHeight - left.clientHeight),
+          );
+        const scroller = candidates[0];
+        if (scroller instanceof HTMLElement && scroller.scrollTop > 0) {
+          scroller.scrollTop = Math.max(
+            0,
+            scroller.scrollTop - Math.max(scroller.clientHeight, 800),
+          );
+          scroller.dispatchEvent(new Event('scroll', { bubbles: true }));
+        }
+      });
+      await page.waitForTimeout(250);
+    }
+    if (olderTextVisibleAtMs === undefined) {
+      throw new Error(
+        `older conversation text did not load after ${String(olderScrollAttempts)} upward scroll attempts`,
+      );
+    }
+  }
 
   if (expectedLocale !== undefined) {
     await page.waitForFunction(
@@ -200,6 +275,52 @@ try {
   if (Number.isFinite(postAssertWaitMs) && postAssertWaitMs > 0) {
     await page.waitForTimeout(Math.min(postAssertWaitMs, 180_000));
     reportProgress('post-assert-wait-completed');
+  }
+  for (let reloadAttempt = 1; reloadAttempt <= reloadCount; reloadAttempt += 1) {
+    const reloadStartedAtMs = Date.now();
+    bridgeReady = false;
+    await page.reload({ waitUntil: 'domcontentloaded', timeout: 45_000 });
+    const reloadDomContentLoadedAtMs = Date.now();
+    await page.waitForFunction(
+      (version) =>
+        window.__CODEX_BROWSER_BOOTSTRAP__?.rendererVersion === version &&
+        document.body.childElementCount > 0,
+      expectedRendererVersion,
+      { timeout: 120_000 },
+    );
+    await waitFor(() => bridgeReady, 30_000);
+    if (expectedText !== undefined) {
+      await page.waitForFunction((text) => document.body.innerText.includes(text), expectedText, {
+        timeout: contentTimeoutMs,
+      });
+    }
+    if (expectedConversationText !== undefined) {
+      await page.waitForFunction(
+        (text) => document.body.innerText.includes(text),
+        expectedConversationText,
+        { timeout: contentTimeoutMs },
+      );
+    }
+    const bodyText = await page.locator('body').innerText();
+    const failureMarkers = [
+      '当前对话加载失败',
+      'Conversation opened in another app',
+      'Conversation ouverte dans une autre application',
+      '与服务器的连接已断开',
+    ].filter((marker) => bodyText.includes(marker));
+    if (failureMarkers.length > 0) {
+      throw new Error(
+        `official renderer failed after reload: ${JSON.stringify({ reloadAttempt, failureMarkers })}`,
+      );
+    }
+    reloadResults.push({
+      attempt: reloadAttempt,
+      domContentLoadedMs: reloadDomContentLoadedAtMs - reloadStartedAtMs,
+      contentVisibleMs: Date.now() - reloadStartedAtMs,
+      bodyTextLength: bodyText.length,
+      documentLocale: await page.evaluate(() => document.documentElement.lang),
+    });
+    reportProgress(`reload-${String(reloadAttempt)}-complete`);
   }
 
   const renderer = await page.evaluate(() => ({
@@ -492,9 +613,12 @@ try {
       bodyTextLength: renderer.bodyTextLength,
       expectedTextAsserted: expectedText !== undefined,
       expectedConversationTextAsserted: expectedConversationText !== undefined,
+      olderConversationTextAsserted: olderConversationText !== undefined,
+      olderScrollAttempts,
       afterClickTextAsserted: afterClickText !== undefined,
       waitedTextGone: waitForTextGone === undefined ? null : true,
       settingsMenuInspection,
+      reloadResults,
       screenshotBytes: screenshot.length,
       screenshotMaximumChannelDeviation: Math.round(maximumChannelDeviation * 100) / 100,
       localAssetFailures: failedLocalRequests.length,
@@ -504,6 +628,7 @@ try {
         bridgeReady: elapsed(bridgeReadyAtMs),
         rendererMounted: elapsed(rendererMountedAtMs),
         expectedTextVisible: elapsed(expectedTextVisibleAtMs),
+        olderTextVisible: elapsed(olderTextVisibleAtMs),
         clickTargetVisible: elapsed(clickTargetVisibleAtMs),
         clicked: elapsed(clickedAtMs),
         afterClickTextVisible: elapsed(afterClickTextVisibleAtMs),
