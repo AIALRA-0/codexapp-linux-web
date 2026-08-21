@@ -17,6 +17,13 @@ import { Readable, Writable } from 'node:stream';
 import { pipeline } from 'node:stream/promises';
 import { MessageChannel, Worker, type MessagePort } from 'node:worker_threads';
 
+import {
+  officialGitExportNames,
+  readQualifiedOfficialVersion,
+} from './official-export-contract.js';
+import { loadQualifiedLocalExecutionHostRpc } from './official-main-contract.js';
+import { resolveOfficialSharedModulePath } from './official-shared-module.js';
+
 interface OfficialRpcSession {
   [Symbol.dispose](): void;
 }
@@ -87,8 +94,7 @@ export class OfficialGithubService {
   readonly #service: OfficialGithubServiceTarget;
 
   constructor(options: OfficialGitWorkerOptions) {
-    const sharedPath = join(options.sourceRoot, '.vite', 'build', 'src-DChWimf7.js');
-    const shared = require(sharedPath) as Partial<OfficialSharedModule>;
+    const shared = loadOfficialGitModule(options.sourceRoot);
     if (typeof shared.D !== 'function' || typeof shared.F !== 'function') {
       throw new Error('qualified official GitHub service exports changed');
     }
@@ -256,9 +262,8 @@ export class OfficialGitWorker extends EventEmitter {
       mkdir(join(this.options.userRoot, 'home'), { recursive: true, mode: 0o700 }),
       mkdir(join(this.options.userRoot, 'tmp'), { recursive: true, mode: 0o700 }),
     ]);
-    const sharedPath = join(this.options.sourceRoot, '.vite', 'build', 'src-DChWimf7.js');
     const workerPath = join(this.options.sourceRoot, '.vite', 'build', 'worker.js');
-    const shared = require(sharedPath) as Partial<OfficialSharedModule>;
+    const shared = loadOfficialGitModule(this.options.sourceRoot);
     if (typeof shared.At !== 'function' || typeof shared.I !== 'function') {
       throw new Error('qualified official worker RPC exports changed');
     }
@@ -370,6 +375,25 @@ export class OfficialGitWorker extends EventEmitter {
   }
 }
 
+function loadOfficialGitModule(sourceRoot: string): Partial<OfficialSharedModule> {
+  const sharedPath = resolveOfficialSharedModulePath(sourceRoot);
+  const raw = require(sharedPath) as Record<string, unknown>;
+  const version = readQualifiedOfficialVersion(sourceRoot);
+  const names = officialGitExportNames(version);
+  const localExecutionHostRpc =
+    version === '26.810.41047'
+      ? loadQualifiedLocalExecutionHostRpc(sourceRoot)
+      : names.localExecutionHostRpc === null
+        ? undefined
+        : raw[names.localExecutionHostRpc];
+  return {
+    At: raw[names.attachRpc] as OfficialSharedModule['At'],
+    D: raw[names.githubService] as OfficialSharedModule['D'],
+    F: raw[names.gitManager] as OfficialSharedModule['F'],
+    I: localExecutionHostRpc as OfficialSharedModule['I'],
+  };
+}
+
 class LocalGithubAppServerClient {
   readonly id = 'local';
   readonly isLocal = true;
@@ -440,9 +464,14 @@ class LocalExecutionHost {
       });
       throw error;
     }
+    const explicitRepository = normalizeExplicitGitDirectory(
+      options.args,
+      options.cwd,
+      options.env,
+    );
     const child = spawn(command, args, {
-      cwd: options.cwd,
-      env: mergeSpawnEnvironment(this.workerEnvironment, options.env),
+      cwd: explicitRepository.cwd,
+      env: mergeSpawnEnvironment(this.workerEnvironment, explicitRepository.env),
       detached: process.platform !== 'win32',
       stdio: ['pipe', 'pipe', 'pipe'],
     });
@@ -609,6 +638,58 @@ class LocalExecutionHost {
     if (isWithin(absolute, this.#root) || isWithin(absolute, this.#canonicalRoot)) return;
     this.#assertAllowedPath(absolute, 'stat');
   }
+}
+
+/**
+ * Git 2.43 treats running from a repository's `.git` directory as implicit
+ * bare-repository discovery when `safe.bareRepository=explicit` is enabled.
+ * The current official desktop Git module intentionally enables that guard and
+ * reads repository-scoped configuration from the common Git directory. Make
+ * the same repository explicit through Git's standard environment boundary;
+ * the official command and its safety setting remain unchanged.
+ */
+function normalizeExplicitGitDirectory(
+  args: string[],
+  cwd: string,
+  env: Record<string, string>,
+): { cwd: string; env: Record<string, string> } {
+  if (
+    process.platform !== 'linux' ||
+    basename(args[0] ?? '') !== 'git' ||
+    gitSubcommand(args) !== 'config' ||
+    !args.includes('safe.bareRepository=explicit') ||
+    basename(cwd) !== '.git' ||
+    env.GIT_DIR !== undefined ||
+    env.GIT_WORK_TREE !== undefined
+  ) {
+    return { cwd, env };
+  }
+  try {
+    if (!statSync(join(cwd, 'config')).isFile()) return { cwd, env };
+  } catch {
+    return { cwd, env };
+  }
+  return {
+    cwd: dirname(cwd),
+    env: {
+      ...env,
+      GIT_DIR: cwd,
+      GIT_WORK_TREE: dirname(cwd),
+    },
+  };
+}
+
+function gitSubcommand(args: string[]): string | null {
+  for (let index = 1; index < args.length; index += 1) {
+    const argument = args[index];
+    if (argument === '-c') {
+      index += 1;
+      continue;
+    }
+    if (argument?.startsWith('-') === true) continue;
+    return argument ?? null;
+  }
+  return null;
 }
 
 class LocalSpawnResult {

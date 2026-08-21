@@ -97,6 +97,7 @@ describe('official ChatGPT project file synchronization', () => {
     await expect(readFile(join(result.rootPath, 'AGENTS.md'), 'utf8')).resolves.toContain(
       'Use the supplied reference files.',
     );
+    expect((await stat(join(result.rootPath, 'AGENTS.md'))).mode & 0o777).toBe(0o444);
     expect((await stat(join(sourcesPath, 'bad_name.txt'))).mode & 0o777).toBe(0o444);
     const metadataPath = join(codexHome, '.chatgpt-projects', '.metadata', 'project-1.json');
     expect((await stat(metadataPath)).mode & 0o777).toBe(0o600);

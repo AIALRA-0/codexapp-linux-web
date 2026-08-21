@@ -20,6 +20,7 @@ export interface AppServerClientOptions {
   extraArgs?: string[];
   environment?: NodeJS.ProcessEnv;
   requestTimeoutMs?: number;
+  signalProcessGroup?: (pid: number, signal: NodeJS.Signals | 0) => boolean;
   spawnProcess?: (
     command: string,
     args: readonly string[],
@@ -47,6 +48,7 @@ export class CodexAppServerClient extends EventEmitter {
   #pending = new Map<JsonRpcId, PendingRequest>();
   #ready = false;
   #stopping = false;
+  #processGroupPid: number | undefined;
 
   constructor(options: AppServerClientOptions) {
     super();
@@ -80,6 +82,7 @@ export class CodexAppServerClient extends EventEmitter {
       },
       stdio: ['pipe', 'pipe', 'pipe'],
       windowsHide: true,
+      detached: process.platform !== 'win32',
     };
     const child = spawnImplementation(
       this.options.codexBin,
@@ -91,12 +94,19 @@ export class CodexAppServerClient extends EventEmitter {
       throw new Error('app-server did not expose all stdio streams');
     }
     this.#child = child;
+    if (
+      process.platform !== 'win32' &&
+      child.pid !== undefined &&
+      (this.options.spawnProcess === undefined || this.options.signalProcessGroup !== undefined)
+    ) {
+      this.#processGroupPid = child.pid;
+    }
     this.#wireProcess(this.#child);
 
     await this.request('initialize', {
       clientInfo: {
-        name: 'codexapp-official-web-host',
-        title: 'CodexApp Official Web Host',
+        name: 'codex_desktop',
+        title: 'Codex Desktop',
         version: this.options.clientVersion,
       },
       capabilities: {
@@ -111,24 +121,21 @@ export class CodexAppServerClient extends EventEmitter {
   async stop(graceMs = 5_000): Promise<void> {
     const child = this.#child;
     if (child === undefined) return;
+    const processGroupPid = this.#processGroupPid;
     this.#stopping = true;
     child.stdin.end();
 
-    if (child.exitCode === null && child.signalCode === null) {
-      const exited = new Promise<void>((resolve) => {
-        child.once('exit', () => resolve());
-      });
-      const timeout = new Promise<void>((resolve) => {
-        const timer = setTimeout(resolve, graceMs);
-        timer.unref();
-      });
-      await Promise.race([exited, timeout]);
-    }
-    if (child.exitCode === null && child.signalCode === null) {
+    await waitForChildExit(child, graceMs);
+    if (processGroupPid !== undefined) {
+      await this.#terminateProcessGroup(processGroupPid);
+    } else if (child.exitCode === null && child.signalCode === null) {
       child.kill('SIGTERM');
+      await waitForChildExit(child, 2_000);
+      if (child.exitCode === null && child.signalCode === null) child.kill('SIGKILL');
     }
     this.#ready = false;
     this.#child = undefined;
+    this.#processGroupPid = undefined;
   }
 
   async request(method: string, params?: unknown, timeoutMs?: number): Promise<unknown> {
@@ -196,8 +203,26 @@ export class CodexAppServerClient extends EventEmitter {
         pending.reject(error);
       }
       this.#pending.clear();
-      if (!this.#stopping) this.emit('exit', { code, signal });
+      if (!this.#stopping) {
+        const processGroupPid = this.#processGroupPid;
+        if (processGroupPid !== undefined) {
+          void this.#terminateProcessGroup(processGroupPid).catch((cleanupError: unknown) => {
+            this.emit('process-cleanup-error', cleanupError);
+          });
+        }
+        this.emit('exit', { code, signal });
+      }
     });
+  }
+
+  async #terminateProcessGroup(processGroupPid: number): Promise<void> {
+    const signalGroup = this.options.signalProcessGroup ?? signalPosixProcessGroup;
+    const signaled = signalGroup(processGroupPid, 'SIGTERM');
+    if (signaled) {
+      const groupExited = await waitForProcessGroupExit(processGroupPid, signalGroup, 2_000);
+      if (!groupExited) signalGroup(processGroupPid, 'SIGKILL');
+    }
+    if (this.#processGroupPid === processGroupPid) this.#processGroupPid = undefined;
   }
 
   #handleLine(line: string): void {
@@ -264,4 +289,51 @@ export class CodexAppServerClient extends EventEmitter {
       });
     });
   }
+}
+
+async function waitForChildExit(
+  child: ChildProcessWithoutNullStreams,
+  timeoutMs: number,
+): Promise<boolean> {
+  if (child.exitCode !== null || child.signalCode !== null) return true;
+  return new Promise<boolean>((resolve) => {
+    let settled = false;
+    const finish = (value: boolean) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      child.off('exit', onExit);
+      resolve(value);
+    };
+    const onExit = () => finish(true);
+    const timer = setTimeout(() => finish(false), timeoutMs);
+    timer.unref();
+    child.once('exit', onExit);
+  });
+}
+
+function signalPosixProcessGroup(pid: number, signal: NodeJS.Signals | 0): boolean {
+  try {
+    process.kill(-pid, signal);
+    return true;
+  } catch (error) {
+    if (error instanceof Error && 'code' in error && error.code === 'ESRCH') return false;
+    throw error;
+  }
+}
+
+async function waitForProcessGroupExit(
+  pid: number,
+  signalGroup: (pid: number, signal: NodeJS.Signals | 0) => boolean,
+  timeoutMs: number,
+): Promise<boolean> {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    if (!signalGroup(pid, 0)) return true;
+    await new Promise<void>((resolve) => {
+      const timer = setTimeout(resolve, 25);
+      timer.unref();
+    });
+  }
+  return !signalGroup(pid, 0);
 }

@@ -1,0 +1,38 @@
+[Unit]
+Description=Loopback OpenAI egress bridge for CodexApp
+Requires=warp-svc.service
+After=network-online.target warp-svc.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=privoxy
+Group=nogroup
+ExecStart=/usr/sbin/privoxy --no-daemon /etc/privoxy/codexapp-openai-egress.config
+Restart=on-failure
+RestartSec=3
+UMask=0077
+TasksMax=128
+MemoryMax=256M
+
+NoNewPrivileges=true
+PrivateTmp=true
+PrivateDevices=true
+ProtectSystem=strict
+ProtectHome=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectKernelLogs=true
+ProtectControlGroups=true
+ProtectClock=true
+RestrictSUIDSGID=true
+RestrictRealtime=true
+LockPersonality=true
+CapabilityBoundingSet=
+AmbientCapabilities=
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+SystemCallArchitectures=native
+SystemCallFilter=@system-service
+
+[Install]
+WantedBy=multi-user.target

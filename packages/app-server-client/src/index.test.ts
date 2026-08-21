@@ -1,6 +1,6 @@
 import { PassThrough } from 'node:stream';
 import { EventEmitter } from 'node:events';
-import type { ChildProcessWithoutNullStreams } from 'node:child_process';
+import type { ChildProcessWithoutNullStreams, SpawnOptions } from 'node:child_process';
 import { describe, expect, it } from 'vitest';
 
 import { CodexAppServerClient } from './index.js';
@@ -27,9 +27,14 @@ describe('CodexAppServerClient', () => {
   it('initializes using newline-delimited JSON-RPC', async () => {
     const { child, stdout } = fakeChild();
     const writes: string[] = [];
+    let spawnOptions: SpawnOptions | undefined;
     child.stdin.on('data', (chunk: Buffer) => {
       writes.push(chunk.toString());
-      const request = JSON.parse(chunk.toString()) as { id?: number; method: string };
+      const request = JSON.parse(chunk.toString()) as {
+        id?: number;
+        method: string;
+        params?: { clientInfo?: { name?: string; title?: string; version?: string } };
+      };
       if (request.id !== undefined) {
         stdout.write(`${JSON.stringify({ id: request.id, result: {} })}\n`);
       }
@@ -39,7 +44,14 @@ describe('CodexAppServerClient', () => {
       codexHome: '/tmp/codex-home',
       cwd: '/tmp',
       clientVersion: '0.1.0',
-      spawnProcess: () => child,
+      environment: {
+        HOME: '/tmp/user-home',
+        XDG_CONFIG_HOME: '/tmp/user-home/.config',
+      },
+      spawnProcess: (_command, _args, options) => {
+        spawnOptions = options;
+        return child;
+      },
     });
 
     await client.start();
@@ -47,6 +59,19 @@ describe('CodexAppServerClient', () => {
     expect(client.ready).toBe(true);
     expect(writes).toHaveLength(2);
     expect(writes[0]).toContain('"method":"initialize"');
+    const initializeRequest = JSON.parse(writes[0]!) as {
+      params?: { clientInfo?: { name?: string; title?: string; version?: string } };
+    };
+    expect(initializeRequest.params?.clientInfo).toEqual({
+      name: 'codex_desktop',
+      title: 'Codex Desktop',
+      version: '0.1.0',
+    });
+    expect(spawnOptions?.env).toMatchObject({
+      CODEX_HOME: '/tmp/codex-home',
+      HOME: '/tmp/user-home',
+      XDG_CONFIG_HOME: '/tmp/user-home/.config',
+    });
     expect(writes[1]).toContain('"method":"initialized"');
   });
 
@@ -107,5 +132,71 @@ describe('CodexAppServerClient', () => {
 
     expect(client.ready).toBe(true);
     expect(spawnIndex).toBe(2);
+  });
+
+  it('starts a dedicated process group and stops every descendant', async () => {
+    const { child, stdout } = fakeChild();
+    child.stdin.on('data', (chunk: Buffer) => {
+      const request = JSON.parse(chunk.toString()) as { id?: number };
+      if (request.id !== undefined) {
+        stdout.write(`${JSON.stringify({ id: request.id, result: {} })}\n`);
+      }
+    });
+    let spawnOptions: SpawnOptions | undefined;
+    const signals: Array<NodeJS.Signals | 0> = [];
+    let groupAlive = true;
+    const client = new CodexAppServerClient({
+      codexBin: '/bin/codex',
+      codexHome: '/tmp/codex-home',
+      cwd: '/tmp',
+      clientVersion: '0.1.0',
+      spawnProcess: (_command, _args, options) => {
+        spawnOptions = options;
+        return child;
+      },
+      signalProcessGroup: (_pid, signal) => {
+        signals.push(signal);
+        if (signal === 'SIGTERM') groupAlive = false;
+        return groupAlive || signal === 'SIGTERM';
+      },
+    });
+
+    await client.start();
+    await client.stop(1);
+
+    expect(spawnOptions?.detached).toBe(process.platform !== 'win32');
+    expect(signals).toEqual(['SIGTERM', 0]);
+    expect(client.ready).toBe(false);
+  });
+
+  it('cleans descendants when the app-server parent exits unexpectedly', async () => {
+    const { child, stdout } = fakeChild();
+    child.stdin.on('data', (chunk: Buffer) => {
+      const request = JSON.parse(chunk.toString()) as { id?: number };
+      if (request.id !== undefined) {
+        stdout.write(`${JSON.stringify({ id: request.id, result: {} })}\n`);
+      }
+    });
+    const signals: Array<NodeJS.Signals | 0> = [];
+    let groupAlive = true;
+    const client = new CodexAppServerClient({
+      codexBin: '/bin/codex',
+      codexHome: '/tmp/codex-home',
+      cwd: '/tmp',
+      clientVersion: '0.1.0',
+      spawnProcess: () => child,
+      signalProcessGroup: (_pid, signal) => {
+        signals.push(signal);
+        if (signal === 'SIGTERM') groupAlive = false;
+        return groupAlive || signal === 'SIGTERM';
+      },
+    });
+
+    await client.start();
+    child.emit('exit', 70, null);
+    await new Promise<void>((resolve) => setImmediate(resolve));
+
+    expect(signals).toEqual(['SIGTERM', 0]);
+    expect(client.ready).toBe(false);
   });
 });

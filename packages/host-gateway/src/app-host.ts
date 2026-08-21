@@ -12,12 +12,14 @@ import {
   stat,
   writeFile,
 } from 'node:fs/promises';
-import { basename, dirname, extname, isAbsolute, join, relative, resolve, sep } from 'node:path';
+import { basename, dirname, extname, isAbsolute, join, relative, sep } from 'node:path';
 
 import { RpcSession, RpcTarget, type RpcTransport } from 'capnweb';
-import { parse as parseToml, stringify as stringifyToml } from 'smol-toml';
-
 import { ArtifactDocumentsService } from './artifact-documents.js';
+import {
+  updateBrowserPermissionRules,
+  type BrowserPermissionSnapshot,
+} from './browser-use-permissions.js';
 import { ChatGptProjectFilesService } from './chatgpt-project-files.js';
 import type { OfficialGithubRequestHandle } from './official-git-worker.js';
 import { LibraryFilesService } from './library-files.js';
@@ -35,6 +37,7 @@ import type { UserRuntime } from './runtime.js';
 import type { BrowserSession } from './session.js';
 import type { TerminalEvent } from './terminal.js';
 import { parseReadOnlyAppToolAllowlist } from './thread-metadata-generation.js';
+import { resolveRuntimePath } from './runtime-path.js';
 
 export { ChatGptProjectFilesService } from './chatgpt-project-files.js';
 export { ArtifactDocumentsService } from './artifact-documents.js';
@@ -152,6 +155,7 @@ class BrowserAppHost extends RpcTarget {
       applicationMenu: new ApplicationMenuService(),
       appActions: new AppActionsService(),
       appInfo: new AppInfoService(this.#runtime),
+      appServerHistorySnapshots: this.#runtime.appServerHistorySnapshots,
       appUpdates: new AppUpdatesService(),
       artifactDocuments: new ArtifactDocumentsService(this.#runtime),
       // The official Linux host does not construct the native macOS/Windows
@@ -665,7 +669,15 @@ export class PluginScheduledTasksService extends RpcTarget {
   }
 }
 
-class LocalProjectsService extends RpcTarget {
+interface LocalProject {
+  id: string;
+  name: string;
+  rootPaths: string[];
+  createdAt: number;
+  updatedAt: number;
+}
+
+export class LocalProjectsService extends RpcTarget {
   #runtime: UserRuntime;
 
   constructor(runtime: UserRuntime) {
@@ -696,6 +708,66 @@ class LocalProjectsService extends RpcTarget {
   getWorkspaceRootOptions(): Array<Record<string, unknown>> {
     return this.list();
   }
+
+  async create(request: unknown): Promise<{ projectId: string; rootPaths: string[] }> {
+    const params = recordRequest(request, 'local project create');
+    const name = requestString(params.name, 'local project name').trim();
+    const sources = requestStringArray(params.sources, 'local project sources');
+    if (
+      params.appearance !== undefined &&
+      params.appearance !== null &&
+      !isPlainRecord(params.appearance)
+    ) {
+      throw new TypeError('local project appearance is invalid');
+    }
+
+    const rootPaths =
+      sources.length === 0
+        ? [await createDefaultProjectRoot(this.#runtime, name)]
+        : await Promise.all(
+            [...new Set(sources)].map((source) => resolveProjectRoot(this.#runtime, source)),
+          );
+    const existingProjects = readLocalProjects(this.#runtime.getGlobalState('local-projects'));
+    const now = Date.now();
+    const projectId = randomUUID();
+    const project: LocalProject = {
+      id: projectId,
+      name: name || basename(rootPaths[0] ?? '') || 'Project',
+      rootPaths,
+      createdAt: now,
+      updatedAt: now,
+    };
+    const existingOrder = requestStoredStringArray(this.#runtime.getGlobalState('project-order'));
+
+    await this.#runtime.setGlobalState('local-projects', {
+      ...existingProjects,
+      [projectId]: project,
+    });
+    await this.#runtime.setGlobalState('project-order', [
+      projectId,
+      ...existingOrder.filter((id) => id !== projectId),
+    ]);
+    if (params.appearance !== undefined && params.appearance !== null) {
+      const storedAppearances = this.#runtime.getGlobalState('project-appearances');
+      const appearances = isPlainRecord(storedAppearances) ? storedAppearances : {};
+      await this.#runtime.setGlobalState('project-appearances', {
+        ...appearances,
+        [projectId]: params.appearance,
+      });
+    }
+    await this.#runtime.setGlobalState('selected-project', {
+      type: 'local',
+      projectId,
+    });
+
+    this.#runtime.sendViewMessage({
+      type: 'global-state-updated',
+      keys: ['local-projects', 'project-order', 'project-appearances', 'selected-project'],
+    });
+    this.#runtime.sendViewMessage({ type: 'workspace-root-options-updated' });
+    this.#runtime.sendViewMessage({ type: 'active-workspace-roots-updated' });
+    return { projectId, rootPaths };
+  }
 }
 
 class LocalEnvironmentsService extends RpcTarget {
@@ -718,7 +790,7 @@ class LocalEnvironmentsService extends RpcTarget {
   }
 }
 
-class PrimaryRuntimeService extends RpcTarget {
+export class PrimaryRuntimeService extends RpcTarget {
   #runtime: UserRuntime;
 
   constructor(runtime: UserRuntime) {
@@ -732,6 +804,72 @@ class PrimaryRuntimeService extends RpcTarget {
       kind: 'local',
       cwd: this.#runtime.workspaceRoot,
       codexHome: this.#runtime.codexHome,
+    };
+  }
+
+  getInstalledBundleVersion(): string {
+    return `server-${this.#runtime.config.expectedRendererVersion}`;
+  }
+
+  install(request: unknown): Record<string, unknown> {
+    return this.#installedResult(request);
+  }
+
+  finishInstall(request: unknown): Record<string, unknown> {
+    return this.#installedResult(request);
+  }
+
+  resetDependencies(request: unknown): Record<string, unknown> {
+    return this.#installedResult(request);
+  }
+
+  cancelInstall(request: unknown): { canceled: boolean } {
+    assertLocalRuntimeRequest(request);
+    return { canceled: false };
+  }
+
+  diagnoseDependencies(request: unknown): Record<string, unknown> {
+    assertLocalRuntimeRequest(request);
+    return {
+      artifactToolVersion: null,
+      bundleVersion: this.getInstalledBundleVersion(),
+      installed: true,
+      libreOfficeVersion: null,
+      problems: [],
+    };
+  }
+
+  loadDependencies(request: unknown): Record<string, unknown> {
+    assertLocalRuntimeRequest(request);
+    return {
+      bundleVersion: this.getInstalledBundleVersion(),
+      installed: true,
+      instructions: null,
+    };
+  }
+
+  getUpdateStatus(): null {
+    return null;
+  }
+
+  runUpdateNow(request: unknown): Record<string, unknown> {
+    return this.#installedResult(request);
+  }
+
+  isWorkspaceDependenciesFeatureEnabled(request: unknown): boolean {
+    assertLocalRuntimeRequest(request);
+    return true;
+  }
+
+  startUpdatePolling(): () => void {
+    return () => undefined;
+  }
+
+  #installedResult(request: unknown): Record<string, unknown> {
+    assertLocalRuntimeRequest(request);
+    return {
+      bundleVersion: this.getInstalledBundleVersion(),
+      status: 'installed',
     };
   }
 }
@@ -1084,16 +1222,6 @@ export class DynamicToolCallsService extends RpcTarget {
   }
 }
 
-type BrowserPermissionResource = 'origin' | 'download' | 'upload' | 'fullCdp';
-type BrowserPermissionKind = 'allowed' | 'denied';
-
-interface BrowserPermissionRule {
-  action: 'add' | 'remove';
-  kind: BrowserPermissionKind;
-  origin: string;
-  resource: BrowserPermissionResource;
-}
-
 export class BrowserUsePermissionsService extends RpcTarget {
   #runtime: UserRuntime;
   #updateQueue = Promise.resolve();
@@ -1103,9 +1231,8 @@ export class BrowserUsePermissionsService extends RpcTarget {
     this.#runtime = runtime;
   }
 
-  updateOriginRules(request: unknown): Promise<Record<string, unknown>> {
-    const rules = parseBrowserPermissionRules(request);
-    const update = this.#updateQueue.then(async () => this.#apply(rules));
+  updateOriginRules(request: unknown): Promise<BrowserPermissionSnapshot> {
+    const update = this.#updateQueue.then(async () => this.#apply(request));
     this.#updateQueue = update.then(
       () => undefined,
       () => undefined,
@@ -1113,24 +1240,8 @@ export class BrowserUsePermissionsService extends RpcTarget {
     return update;
   }
 
-  async #apply(rules: BrowserPermissionRule[]): Promise<Record<string, unknown>> {
-    const path = join(this.#runtime.codexHome, 'browser', 'config.toml');
-    const config = await readBrowserPermissionConfig(path);
-    const normalized = rules.map((rule) => ({
-      ...rule,
-      origin:
-        rule.action === 'add'
-          ? normalizeBrowserPermissionOrigin(config, rule.resource, rule.origin)
-          : rule.origin,
-    }));
-    let changed = false;
-    for (const rule of normalized) changed = applyBrowserPermissionRule(config, rule) || changed;
-    if (changed) {
-      await mkdir(dirname(path), { recursive: true, mode: 0o700 });
-      const serialized = stringifyToml(config);
-      await writeFile(path, serialized.endsWith('\n') ? serialized : `${serialized}\n`, 'utf8');
-    }
-    return browserPermissionSnapshot(config);
+  async #apply(request: unknown): Promise<BrowserPermissionSnapshot> {
+    return updateBrowserPermissionRules(this.#runtime.codexHome, request);
   }
 }
 
@@ -1510,37 +1621,60 @@ function isPathWithin(root: string, candidate: string): boolean {
   );
 }
 
-async function resolveRuntimePath(
-  runtime: UserRuntime,
-  input: string,
-  forWrite: boolean,
-): Promise<string> {
-  const root = await realpath(runtime.root);
-  const unresolvedRoot = resolve(runtime.root);
-  const candidate = resolve(isAbsolute(input) ? input : join(runtime.workspaceRoot, input));
-  if (!isPathWithin(unresolvedRoot, candidate) && !isPathWithin(root, candidate)) {
-    throw new Error('Workspace file path is outside the user root');
+function readLocalProjects(value: unknown): Record<string, LocalProject> {
+  if (!isPlainRecord(value)) return {};
+  const projects: Record<string, LocalProject> = {};
+  for (const [id, candidate] of Object.entries(value)) {
+    if (
+      !isPlainRecord(candidate) ||
+      candidate.id !== id ||
+      typeof candidate.name !== 'string' ||
+      !Array.isArray(candidate.rootPaths) ||
+      candidate.rootPaths.some((root) => typeof root !== 'string') ||
+      typeof candidate.createdAt !== 'number' ||
+      typeof candidate.updatedAt !== 'number'
+    ) {
+      continue;
+    }
+    projects[id] = candidate as unknown as LocalProject;
   }
-  if (!forWrite) {
-    const canonical = await realpath(candidate);
-    if (!isPathWithin(root, canonical)) {
-      throw new Error('Workspace file path resolves outside the user root');
-    }
-    return canonical;
+  return projects;
+}
+
+function requestStoredStringArray(value: unknown): string[] {
+  return Array.isArray(value)
+    ? value.filter((entry): entry is string => typeof entry === 'string')
+    : [];
+}
+
+async function resolveProjectRoot(runtime: UserRuntime, input: string): Promise<string> {
+  const workspaceRoot = await realpath(runtime.workspaceRoot);
+  const path = await resolveRuntimePath(runtime, input, false);
+  if (!isPathWithin(workspaceRoot, path)) {
+    throw new Error('Project source is outside the server workspace');
   }
-  try {
-    const canonical = await realpath(candidate);
-    if (!isPathWithin(root, canonical)) {
-      throw new Error('Workspace file path resolves outside the user root');
+  if (!(await stat(path)).isDirectory()) {
+    throw new Error('Project source must be a directory');
+  }
+  return path;
+}
+
+async function createDefaultProjectRoot(runtime: UserRuntime, name: string): Promise<string> {
+  const workspaceRoot = await realpath(runtime.workspaceRoot);
+  const safeName =
+    name
+      .normalize('NFKC')
+      .replaceAll(/[^\p{Letter}\p{Number}._ -]+/gu, '-')
+      .replaceAll(/^[ .]+|[ .]+$/gu, '')
+      .slice(0, 120) || 'Project';
+  for (let index = 0; ; index += 1) {
+    const path = join(workspaceRoot, index === 0 ? safeName : `${safeName} (${String(index)})`);
+    try {
+      await mkdir(path);
+      return path;
+    } catch (error) {
+      if (errorCode(error) !== 'EEXIST') throw error;
     }
-    return canonical;
-  } catch (error) {
-    if (errorCode(error) !== 'ENOENT') throw error;
-    const parent = await realpath(dirname(candidate));
-    if (!isPathWithin(root, parent)) {
-      throw new Error('Workspace file parent resolves outside the user root', { cause: error });
-    }
-    return join(parent, basename(candidate));
   }
 }
 
@@ -1559,160 +1693,6 @@ function workspaceFileEtag(value: Stats | null): string {
 
 function errorCode(error: unknown): string | null {
   return isPlainRecord(error) && typeof error.code === 'string' ? error.code : null;
-}
-
-function parseBrowserPermissionRules(value: unknown): BrowserPermissionRule[] {
-  if (!Array.isArray(value) || value.length > 10_000) {
-    throw new TypeError('Browser Use origin rules are invalid');
-  }
-  return value.map((entry) => {
-    const rule = recordRequest(entry, 'Browser Use origin rule');
-    if (rule.action !== 'add' && rule.action !== 'remove') {
-      throw new TypeError('Browser Use origin rule action is invalid');
-    }
-    if (rule.kind !== 'allowed' && rule.kind !== 'denied') {
-      throw new TypeError('Browser Use origin rule kind is invalid');
-    }
-    if (
-      rule.resource !== 'origin' &&
-      rule.resource !== 'download' &&
-      rule.resource !== 'upload' &&
-      rule.resource !== 'fullCdp'
-    ) {
-      throw new TypeError('Browser Use origin rule resource is invalid');
-    }
-    return {
-      action: rule.action,
-      kind: rule.kind,
-      origin: nonEmptyRequestString(rule.origin, 'Browser Use origin'),
-      resource: rule.resource,
-    };
-  });
-}
-
-async function readBrowserPermissionConfig(path: string): Promise<Record<string, unknown>> {
-  try {
-    const value = parseToml(await readFile(path, 'utf8'));
-    return isPlainRecord(value) ? value : {};
-  } catch {
-    return {};
-  }
-}
-
-function browserPermissionSectionName(resource: BrowserPermissionResource): string {
-  switch (resource) {
-    case 'origin':
-      return 'origins';
-    case 'download':
-      return 'downloads';
-    case 'upload':
-      return 'uploads';
-    case 'fullCdp':
-      return 'full_cdp';
-  }
-}
-
-function browserPermissionSection(
-  config: Record<string, unknown>,
-  resource: BrowserPermissionResource,
-): Record<string, unknown> {
-  const key = browserPermissionSectionName(resource);
-  const current = config[key];
-  if (isPlainRecord(current)) return current;
-  const created: Record<string, unknown> = {};
-  config[key] = created;
-  return created;
-}
-
-function browserPermissionOrigins(
-  section: Record<string, unknown> | undefined,
-  kind: BrowserPermissionKind,
-): string[] {
-  const value = section?.[kind];
-  if (!Array.isArray(value)) return [];
-  const unique = new Set<string>();
-  const origins: string[] = [];
-  for (const entry of value) {
-    if (typeof entry === 'string' && !unique.has(entry)) {
-      unique.add(entry);
-      origins.push(entry);
-    }
-  }
-  return origins;
-}
-
-function normalizeBrowserPermissionOrigin(
-  config: Record<string, unknown>,
-  resource: BrowserPermissionResource,
-  value: string,
-): string {
-  const section = config[browserPermissionSectionName(resource)];
-  if (
-    isPlainRecord(section) &&
-    (browserPermissionOrigins(section, 'allowed').includes(value) ||
-      browserPermissionOrigins(section, 'denied').includes(value))
-  ) {
-    return value;
-  }
-  const trimmed = value.trim();
-  const candidate = /^[a-zA-Z][a-zA-Z\d+.-]*:\/\//u.test(trimmed) ? trimmed : `https://${trimmed}`;
-  try {
-    const url = new URL(candidate);
-    if (url.protocol !== 'http:' && url.protocol !== 'https:') {
-      throw new Error('Invalid Browser Use origin protocol');
-    }
-    return url.origin;
-  } catch (error) {
-    throw new Error('Invalid Browser Use origin', { cause: error });
-  }
-}
-
-function oppositeBrowserPermissionKind(kind: BrowserPermissionKind): BrowserPermissionKind {
-  return kind === 'allowed' ? 'denied' : 'allowed';
-}
-
-function applyBrowserPermissionRule(
-  config: Record<string, unknown>,
-  rule: BrowserPermissionRule,
-): boolean {
-  const key = browserPermissionSectionName(rule.resource);
-  if (rule.action === 'add') {
-    const section = browserPermissionSection(config, rule.resource);
-    const selected = browserPermissionOrigins(section, rule.kind);
-    const oppositeKind = oppositeBrowserPermissionKind(rule.kind);
-    const opposite = browserPermissionOrigins(section, oppositeKind);
-    section[rule.kind] = selected.includes(rule.origin) ? selected : [...selected, rule.origin];
-    section[oppositeKind] = opposite.filter((origin) => origin !== rule.origin);
-    return !selected.includes(rule.origin) || opposite.includes(rule.origin);
-  }
-  const section = config[key];
-  if (!isPlainRecord(section)) return false;
-  const selected = browserPermissionOrigins(section, rule.kind);
-  if (!selected.includes(rule.origin)) return false;
-  section[rule.kind] = selected.filter((origin) => origin !== rule.origin);
-  return true;
-}
-
-function browserPermissionSnapshot(config: Record<string, unknown>): Record<string, unknown> {
-  const origins = isPlainRecord(config.origins) ? config.origins : undefined;
-  const downloads = isPlainRecord(config.downloads) ? config.downloads : undefined;
-  const uploads = isPlainRecord(config.uploads) ? config.uploads : undefined;
-  const fullCdp = isPlainRecord(config.full_cdp) ? config.full_cdp : undefined;
-  return {
-    fullCdpAccessEnabled: config.full_cdp_access_enabled === true,
-    approvalMode: config.approval_mode === 'never_ask' ? 'neverAsk' : 'alwaysAsk',
-    historyApprovalMode: config.history_approval_mode === 'never_ask' ? 'neverAsk' : 'alwaysAsk',
-    downloadApprovalMode: config.download_approval_mode === 'never_ask' ? 'neverAsk' : 'alwaysAsk',
-    uploadApprovalMode: config.upload_approval_mode === 'never_ask' ? 'neverAsk' : 'alwaysAsk',
-    allowedOrigins: browserPermissionOrigins(origins, 'allowed'),
-    deniedOrigins: browserPermissionOrigins(origins, 'denied'),
-    allowedDownloadOrigins: browserPermissionOrigins(downloads, 'allowed'),
-    deniedDownloadOrigins: browserPermissionOrigins(downloads, 'denied'),
-    allowedUploadOrigins: browserPermissionOrigins(uploads, 'allowed'),
-    deniedUploadOrigins: browserPermissionOrigins(uploads, 'denied'),
-    allowedFullCdpOrigins: browserPermissionOrigins(fullCdp, 'allowed'),
-    deniedFullCdpOrigins: browserPermissionOrigins(fullCdp, 'denied'),
-  };
 }
 
 function parseThreadProjectAssignment(value: unknown): ThreadProjectAssignment | null {
@@ -1765,6 +1745,14 @@ function sameThreadProjectAssignment(
     (left.hostId ?? undefined) === right.hostId &&
     left.pendingCoreUpdate === right.pendingCoreUpdate
   );
+}
+
+function assertLocalRuntimeRequest(value: unknown): Record<string, unknown> {
+  const request = recordRequest(value, 'primary runtime request');
+  if (request.hostId !== undefined && request.hostId !== 'local') {
+    throw new TypeError('Codex runtime installation only supports the local host');
+  }
+  return request;
 }
 
 function visualizationDatePath(threadId: string): string[] | null {

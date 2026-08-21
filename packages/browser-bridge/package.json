@@ -8,6 +8,7 @@
   },
   "types": "./dist/index.d.ts",
   "dependencies": {
-    "@codexapp/contracts": "0.1.0"
+    "@codexapp/contracts": "0.1.0",
+    "@codexapp/official-package": "0.1.0"
   }
 }

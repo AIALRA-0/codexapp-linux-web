@@ -1,0 +1,18 @@
+{
+  "product": "ChatGPT",
+  "bundleIdentifier": "com.openai.codex",
+  "alternateProductName": "Codex",
+  "version": "26.803.81509",
+  "buildNumber": "6415",
+  "electron": "42.3.0",
+  "chromium": "151.0.7922.71",
+  "vite": "8.1.5",
+  "codexCli": "0.147.0-alpha.6.6",
+  "asarBytes": 223458520,
+  "asarSha256": "01a9c7b0fb822a8bcee829849194b757ce2ea5cf40d1ea05750c504f92314d79",
+  "asarHeaderIntegritySha256": "35b8abb7c8f50ca812a2d5a44418ae3eb7c5a85e0959db8e402a4bd30cf71ee5",
+  "signedBy": "OpenAI OpCo, LLC",
+  "signedAt": "2026-08-11",
+  "source": "https://persistent.oaistatic.com/codex-app-prod/ChatGPT-darwin-arm64-26.803.81509.zip",
+  "redistributable": false
+}

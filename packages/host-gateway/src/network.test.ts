@@ -4,7 +4,11 @@ import {
   assertAllowedRendererFetchUrl,
   parseRendererFetchRequest,
   RendererFetchProxy,
+  rendererFetchMutatesCachedSettings,
+  rendererFetchResponseCachePolicy,
   resolveRendererFetchUrl,
+  shouldUseOfficialElectronNetwork,
+  shouldUseRendererEgressProxy,
 } from './network.js';
 
 describe('renderer fetch security', () => {
@@ -12,6 +16,35 @@ describe('renderer fetch security', () => {
     expect(resolveRendererFetchUrl('/wham/models', 'https://chatgpt.com/backend-api/').href).toBe(
       'https://chatgpt.com/backend-api/wham/models',
     );
+  });
+
+  it.each([
+    [
+      '/conversations?offset=0&limit=28&order=updated',
+      'https://chatgpt.com/backend-api/conversations?offset=0&limit=28&order=updated',
+    ],
+    ['pins?include_unpinned=false', 'https://chatgpt.com/backend-api/pins?include_unpinned=false'],
+    [
+      '/models?history_and_training_disabled=false#ignored-by-http',
+      'https://chatgpt.com/backend-api/models?history_and_training_disabled=false#ignored-by-http',
+    ],
+  ])('preserves the query while resolving relative URL %s', (target, expected) => {
+    expect(resolveRendererFetchUrl(target, 'https://chatgpt.com/backend-api/').href).toBe(expected);
+  });
+
+  it('does not duplicate a non-trailing backend API base path', () => {
+    expect(resolveRendererFetchUrl('/projects', 'https://chatgpt.com/backend-api').href).toBe(
+      'https://chatgpt.com/backend-api/projects',
+    );
+  });
+
+  it('leaves absolute official URLs unchanged', () => {
+    expect(
+      resolveRendererFetchUrl(
+        'https://chatgpt.com/backend-api/conversations?limit=1',
+        'https://chatgpt.com/backend-api/',
+      ).href,
+    ).toBe('https://chatgpt.com/backend-api/conversations?limit=1');
   });
 
   it.each([
@@ -54,6 +87,251 @@ describe('renderer fetch security', () => {
 });
 
 describe('renderer fetch proxy', () => {
+  it('caches only authenticated read-only startup settings for a bounded period', () => {
+    const request = parseRendererFetchRequest({
+      type: 'fetch',
+      requestId: 'settings-1',
+      url: '/settings/user',
+      method: 'GET',
+      headers: { 'X-OpenAI-Attach-Auth': '1' },
+    });
+    expect(
+      rendererFetchResponseCachePolicy(
+        request,
+        new URL('https://chatgpt.com/backend-api/settings/user'),
+      )?.ttlMs,
+    ).toBe(60_000);
+    expect(
+      rendererFetchResponseCachePolicy(
+        { ...request, method: 'POST' },
+        new URL('https://chatgpt.com/backend-api/settings/user'),
+      ),
+    ).toBeNull();
+    expect(
+      rendererFetchResponseCachePolicy(
+        { ...request, attachAuth: false },
+        new URL('https://chatgpt.com/backend-api/settings/user'),
+      ),
+    ).toBeNull();
+    expect(
+      rendererFetchMutatesCachedSettings(
+        { ...request, method: 'POST' },
+        new URL('https://chatgpt.com/backend-api/settings/user'),
+      ),
+    ).toBe(true);
+    expect(
+      rendererFetchMutatesCachedSettings(
+        { ...request, method: 'POST' },
+        new URL('https://chatgpt.com/backend-api/wham/models'),
+      ),
+    ).toBe(false);
+  });
+
+  it('reuses a successful startup response and invalidates it explicitly', async () => {
+    const fetchImplementation = vi.fn(() =>
+      Promise.resolve(
+        new Response(JSON.stringify({ locale: 'zh-CN' }), {
+          status: 200,
+          headers: { 'content-type': 'application/json' },
+        }),
+      ),
+    ) as typeof fetch;
+    const proxy = new RendererFetchProxy({
+      appVersion: '26.803.81509',
+      fetchImplementation,
+      getAuthToken: () => Promise.resolve('token'),
+    });
+    const message = {
+      type: 'fetch',
+      requestId: 'settings-1',
+      url: '/settings/user',
+      method: 'GET',
+      headers: { 'X-OpenAI-Attach-Auth': '1' },
+    };
+    const first = await proxy.perform(message);
+    const second = await proxy.perform({ ...message, requestId: 'settings-2' });
+    expect(first).toMatchObject({ requestId: 'settings-1', responseType: 'success' });
+    expect(second).toMatchObject({ requestId: 'settings-2', responseType: 'success' });
+    expect(fetchImplementation).toHaveBeenCalledTimes(1);
+
+    proxy.invalidateResponseCache();
+    await proxy.perform({ ...message, requestId: 'settings-3' });
+    expect(fetchImplementation).toHaveBeenCalledTimes(2);
+  });
+
+  it('ignores random tracing headers while preserving response-changing cache variants', () => {
+    const base = parseRendererFetchRequest({
+      type: 'fetch',
+      requestId: 'settings-cache-key',
+      url: '/settings/user',
+      method: 'GET',
+      headers: {
+        Accept: 'application/json',
+        'Accept-Language': 'zh-CN',
+        'X-OpenAI-Attach-Auth': '1',
+        traceparent: '00-first-random-trace',
+      },
+    });
+    const url = new URL('https://chatgpt.com/backend-api/settings/user');
+    const first = rendererFetchResponseCachePolicy(base, url);
+    const differentTrace = rendererFetchResponseCachePolicy(
+      {
+        ...base,
+        headers: { ...base.headers, traceparent: '00-second-random-trace' },
+      },
+      url,
+    );
+    const differentLanguage = rendererFetchResponseCachePolicy(
+      {
+        ...base,
+        headers: { ...base.headers, 'Accept-Language': 'en-US' },
+      },
+      url,
+    );
+    const differentEncoding = rendererFetchResponseCachePolicy(
+      { ...base, binaryResponse: true },
+      url,
+    );
+    expect(first?.key).toBe(differentTrace?.key);
+    expect(first?.key).not.toBe(differentLanguage?.key);
+    expect(first?.key).not.toBe(differentEncoding?.key);
+  });
+
+  it('keeps the fallback narrow while routing every official backend API request through Electron', () => {
+    expect(
+      shouldUseRendererEgressProxy(
+        new URL('https://chatgpt.com/backend-api/gizmos/snorlax/sidebar?limit=10'),
+      ),
+    ).toBe(true);
+    expect(
+      shouldUseRendererEgressProxy(new URL('https://chatgpt.com/backend-api/conversation')),
+    ).toBe(false);
+    expect(
+      shouldUseRendererEgressProxy(
+        new URL('https://openai.com/backend-api/gizmos/snorlax/sidebar'),
+      ),
+    ).toBe(false);
+    expect(
+      shouldUseOfficialElectronNetwork(
+        new URL('https://chatgpt.com/backend-api/gizmos/snorlax/sidebar?limit=10'),
+      ),
+    ).toBe(true);
+    expect(
+      shouldUseOfficialElectronNetwork(
+        new URL('https://chatgpt.com/backend-api/projects/project-id/files'),
+      ),
+    ).toBe(true);
+    expect(
+      shouldUseOfficialElectronNetwork(new URL('https://chatgpt.com/backend-api/conversation')),
+    ).toBe(true);
+    expect(
+      shouldUseOfficialElectronNetwork(
+        new URL('https://chatgpt.com:8443/backend-api/gizmos/snorlax/sidebar'),
+      ),
+    ).toBe(false);
+    expect(
+      shouldUseOfficialElectronNetwork(new URL('https://chatgpt.com/public-api/projects')),
+    ).toBe(false);
+  });
+
+  it('prefers the pinned official Electron network for backend API requests', async () => {
+    const electronFetchImplementation = vi.fn((_url: URL | RequestInfo, init?: RequestInit) => {
+      expect(
+        (init as (RequestInit & { dispatcher?: unknown }) | undefined)?.dispatcher,
+      ).toBeUndefined();
+      return Promise.resolve(
+        new Response(JSON.stringify({ items: [] }), {
+          status: 200,
+          headers: { 'content-type': 'application/json' },
+        }),
+      );
+    }) as typeof fetch;
+    const proxy = new RendererFetchProxy({
+      appVersion: '26.721.31836',
+      egressProxyUrl: 'http://127.0.0.1:40000',
+      electronFetchImplementation,
+      getAuthToken: () => Promise.resolve(null),
+    });
+    const result = await proxy.perform({
+      type: 'fetch',
+      requestId: 'request-projects-electron',
+      url: 'https://chatgpt.com/backend-api/projects',
+      method: 'POST',
+      headers: {},
+      body: JSON.stringify({ name: 'test' }),
+    });
+    expect(result).toMatchObject({ responseType: 'success', status: 200 });
+    expect(electronFetchImplementation).toHaveBeenCalledTimes(1);
+  });
+
+  it('adds a proxy dispatcher only to the official projects request', async () => {
+    const fetchImplementation = vi.fn((url: URL | RequestInfo, init?: RequestInit) => {
+      void url;
+      void init;
+      return Promise.resolve(
+        new Response(JSON.stringify({ items: [] }), {
+          status: 200,
+          headers: { 'content-type': 'application/json' },
+        }),
+      );
+    });
+    const proxy = new RendererFetchProxy({
+      appVersion: '26.721.31836',
+      egressProxyUrl: 'http://127.0.0.1:40000',
+      fetchImplementation,
+      getAuthToken: () => Promise.resolve(null),
+    });
+    await proxy.perform({
+      type: 'fetch',
+      requestId: 'request-projects',
+      url: 'https://chatgpt.com/backend-api/gizmos/snorlax/sidebar',
+      method: 'GET',
+      headers: {},
+    });
+    const projectRequest = fetchImplementation.mock.calls[0]?.[1] as
+      (RequestInit & { dispatcher?: unknown }) | undefined;
+    expect(projectRequest?.dispatcher).toBeDefined();
+    fetchImplementation.mockClear();
+    await proxy.perform({
+      type: 'fetch',
+      requestId: 'request-conversation',
+      url: 'https://chatgpt.com/backend-api/conversation',
+      method: 'GET',
+      headers: {},
+    });
+    const conversationRequest = fetchImplementation.mock.calls[0]?.[1] as
+      (RequestInit & { dispatcher?: unknown }) | undefined;
+    expect(conversationRequest?.dispatcher).toBeUndefined();
+  });
+
+  it('acknowledges blocked official event ingestion without retrying upstream', async () => {
+    const fetchImplementation = vi.fn(() => Promise.reject(new Error('must not fetch')));
+    const getAuthToken = vi.fn(() => Promise.resolve('must-not-read'));
+    const proxy = new RendererFetchProxy({
+      appVersion: '26.721.31836',
+      fetchImplementation,
+      getAuthToken,
+    });
+    const result = await proxy.perform({
+      type: 'fetch',
+      requestId: 'request-telemetry',
+      url: 'https://chatgpt.com/ces/v1/rgstr?batch=1',
+      method: 'POST',
+      headers: {},
+      body: '[]',
+    });
+    expect(result).toEqual({
+      type: 'fetch-response',
+      responseType: 'success',
+      requestId: 'request-telemetry',
+      status: 204,
+      headers: {},
+      bodyJsonString: 'null',
+    });
+    expect(fetchImplementation).not.toHaveBeenCalled();
+    expect(getAuthToken).not.toHaveBeenCalled();
+  });
+
   it('attaches an app-server token only to qualified OpenAI requests', async () => {
     const tokenPayload = Buffer.from(
       JSON.stringify({

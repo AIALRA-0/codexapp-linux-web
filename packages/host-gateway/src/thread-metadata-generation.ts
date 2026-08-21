@@ -211,7 +211,30 @@ export class ThreadMetadataGenerator {
         ...(options.signal === undefined ? {} : { signal: options.signal }),
       });
     } finally {
-      void appServer.request('thread/unsubscribe', { threadId }).catch(() => undefined);
+      // Metadata generation uses an ephemeral app-server thread that must never
+      // become a user-visible conversation. `thread/unsubscribe` only releases
+      // streaming ownership and leaves the ephemeral thread in the app-server's
+      // in-memory catalog, where the official renderer can surface it after a
+      // name/description update. Deleting it emits the renderer's normal
+      // `thread/deleted` lifecycle event and removes the temporary conversation.
+      await deleteEphemeralThread(appServer, threadId);
+    }
+  }
+}
+
+async function deleteEphemeralThread(
+  appServer: CodexAppServerClient,
+  threadId: string,
+): Promise<void> {
+  const retryDelaysMs = [0, 100, 250, 500];
+  for (const delayMs of retryDelaysMs) {
+    if (delayMs > 0) await new Promise((resolve) => setTimeout(resolve, delayMs));
+    try {
+      await appServer.request('thread/delete', { threadId });
+      return;
+    } catch {
+      // A timed-out metadata turn may still be finishing its interrupt. Retry
+      // briefly so the temporary system thread cannot leak into user history.
     }
   }
 }

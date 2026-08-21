@@ -398,13 +398,23 @@ export class ArtifactDocumentsService extends RpcTarget {
   #allowedWorkspaceRoots(): string[] {
     const roots = new Set([this.#runtime.workspaceRoot]);
     const localProjects = this.#runtime.getGlobalState('local-projects');
-    if (Array.isArray(localProjects)) {
-      for (const project of localProjects) {
-        if (!isRecord(project)) continue;
-        for (const key of ['root', 'path', 'cwd']) {
-          const candidate = project[key];
-          if (typeof candidate === 'string' && isAbsolute(candidate)) roots.add(candidate);
+    const projectValues = Array.isArray(localProjects)
+      ? localProjects
+      : isRecord(localProjects)
+        ? Object.values(localProjects)
+        : [];
+    for (const project of projectValues) {
+      if (!isRecord(project)) continue;
+      if (Array.isArray(project.rootPaths)) {
+        for (const root of project.rootPaths) {
+          if (typeof root === 'string' && isAbsolute(root)) roots.add(root);
         }
+      }
+      // Preserve compatibility with the pre-project-table state written by
+      // early browser-host releases.
+      for (const key of ['root', 'path', 'cwd']) {
+        const candidate = project[key];
+        if (typeof candidate === 'string' && isAbsolute(candidate)) roots.add(candidate);
       }
     }
     const snapshot = this.#runtime.threadCatalog.readSnapshot() as unknown;

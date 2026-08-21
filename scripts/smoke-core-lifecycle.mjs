@@ -9,7 +9,7 @@ import { CodexAppServerClient } from '../packages/app-server-client/dist/index.j
 const codexBin = process.env.SMOKE_CODEX_BIN;
 if (codexBin === undefined) throw new Error('SMOKE_CODEX_BIN is required');
 
-const rendererVersion = process.env.SMOKE_RENDERER_VERSION ?? '26.721.31836';
+const rendererVersion = process.env.SMOKE_RENDERER_VERSION ?? '26.730.61639';
 const root = await mkdtemp(join(tmpdir(), 'codex-core-lifecycle-'));
 const codexHome = join(root, 'codex-home');
 const workspace = join(root, 'workspace');
@@ -38,6 +38,27 @@ function createClient() {
   return client;
 }
 
+function waitForTurnCompleted(client, threadId, timeoutMs = 30_000) {
+  return new Promise((resolve, reject) => {
+    const timeout = setTimeout(() => {
+      client.off('notification', onNotification);
+      reject(new Error(`turn/completed timed out for ${threadId}`));
+    }, timeoutMs);
+    const onNotification = (notification) => {
+      if (
+        notification?.method !== 'turn/completed' ||
+        notification?.params?.threadId !== threadId
+      ) {
+        return;
+      }
+      clearTimeout(timeout);
+      client.off('notification', onNotification);
+      resolve(notification.params);
+    };
+    client.on('notification', onNotification);
+  });
+}
+
 function threadIdFrom(value) {
   const threadId = value?.thread?.id ?? value?.threadId;
   if (typeof threadId !== 'string' || threadId.length === 0) {
@@ -50,6 +71,30 @@ function listedThreadIds(value) {
   const rows = value?.data ?? value?.threads;
   if (!Array.isArray(rows)) throw new Error('thread/list did not return a thread array');
   return rows.map((row) => row?.id ?? row?.threadId).filter((id) => typeof id === 'string');
+}
+
+async function readPaginatedThread(client, threadId) {
+  const metadata = await client.request('thread/read', { threadId, includeTurns: false });
+  const resumed = await client.request('thread/resume', {
+    threadId,
+    excludeTurns: true,
+  });
+  const cursor = resumed?.turnsBackwardsCursor;
+  if (typeof cursor !== 'string' || cursor.length === 0) {
+    throw new Error('paginated thread resume did not return a turns cursor');
+  }
+  const page = await client.request('thread/turns/list', {
+    threadId,
+    cursor,
+    limit: 5,
+    itemsView: 'notLoaded',
+    sortDirection: 'desc',
+  });
+  const turns = page?.data ?? page?.turns;
+  if (!Array.isArray(turns) || turns.length === 0) {
+    throw new Error('paginated thread did not return its first turn');
+  }
+  return metadata;
 }
 
 async function waitForListedThread(client, threadId, { archived, expected = true, searchTerm }) {
@@ -84,12 +129,17 @@ try {
   const started = await firstClient.request('thread/start', {
     cwd: workspace,
     ephemeral: false,
+    historyMode: 'paginated',
     experimentalRawEvents: false,
   });
   const startMs = performance.now() - startAt;
   const threadId = threadIdFrom(started);
+  if (started?.thread?.historyMode !== 'paginated') {
+    throw new Error('new durable thread did not use official paginated history');
+  }
 
   let turnStartOutcome = 'accepted';
+  const firstTurnCompleted = waitForTurnCompleted(firstClient, threadId);
   try {
     await firstClient.request('turn/start', {
       threadId,
@@ -101,6 +151,7 @@ try {
         },
       ],
     });
+    await firstTurnCompleted;
   } catch (error) {
     turnStartOutcome = error instanceof Error ? `rejected: ${error.message}` : 'rejected';
   }
@@ -110,7 +161,7 @@ try {
   let lastReadError;
   for (let attempt = 0; attempt < 50; attempt += 1) {
     try {
-      read = await firstClient.request('thread/read', { threadId, includeTurns: true });
+      read = await readPaginatedThread(firstClient, threadId);
       break;
     } catch (error) {
       lastReadError = error;
@@ -144,15 +195,22 @@ try {
   const restartAt = performance.now();
   await secondClient.start();
   const restartMs = performance.now() - restartAt;
-  const recovered = await secondClient.request('thread/read', { threadId, includeTurns: true });
+  const recovered = await secondClient.request('thread/read', {
+    threadId,
+    includeTurns: false,
+  });
   if ((recovered?.thread?.id ?? recovered?.id) !== threadId) {
     throw new Error('thread did not survive an app-server restart');
+  }
+  if (recovered?.thread?.historyMode !== 'paginated') {
+    throw new Error('paginated history mode did not survive an app-server restart');
   }
   await secondClient.request('thread/unarchive', { threadId });
   const restoredList = await waitForListedThread(secondClient, threadId, { archived: false });
   if (!listedThreadIds(restoredList).includes(threadId)) {
     throw new Error('unarchived thread did not return to the active list');
   }
+  await readPaginatedThread(secondClient, threadId);
   const searchMarker = `CodexApp lifecycle ${randomUUID()}`;
   await secondClient.request('thread/name/set', { threadId, name: searchMarker });
   const searchAt = performance.now();
@@ -164,6 +222,50 @@ try {
   if (!listedThreadIds(searchList).includes(threadId)) {
     throw new Error('named thread was absent from exact history search');
   }
+
+  const forkAt = performance.now();
+  const forked = await secondClient.request('thread/fork', {
+    threadId,
+    path: null,
+    cwd: workspace,
+    ephemeral: false,
+    threadSource: 'user',
+  });
+  const forkMs = performance.now() - forkAt;
+  const forkedThreadId = threadIdFrom(forked);
+  if (forkedThreadId === threadId) {
+    throw new Error('thread/fork returned the source thread id');
+  }
+  const forkedRead = await readPaginatedThread(secondClient, forkedThreadId);
+  if ((forkedRead?.thread?.id ?? forkedRead?.id) !== forkedThreadId) {
+    throw new Error('forked thread could not be read back');
+  }
+  if (forkedRead?.thread?.historyMode !== 'paginated') {
+    throw new Error('forked thread did not preserve official paginated history');
+  }
+  const forkTurnCompleted = waitForTurnCompleted(secondClient, forkedThreadId);
+  await secondClient.request('turn/start', {
+    threadId: forkedThreadId,
+    input: [
+      {
+        type: 'text',
+        text: 'CodexApp official host paginated fork smoke.',
+        text_elements: [],
+      },
+    ],
+  });
+  await forkTurnCompleted;
+  await secondClient.request('thread/name/set', {
+    threadId: forkedThreadId,
+    name: `${searchMarker} fork`,
+  });
+  await waitForListedThread(secondClient, forkedThreadId, { archived: false });
+  await secondClient.request('thread/delete', { threadId: forkedThreadId });
+  await waitForListedThread(secondClient, forkedThreadId, {
+    archived: false,
+    expected: false,
+  });
+
   await secondClient.request('thread/delete', { threadId });
   await waitForListedThread(secondClient, threadId, {
     archived: false,
@@ -177,8 +279,9 @@ try {
     readMs: 2_000,
     listMs: 2_000,
     searchMs: 2_000,
+    forkMs: 5_000,
   };
-  const observed = { firstStartupMs, restartMs, startMs, readMs, listMs, searchMs };
+  const observed = { firstStartupMs, restartMs, startMs, readMs, listMs, searchMs, forkMs };
   for (const [metric, budget] of Object.entries(budgets)) {
     if (observed[metric] > budget) {
       throw new Error(`${metric} exceeded ${String(budget)}ms: ${String(observed[metric])}ms`);
@@ -199,9 +302,14 @@ try {
         'unarchive',
         'name',
         'search',
+        'fork',
+        'read-fork',
+        'list-fork',
+        'delete-fork',
         'delete',
       ],
       turnStartOutcome,
+      historyMode: 'paginated',
       milliseconds: Object.fromEntries(
         Object.entries(observed).map(([key, value]) => [key, Math.round(value)]),
       ),

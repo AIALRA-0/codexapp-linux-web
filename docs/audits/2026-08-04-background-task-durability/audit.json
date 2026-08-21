@@ -1,0 +1,641 @@
+{
+  "meta": {
+    "contract_version": "1.0",
+    "title": "CodexApp 后台任务持久运行架构审计",
+    "mode": "standard",
+    "as_of": "2026-08-04",
+    "status": "complete",
+    "scope": "保证官方 Codex turn 在浏览器关闭、网络中断和浏览器会话过期后不被宿主空闲回收，并在不永久保留空闲进程的前提下允许原审批继续；生产发布不得中断活跃任务。",
+    "exclusions": [
+      "不宣称内核崩溃、VPS 断电、强制管理员 kill 或 OOM kill 后仍能恢复尚未完成的上游模型流",
+      "不修改官方渲染器源文件、官方 App Server 协议或审批语义",
+      "不把任意脱离 Codex turn 的 nohup 进程解释为受保护的对话任务"
+    ]
+  },
+  "decision_problem": {
+    "project_classification": "高风险但可回滚的生产生命周期修正",
+    "risk_level": "high",
+    "decision_owner": "AIALRA",
+    "desired_outcome": "页面关闭或客户端断网后，同一官方任务继续在 VPS 运行或等待审批；重新打开页面可继续，任务结束后空闲资源照常释放。",
+    "current_state": "生产已部署基于 turn/started、turn/completed 和服务器请求生命周期的运行租约；断网审批、重新连接、原编号继续和发布拒绝门禁均已通过。",
+    "decision": "是否以官方任务生命周期事件作为唯一后台保活依据，并把活跃任务检查设为生产发布的停止前门禁。",
+    "success_metrics": [
+      "活跃 turn 在浏览器引用归零后永不进入 IDLE_RUNTIME_SECONDS 回收计时",
+      "等待审批或输入的服务器请求单独持有租约并能在新浏览器会话重放原请求编号",
+      "turn/completed 且无待处理请求后恢复正常空闲回收",
+      "断网页面产生超过 10000 条未确认消息时不把异常抛回 App Server 任务",
+      "隔离实测等待时间超过重连期加空闲期后，同一审批和 turn 仍能完成",
+      "生产发布在存在活跃 turn 或待处理请求时以状态 75 拒绝停止服务"
+    ],
+    "constraints": [
+      "官方前端和 App Server 保持版本锁定且不改协议",
+      "不能用无限 IDLE_RUNTIME_SECONDS 永久保留所有空闲用户进程",
+      "不能自动批准或拒绝原本需要用户决定的危险操作",
+      "不能让断网页面缓存无限增长或由缓存溢出终止任务"
+    ],
+    "irreversible_actions": [
+      "错误地在活跃任务期间重启生产服务会不可恢复地丢失尚未提交的模型流或工具执行上下文"
+    ],
+    "research_budget": {
+      "overall_limit": "完成官方协议、内部实现、失败路径、隔离 VPS 和生产门禁六类证据；任何同任务续跑失败即停止上线",
+      "parallel_capacity": 1,
+      "paid_or_private_access": [
+        "AIALRA VPS",
+        "签入的 CodexApp 生产仓库",
+        "版本锁定的官方 Codex 包和真实 App Server"
+      ],
+      "cutoff_policy": "必须同时通过代码回归、隔离断网实测、官方 UI/工具回归和生产健康检查；否则回滚候选版本"
+    },
+    "reversal_evidence": [
+      "不可变的上一生产版本 20260804.1450-official-26.727.51351",
+      "原生产 current 与 official current 链接记录",
+      "候选发布哈希、隔离服务日志和生产健康输出"
+    ]
+  },
+  "questions": [
+    {
+      "id": "Q1",
+      "question": "什么事件能可靠表示官方任务真正开始和最终结束？",
+      "critical": true,
+      "internal_probe": "观察目标版本真实 App Server 的 turn/started、审批请求、serverRequest/resolved 和 turn/completed 顺序",
+      "external_probe": "核对 OpenAI App Server README 对 turn 生命周期和审批的定义",
+      "internal_status": "answered",
+      "external_status": "answered",
+      "internal_source_ids": ["S1", "S5"],
+      "external_source_ids": ["S2"],
+      "internal_gap": "",
+      "external_gap": ""
+    },
+    {
+      "id": "Q2",
+      "question": "浏览器断开后为什么旧实现会终止任务？",
+      "critical": true,
+      "internal_probe": "追踪浏览器会话 600 秒清理与 RuntimeRegistry 900 秒空闲停止的叠加路径",
+      "external_probe": "核对 WebSocket 只定义连接传输而不提供应用任务持久性的边界",
+      "internal_status": "answered",
+      "external_status": "answered",
+      "internal_source_ids": ["S1"],
+      "external_source_ids": ["S4"],
+      "internal_gap": "",
+      "external_gap": ""
+    },
+    {
+      "id": "Q3",
+      "question": "怎样避免后台保活破坏资源回收、审批和发布能力？",
+      "critical": true,
+      "internal_probe": "运行 24 小时虚拟计时单元测试、10001 帧溢出测试、65 秒隔离断网审批和发布拒绝测试",
+      "external_probe": "核对 Node EventEmitter 同步监听行为和官方服务器请求清理事件",
+      "internal_status": "answered",
+      "external_status": "answered",
+      "internal_source_ids": ["S5", "S6", "S7"],
+      "external_source_ids": ["S2", "S3"],
+      "internal_gap": "",
+      "external_gap": ""
+    }
+  ],
+  "source_map": [
+    {
+      "id": "M1",
+      "question_ids": ["Q1", "Q2", "Q3"],
+      "origin": "internal",
+      "channel": "仓库代码与生产配置",
+      "target": "浏览器会话、运行时回收、官方通知和部署脚本",
+      "decision_use": "定位旧回收链路并确定最小改动边界",
+      "priority": "high",
+      "access_status": "searched"
+    },
+    {
+      "id": "M2",
+      "question_ids": ["Q1", "Q2", "Q3"],
+      "origin": "external",
+      "channel": "官方协议与运行时文档",
+      "target": "Codex turn、服务器请求、WebSocket 和 Node 事件语义",
+      "decision_use": "避免用页面状态或自造心跳猜测任务状态",
+      "priority": "high",
+      "access_status": "searched"
+    },
+    {
+      "id": "M3",
+      "question_ids": ["Q1", "Q3"],
+      "origin": "internal",
+      "channel": "VPS 隔离与生产验证",
+      "target": "断网续跑、请求重放、回归、发布拒绝和健康状态",
+      "decision_use": "证明设计在真实目标环境而非仅单元测试中成立",
+      "priority": "high",
+      "access_status": "searched"
+    }
+  ],
+  "sources": [
+    {
+      "id": "S1",
+      "origin": "internal",
+      "title": "旧版浏览器会话与 RuntimeRegistry 回收链路",
+      "location": "repository:packages/host-gateway/src/server.ts,session.ts,runtime.ts and production env",
+      "source_type": "source-code",
+      "date": "2026-08-04",
+      "accessed_at": "2026-08-04",
+      "applicability": "直接证明断开页面 600 秒后释放引用，再经过 900 秒空闲计时会调用 UserRuntime.stop 并结束 App Server",
+      "limitations": "只描述修复前的目标版本宿主实现",
+      "retrieval_method": "逐行代码审查并核对 VPS IDLE_RUNTIME_SECONDS=900",
+      "observed_content": "任务状态未参与回收判断；浏览器引用为零是唯一触发条件。",
+      "direct": true,
+      "independence_group": "host-runtime-code"
+    },
+    {
+      "id": "S2",
+      "origin": "external",
+      "title": "OpenAI Codex App Server README",
+      "location": "https://github.com/openai/codex/blob/main/codex-rs/app-server/README.md",
+      "source_type": "official-doc",
+      "date": "2026-08-04",
+      "accessed_at": "2026-08-04",
+      "applicability": "定义 turn/start 后的 turn/started 与最终 turn/completed，并说明审批服务器请求和 serverRequest/resolved",
+      "limitations": "不替第三方 Web 宿主规定进程回收策略，仍需目标包实测",
+      "retrieval_method": "官方 OpenAI GitHub 主仓库检索",
+      "observed_content": "每个 turn 在开始运行时发 turn/started，完成、中断或失败时发 turn/completed；审批会等待客户端响应。",
+      "direct": true,
+      "independence_group": "openai-app-server-docs"
+    },
+    {
+      "id": "S3",
+      "origin": "external",
+      "title": "Node.js Events documentation",
+      "location": "https://nodejs.org/dist/latest/docs/api/events.html",
+      "source_type": "official-doc",
+      "date": "2026-08-04",
+      "accessed_at": "2026-08-04",
+      "applicability": "解释 EventEmitter 监听器同步执行，因此浏览器 outbox 监听器抛错会回传到通知处理路径",
+      "limitations": "只提供 Node 事件机制，不验证本项目具体缓存上限",
+      "retrieval_method": "Node.js 官方文档检索",
+      "observed_content": "EventEmitter 按注册顺序同步调用监听器。",
+      "direct": true,
+      "independence_group": "node-official-docs"
+    },
+    {
+      "id": "S4",
+      "origin": "external",
+      "title": "RFC 6455 WebSocket Protocol",
+      "location": "https://datatracker.ietf.org/doc/html/rfc6455",
+      "source_type": "official-doc",
+      "date": "2011-12-01",
+      "accessed_at": "2026-08-04",
+      "applicability": "区分 WebSocket 连接关闭与应用任务生命周期，支持把页面传输和服务器任务解耦",
+      "limitations": "不定义 Codex 任务或应用级重放策略",
+      "retrieval_method": "IETF Datatracker 检索",
+      "observed_content": "标准规定连接和关闭语义，应用持久性由上层协议实现。",
+      "direct": true,
+      "independence_group": "ietf-standard"
+    },
+    {
+      "id": "S5",
+      "origin": "internal",
+      "title": "本地与 Linux 候选发布回归",
+      "location": "repository:ci-and-release-qualification-20260804.2320",
+      "source_type": "test-observation",
+      "date": "2026-08-04",
+      "accessed_at": "2026-08-04",
+      "applicability": "证明生命周期追踪、空闲恢复、10001 帧上限和其余宿主功能在 macOS 与 Linux 均通过",
+      "limitations": "单元测试使用虚拟时间；真实时间由 S6 补足",
+      "retrieval_method": "npm run ci、官方包合同检查、依赖审计和 Linux 全测试",
+      "observed_content": "本地 47 文件 229 项通过；Linux 47 文件 229 项中 228 通过、1 项按环境跳过；合同和依赖审计通过。",
+      "direct": true,
+      "independence_group": "repository-ci"
+    },
+    {
+      "id": "S6",
+      "origin": "internal",
+      "title": "VPS 隔离断网审批与官方功能回归",
+      "location": "private:vps-isolated-smokes-20260804.2320",
+      "source_type": "test-observation",
+      "date": "2026-08-04",
+      "accessed_at": "2026-08-04",
+      "applicability": "直接验证浏览器会话 1 秒失效、空闲回收 60 秒后，同一审批请求和 turn 在 65 秒时仍存在并完成",
+      "limitations": "使用确定性 Responses fixture，不代表上游服务永不故障",
+      "retrieval_method": "真实版本锁定 App Server、生产桥接代码、隔离 systemd 服务和重新连接客户端",
+      "observed_content": "backgroundRetentionVerified、serverRequestResolved、approvedCommandExecuted、declinedCommandBlocked 和 turnCompleted 全部为 true；官方 UI、任务启动和桌面工具隔离回归也通过。",
+      "direct": true,
+      "independence_group": "vps-isolated-runtime"
+    },
+    {
+      "id": "S7",
+      "origin": "internal",
+      "title": "生产发布、健康和活跃任务拒绝门禁",
+      "location": "private:production-release-20260804.2320",
+      "source_type": "test-observation",
+      "date": "2026-08-04",
+      "accessed_at": "2026-08-04",
+      "applicability": "证明生产运行新版本且 active=false 时健康，模拟 active=true 时发布检查返回 75",
+      "limitations": "未故意在真实用户活跃任务上执行破坏性 systemctl stop",
+      "retrieval_method": "原子发布、loopback 健康检查、状态聚合接口和发布函数注入活跃快照",
+      "observed_content": "生产 release 为 20260804.2320；readyz、renderer hash 和存储健康；0 次重启；活跃快照使发布被拒绝且服务未停止。",
+      "direct": true,
+      "independence_group": "production-runtime"
+    },
+    {
+      "id": "SL-problem",
+      "origin": "external",
+      "title": "问题分支：浏览器断开到 App Server 停止路径检索",
+      "location": "https://github.com/openai/codex/blob/main/codex-rs/app-server/README.md",
+      "source_type": "search-log",
+      "date": "2026-08-04",
+      "accessed_at": "2026-08-04",
+      "applicability": "确定旧实现的直接失败链路",
+      "limitations": "官方文档不描述本项目旧版 600 秒和 900 秒计时，必须与内部代码 S1 配对。",
+      "retrieval_method": "官方 OpenAI 源检索，并与内部目标版本回收代码交叉核对",
+      "observed_content": "官方任务有独立生命周期，因此页面连接不应成为任务回收边界；内部代码同时找到 600 秒会话清理、900 秒空闲计时和 stop 调用。",
+      "direct": true,
+      "independence_group": "search-problem"
+    },
+    {
+      "id": "SL-mechanism",
+      "origin": "external",
+      "title": "机制分支：Codex turn 与审批生命周期检索",
+      "location": "https://github.com/openai/codex/blob/main/codex-rs/app-server/README.md",
+      "source_type": "search-log",
+      "date": "2026-08-04",
+      "accessed_at": "2026-08-04",
+      "applicability": "寻找官方可依赖的任务边界事件",
+      "limitations": "官方主分支可能领先锁定包",
+      "retrieval_method": "官方 OpenAI 源检索并由目标包实测复核",
+      "observed_content": "找到 turn/started、turn/completed、serverRequest/resolved 和审批顺序。",
+      "direct": true,
+      "independence_group": "search-mechanism"
+    },
+    {
+      "id": "SL-product",
+      "origin": "external",
+      "title": "产品分支：官方桌面渲染器现有重连行为检索",
+      "location": "https://github.com/openai/codex/blob/main/codex-rs/app-server/README.md",
+      "source_type": "search-log",
+      "date": "2026-08-04",
+      "accessed_at": "2026-08-04",
+      "applicability": "确认无需修改官方 UI 即可从官方线程状态恢复页面",
+      "limitations": "官方主分支需由锁定 26.727.51351 包的解包源码、合同与真实 UI 测试复核",
+      "retrieval_method": "官方 OpenAI 源检索，并以锁定包实测复核",
+      "observed_content": "官方页面通过 thread/read/resume 和通知更新；宿主只需重放未决服务器请求。",
+      "direct": true,
+      "independence_group": "search-product"
+    },
+    {
+      "id": "SL-research",
+      "origin": "external",
+      "title": "研究分支：WebSocket 关闭与应用状态边界检索",
+      "location": "https://datatracker.ietf.org/doc/html/rfc6455",
+      "source_type": "search-log",
+      "date": "2026-08-04",
+      "accessed_at": "2026-08-04",
+      "applicability": "验证不能把页面连接当作任务所有权",
+      "limitations": "通用传输标准",
+      "retrieval_method": "IETF 标准检索",
+      "observed_content": "连接关闭不会定义或自动清理上层应用任务。",
+      "direct": true,
+      "independence_group": "search-research"
+    },
+    {
+      "id": "SL-adjacent",
+      "origin": "external",
+      "title": "相邻分支：无限空闲时间与独立外部 worker 比较",
+      "location": "https://github.com/openai/codex/blob/main/codex-rs/app-server/README.md",
+      "source_type": "search-log",
+      "date": "2026-08-04",
+      "accessed_at": "2026-08-04",
+      "applicability": "比较三条保活路径对资源、官方协议和升级的影响",
+      "limitations": "官方文档只提供任务事件；没有为单用户现状另建独立 worker 集群原型",
+      "retrieval_method": "官方事件机制与内部代码、部署边界比较",
+      "observed_content": "无限空闲时间泄漏资源；外部 worker 改动面大；官方生命周期租约是最小充分方案。",
+      "direct": true,
+      "independence_group": "search-adjacent"
+    },
+    {
+      "id": "SL-failure",
+      "origin": "external",
+      "title": "失败分支：同步事件监听与缓存溢出检索",
+      "location": "https://nodejs.org/dist/latest/docs/api/events.html",
+      "source_type": "search-log",
+      "date": "2026-08-04",
+      "accessed_at": "2026-08-04",
+      "applicability": "解释旧 outbox 抛错为什么可能破坏 App Server 通知路径",
+      "limitations": "需与内部代码结合",
+      "retrieval_method": "Node.js 官方文档检索",
+      "observed_content": "监听器同步执行，因此改为有界失效并要求页面重载。",
+      "direct": true,
+      "independence_group": "search-failure"
+    }
+  ],
+  "claims": [
+    {
+      "id": "C1",
+      "statement": "官方 turn/started 与 turn/completed 是比页面连接和固定超时更可靠的任务保活边界。",
+      "kind": "inference",
+      "impact": "high",
+      "confidence": "high",
+      "support_source_ids": ["S2", "S5", "S6"],
+      "contradict_source_ids": [],
+      "falsifier": "目标 App Server 出现活跃任务却不发 turn/started，或任务结束后不发 turn/completed"
+    },
+    {
+      "id": "C2",
+      "statement": "只把 IDLE_RUNTIME_SECONDS 调得很大不能满足要求，因为它同时泄漏空闲资源且仍可能最终终止长任务。",
+      "kind": "fact",
+      "impact": "high",
+      "confidence": "high",
+      "support_source_ids": ["S1", "SL-adjacent"],
+      "contradict_source_ids": [],
+      "falsifier": "系统能够证明所有任务有统一最大时长且永久空闲进程没有资源成本"
+    },
+    {
+      "id": "C3",
+      "statement": "未决服务器请求必须独立持有租约并重放，否则超过页面重连期的审批任务会存活但用户无法继续。",
+      "kind": "inference",
+      "impact": "high",
+      "confidence": "high",
+      "support_source_ids": ["S2", "S6"],
+      "contradict_source_ids": [],
+      "falsifier": "全新客户端连接时 App Server 自动、完整且可重复地重新发送所有未决请求"
+    },
+    {
+      "id": "C4",
+      "statement": "生产发布前检查活跃任务并失败关闭，可以消除正常发布流程主动回收任务的路径。",
+      "kind": "fact",
+      "impact": "high",
+      "confidence": "high",
+      "support_source_ids": ["S7"],
+      "contradict_source_ids": [],
+      "falsifier": "active=true 时发布脚本仍执行 systemctl stop，或检查不可用时继续发布"
+    }
+  ],
+  "assumptions": [
+    {
+      "id": "A1",
+      "statement": "目标官方包对每个本地活跃 turn 都发送一次可配对的 turn/started 和 turn/completed。",
+      "critical": true,
+      "status": "supported",
+      "decision_impact": "若不成立，租约可能漏保活或永久不释放",
+      "falsifier": "真实目标包产生无法配对的生命周期事件",
+      "support_source_ids": ["S2", "S6"],
+      "contradict_source_ids": []
+    },
+    {
+      "id": "A2",
+      "statement": "正常生产发布都通过受控 promote-release.sh，而不是绕过门禁直接 systemctl restart。",
+      "critical": true,
+      "status": "supported",
+      "decision_impact": "手工强制重启仍能中断活跃任务",
+      "falsifier": "运维流程绕过受控发布脚本",
+      "support_source_ids": ["S7"],
+      "contradict_source_ids": []
+    }
+  ],
+  "search_branches": [
+    { "name": "adjacent", "status": "executed", "reason": "", "round_ids": ["R-adjacent"] },
+    {
+      "name": "code",
+      "status": "not_applicable",
+      "reason": "代码证据来自受控目标仓库和官方锁定包，不需要外部代码相似度查重。",
+      "round_ids": []
+    },
+    { "name": "failure", "status": "executed", "reason": "", "round_ids": ["R-failure"] },
+    { "name": "mechanism", "status": "executed", "reason": "", "round_ids": ["R-mechanism"] },
+    {
+      "name": "patent",
+      "status": "not_applicable",
+      "reason": "本项目不主张发明、专利性或知识产权排他。",
+      "round_ids": []
+    },
+    { "name": "problem", "status": "executed", "reason": "", "round_ids": ["R-problem"] },
+    { "name": "product", "status": "executed", "reason": "", "round_ids": ["R-product"] },
+    { "name": "research", "status": "executed", "reason": "", "round_ids": ["R-research"] }
+  ],
+  "search_rounds": [
+    {
+      "id": "R-problem",
+      "branch": "problem",
+      "query": "browser session release idle runtime stop",
+      "channel": "内部代码与生产环境",
+      "date": "2026-08-04",
+      "discovery_mode": "keyword",
+      "new_candidate_ids": ["K1"],
+      "evidence_source_ids": ["S1", "S2"],
+      "search_log_source_id": "SL-problem",
+      "new_high_similarity_count": 1,
+      "new_decision_evidence_count": 1
+    },
+    {
+      "id": "R-mechanism",
+      "branch": "mechanism",
+      "query": "Codex app-server turn started completed approval resolved",
+      "channel": "OpenAI 官方 GitHub",
+      "date": "2026-08-04",
+      "discovery_mode": "keyword",
+      "new_candidate_ids": ["K2"],
+      "evidence_source_ids": ["S2"],
+      "search_log_source_id": "SL-mechanism",
+      "new_high_similarity_count": 1,
+      "new_decision_evidence_count": 1
+    },
+    {
+      "id": "R-product",
+      "branch": "product",
+      "query": "official renderer pending request reconnect thread resume",
+      "channel": "锁定官方包与真实 UI",
+      "date": "2026-08-04",
+      "discovery_mode": "citation",
+      "new_candidate_ids": ["K2"],
+      "evidence_source_ids": ["S2", "S5", "S6"],
+      "search_log_source_id": "SL-product",
+      "new_high_similarity_count": 1,
+      "new_decision_evidence_count": 1
+    },
+    {
+      "id": "R-research",
+      "branch": "research",
+      "query": "RFC 6455 connection close application state",
+      "channel": "IETF Datatracker",
+      "date": "2026-08-04",
+      "discovery_mode": "keyword",
+      "new_candidate_ids": [],
+      "evidence_source_ids": ["S4"],
+      "search_log_source_id": "SL-research",
+      "new_high_similarity_count": 0,
+      "new_decision_evidence_count": 1
+    },
+    {
+      "id": "R-adjacent",
+      "branch": "adjacent",
+      "query": "infinite idle timeout active lease external worker",
+      "channel": "架构比较",
+      "date": "2026-08-04",
+      "discovery_mode": "taxonomy",
+      "new_candidate_ids": ["K1", "K2", "K3"],
+      "evidence_source_ids": ["S1", "S2"],
+      "search_log_source_id": "SL-adjacent",
+      "new_high_similarity_count": 3,
+      "new_decision_evidence_count": 1
+    },
+    {
+      "id": "R-failure",
+      "branch": "failure",
+      "query": "Node EventEmitter synchronous listener throw buffer overflow",
+      "channel": "Node.js 官方文档",
+      "date": "2026-08-04",
+      "discovery_mode": "keyword",
+      "new_candidate_ids": [],
+      "evidence_source_ids": ["S3", "S5"],
+      "search_log_source_id": "SL-failure",
+      "new_high_similarity_count": 0,
+      "new_decision_evidence_count": 1
+    }
+  ],
+  "candidates": [
+    {
+      "id": "K1",
+      "name": "把空闲回收时间调到很大或无限",
+      "class": "near",
+      "verified": true,
+      "source_ids": ["S1"]
+    },
+    {
+      "id": "K2",
+      "name": "基于官方 turn 与服务器请求生命周期的运行租约",
+      "class": "exact",
+      "verified": true,
+      "source_ids": ["S2", "S5", "S6"]
+    },
+    {
+      "id": "K3",
+      "name": "把每个任务迁到独立外部 worker 或队列",
+      "class": "adjacent",
+      "verified": false,
+      "source_ids": ["SL-adjacent"]
+    }
+  ],
+  "novelty": {
+    "applicable": true,
+    "applicability_reason": "需要比较延长超时、官方生命周期租约和独立 worker 三条已知路径，避免为官方已有事件自造任务协议。",
+    "assessment": "near-match-found",
+    "stop_reason": "decisive-match",
+    "saturation_round_ids": [],
+    "languages": ["zh", "en"],
+    "regions": ["OpenAI official source", "IETF", "Node.js", "AIALRA private runtime"],
+    "access_gaps": [
+      {
+        "resource": "上游 OpenAI 模型流在 VPS 断电后的可恢复性",
+        "impact": "官方协议未提供让第三方宿主恢复尚未完成上游流的承诺，因此只把应用主动回收纳入本次保证。",
+        "critical": false
+      }
+    ],
+    "scope_statement": "只比较当前官方 App Server 宿主中任务生命周期与资源回收的实现路径，不主张算法发明。"
+  },
+  "perspectives": [
+    {
+      "id": "P1",
+      "lens": "任务连续性",
+      "producer": "lead",
+      "producer_type": "lead-agent",
+      "producer_reference": "background-lifecycle-owner",
+      "independent": false,
+      "context_isolated": false,
+      "source_ids": ["S1", "S2", "S6"],
+      "findings": ["页面连接不能拥有任务生命周期", "审批请求需要在新页面重放原编号"],
+      "limitations": "未使用独立审计代理；以官方协议和隔离实测降低同源偏差"
+    },
+    {
+      "id": "P2",
+      "lens": "资源与性能",
+      "producer": "lead",
+      "producer_type": "lead-agent",
+      "producer_reference": "background-lifecycle-owner",
+      "independent": false,
+      "context_isolated": false,
+      "source_ids": ["S1", "S5"],
+      "findings": [
+        "只保活 active runtime",
+        "任务完成后恢复原 900 秒空闲释放",
+        "断网缓存仍保持 10000 帧硬上限"
+      ],
+      "limitations": "未来多用户并发规模扩大时仍需观察每个活跃 App Server 的内存"
+    },
+    {
+      "id": "P3",
+      "lens": "部署与失败恢复",
+      "producer": "lead",
+      "producer_type": "lead-agent",
+      "producer_reference": "background-lifecycle-owner",
+      "independent": false,
+      "context_isolated": false,
+      "source_ids": ["S5", "S6", "S7"],
+      "findings": [
+        "正常发布必须先证明 active=false",
+        "状态接口不可用时发布失败关闭",
+        "强制机器级故障仍属于明确边界"
+      ],
+      "limitations": "管理员仍可绕过脚本执行强制 systemctl 或 kill"
+    }
+  ],
+  "real_world_validations": [
+    {
+      "id": "V1",
+      "role": "VPS 隔离候选运行环境",
+      "participant_reference": "codexapp-approval-smoke-20260804",
+      "method": "真实官方 App Server 收到审批后断开浏览器，等待 65 秒超过 1 秒重连期加 60 秒空闲期，再以新会话重连并回答原请求",
+      "conducted_at": "2026-08-04",
+      "outcome": "同一请求编号被重放；接受命令执行、拒绝命令未执行、两次结果返回模型且 turn 完成",
+      "limitations": "Responses 上游为确定性 fixture",
+      "status": "completed",
+      "evidence_source_ids": ["S6"]
+    },
+    {
+      "id": "V2",
+      "role": "CodexApp 生产运行环境",
+      "participant_reference": "release-20260804.2320",
+      "method": "确认旧版无连接和用户 App Server 后原子发布；读取 healthz、readyz、后台状态和 systemd 状态；注入 active 快照测试发布拒绝",
+      "conducted_at": "2026-08-04",
+      "outcome": "生产健康、官方 renderer hash 不变、存储健康、0 次重启；active=true 时发布返回 75 且未停止服务",
+      "limitations": "未用真实用户任务故意测试强制停止",
+      "status": "completed",
+      "evidence_source_ids": ["S7"]
+    }
+  ],
+  "alignment_questions": [
+    {
+      "id": "L1",
+      "question": "是否允许为了后台执行修改官方网页或自造任务协议？",
+      "decision_changing": true,
+      "status": "answered",
+      "answer": "不允许；用户持续要求官方页面和功能严格一致。"
+    },
+    {
+      "id": "L2",
+      "question": "后台保活是否可以牺牲所有空闲资源回收？",
+      "decision_changing": true,
+      "status": "answered",
+      "answer": "不可以；用户明确要求不能影响其他功能。只保护活跃任务，结束后恢复空闲释放。"
+    },
+    {
+      "id": "L3",
+      "question": "是否把 VPS 断电和强制 kill 也列为可保证的在途任务恢复？",
+      "decision_changing": false,
+      "status": "defaulted",
+      "default_value": "不虚假承诺；本次保证应用不会主动回收，机器级强制故障依赖已完成数据恢复。"
+    }
+  ],
+  "recommendation": {
+    "verdict": "proceed",
+    "action": "保留并运行已发布的官方生命周期租约、未决请求重放、有界页面缓存和活跃任务发布门禁；后续官方包升级时重跑同一隔离断网审批门禁。",
+    "rationale": "旧回收路径已由直接代码证据确认；新设计沿用官方事件，没有改变 UI 或审批语义；本地、Linux、隔离真实时间和生产门禁均通过，同时保留空闲资源回收。",
+    "strongest_counterevidence": "任何进程内租约都不能跨 VPS 断电、内核崩溃或强制管理员 kill 恢复尚未完成的上游模型流。",
+    "minimum_test": "浏览器会话和空闲计时均过期后，后台状态仍 active，重新连接收到原审批编号，回答后原 turn 完成且状态归零。",
+    "failure_response": "停止发布并切回上一不可变版本；保留运行日志，禁止自动重启活跃服务，定位缺失或未配对的官方生命周期事件。",
+    "reversal_condition": "任一活跃 turn 被空闲回收、未决请求无法重放、任务结束后 runtime 永久不释放、缓存溢出影响 App Server，或 active=true 时发布仍停止服务。",
+    "support_source_ids": ["S1", "S2", "S3", "S4", "S5", "S6", "S7"],
+    "counter_source_ids": []
+  },
+  "review_triggers": [
+    "官方 Codex App Server 或 renderer 版本升级",
+    "turn/started、turn/completed 或 serverRequest/resolved 合同变化",
+    "后台状态长期 active 但无可见任务",
+    "单用户 App Server 内存或任务数异常增长",
+    "任何发布绕过 promote-release.sh",
+    "生产服务出现 OOM、内核重启或异常 App Server exit"
+  ]
+}

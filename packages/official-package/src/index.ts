@@ -14,6 +14,7 @@ import { basename, dirname, isAbsolute, join, relative, resolve, sep } from 'nod
 
 import { extractAll, extractFile, listPackage, statFile } from '@electron/asar';
 import { CONTRACT_VERSION, preloadContractSchema, type PreloadContract } from '@codexapp/contracts';
+import ts from 'typescript';
 import { z } from 'zod';
 
 const packageMetadataSchema = z.object({
@@ -59,7 +60,6 @@ const sourceManifestSchema = z.object({
 
 export type SourceManifest = z.infer<typeof sourceManifestSchema>;
 
-const METHOD_PATTERN = /([A-Za-z][A-Za-z0-9]+):(?:async)?(?:\([^)]*\)|[A-Za-z])=>/gu;
 const CHANNEL_PATTERN = /codex_desktop:[A-Za-z0-9_:-]+/gu;
 
 export interface InspectOptions {
@@ -79,6 +79,98 @@ export async function sha256File(path: string): Promise<string> {
 
 export function sha256Buffer(value: Uint8Array): string {
   return createHash('sha256').update(value).digest('hex');
+}
+
+export function extractElectronBridgeMethods(preloadSource: string): string[] {
+  const source = ts.createSourceFile(
+    'preload.js',
+    preloadSource,
+    ts.ScriptTarget.Latest,
+    true,
+    ts.ScriptKind.JS,
+  );
+  const variableInitializers = new Map<string, ts.Expression>();
+  let bridgeExpression: ts.Expression | undefined;
+
+  const visit = (node: ts.Node): void => {
+    if (
+      ts.isVariableDeclaration(node) &&
+      ts.isIdentifier(node.name) &&
+      node.initializer !== undefined
+    ) {
+      variableInitializers.set(node.name.text, node.initializer);
+    }
+    if (
+      ts.isCallExpression(node) &&
+      ts.isPropertyAccessExpression(node.expression) &&
+      node.expression.name.text === 'exposeInMainWorld' &&
+      node.arguments.length >= 2
+    ) {
+      const [worldName, exposedValue] = node.arguments;
+      if (
+        worldName !== undefined &&
+        ts.isStringLiteralLike(worldName) &&
+        worldName.text === 'electronBridge' &&
+        exposedValue !== undefined
+      ) {
+        bridgeExpression = exposedValue;
+      }
+    }
+    ts.forEachChild(node, visit);
+  };
+  visit(source);
+
+  const resolveExpression = (
+    expression: ts.Expression,
+    seen = new Set<string>(),
+  ): ts.Expression => {
+    if (!ts.isIdentifier(expression) || seen.has(expression.text)) return expression;
+    const initializer = variableInitializers.get(expression.text);
+    if (initializer === undefined) return expression;
+    seen.add(expression.text);
+    return resolveExpression(initializer, seen);
+  };
+
+  if (bridgeExpression === undefined) {
+    throw new Error('official preload did not expose electronBridge');
+  }
+  const bridgeObject = resolveExpression(bridgeExpression);
+  if (!ts.isObjectLiteralExpression(bridgeObject)) {
+    throw new Error('official electronBridge exposure is not an object literal');
+  }
+
+  const methods: string[] = [];
+  for (const property of bridgeObject.properties) {
+    if (ts.isMethodDeclaration(property)) {
+      const name = propertyName(property.name);
+      if (name !== undefined) methods.push(name);
+      continue;
+    }
+    if (ts.isPropertyAssignment(property)) {
+      const name = propertyName(property.name);
+      const value = resolveExpression(property.initializer);
+      if (name !== undefined && (ts.isArrowFunction(value) || ts.isFunctionExpression(value))) {
+        methods.push(name);
+      }
+      continue;
+    }
+    if (ts.isShorthandPropertyAssignment(property)) {
+      const value = resolveExpression(property.name);
+      if (ts.isArrowFunction(value) || ts.isFunctionExpression(value)) {
+        methods.push(property.name.text);
+      }
+    }
+  }
+  return [...new Set(methods)].sort();
+}
+
+export function extractPreloadChannels(preloadSource: string): string[] {
+  return [...new Set(preloadSource.match(CHANNEL_PATTERN) ?? [])].sort();
+}
+
+function propertyName(name: ts.PropertyName): string | undefined {
+  if (ts.isIdentifier(name) || ts.isStringLiteralLike(name)) return name.text;
+  return undefined;
 }
 
 function normalizedAsarPath(path: string): string {
@@ -104,10 +196,8 @@ export async function inspectOfficialPackage(options: InspectOptions): Promise<S
   });
   const renderer = buildVirtualRendererManifest(asarPath, rendererFiles);
   const host = buildVirtualHostManifest(asarPath, hostFiles);
-  const methods = [...preloadSource.matchAll(METHOD_PATTERN)]
-    .map((match) => match[1])
-    .filter((method): method is string => method !== undefined);
-  const channels = [...new Set(preloadSource.match(CHANNEL_PATTERN) ?? [])].sort();
+  const methods = extractElectronBridgeMethods(preloadSource);
+  const channels = extractPreloadChannels(preloadSource);
 
   return sourceManifestSchema.parse({
     formatVersion: 3,
@@ -354,7 +444,16 @@ function walkFiles(root: string, include: (path: string) => boolean = () => true
     }
   };
   visit(root);
-  return output;
+  // ASAR manifests are hashed in globally sorted path order. Recursive
+  // directory traversal is deterministic, but it is not the same ordering
+  // when one entry is a prefix of another (for example `pkg-linux/` and
+  // `pkg/`). Normalize the extracted tree to the same global order before
+  // hashing so identical package bytes cannot be rejected after extraction.
+  return output.sort((left, right) => {
+    const leftPath = relative(root, left).split(sep).join('/');
+    const rightPath = relative(root, right).split(sep).join('/');
+    return leftPath < rightPath ? -1 : leftPath > rightPath ? 1 : 0;
+  });
 }
 
 export function locateAsar(applicationOrAsarPath: string): string {

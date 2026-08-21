@@ -54,6 +54,19 @@ describe('official ensure-directory adapter', () => {
     );
   });
 
+  it('expands the official home shorthand to the isolated workspace', async () => {
+    const runtime = await createRuntimeScope();
+    const target = join(runtime.workspaceRoot, 'project');
+    await mkdir(target);
+
+    await expect(resolveRuntimeDirectory(runtime, 'local', '~')).resolves.toBe(
+      await realpath(runtime.workspaceRoot),
+    );
+    await expect(resolveRuntimeDirectory(runtime, 'local', '~/project')).resolves.toBe(
+      await realpath(target),
+    );
+  });
+
   it('rejects non-local hosts and paths outside the user root', async () => {
     const runtime = await createRuntimeScope();
 

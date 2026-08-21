@@ -92,11 +92,12 @@ async function syncProject({
   const previousMetadata = await readMetadata(metadataPath);
   await mkdir(sourcesPath, { recursive: true });
   try {
-    await writeFile(
-      join(stagingPath, 'AGENTS.md'),
-      projectInstructions(projectName, instructions),
-      { encoding: 'utf8', mode: 0o444 },
-    );
+    const instructionsPath = join(stagingPath, 'AGENTS.md');
+    await writeFile(instructionsPath, projectInstructions(projectName, instructions), {
+      encoding: 'utf8',
+      mode: 0o444,
+    });
+    await chmod(instructionsPath, 0o444);
     const nextMetadataFiles: ProjectFileMetadata[] = [];
     for (const file of uniqueProjectFiles(files)) {
       const previousFile = previousMetadata?.files.find(
@@ -173,6 +174,7 @@ async function downloadProjectFile(
   } finally {
     await file.close();
   }
+  await chmod(targetPath, 0o444);
   return hash.digest('hex');
 }
 

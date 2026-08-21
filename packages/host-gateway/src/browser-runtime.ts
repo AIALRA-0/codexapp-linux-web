@@ -18,7 +18,7 @@ const BROWSER_PLUGIN_ID = 'browser@openai-bundled' as const;
 const COMMENT_RUNTIME_VIEW_CHANNEL = 'codex_desktop:message-for-view';
 const COMMENT_RUNTIME_HOST_CHANNEL = 'codex_desktop:browser-sidebar-runtime-message';
 const COMMENT_RUNTIME_PAGE_EVENT_CHANNEL = 'codex_desktop:browser-page-event';
-const COMMENT_PRELOAD_ELECTRON_SHIM = String.raw`
+export const QUALIFIED_COMMENT_PRELOAD_ELECTRON_SHIM = String.raw`
 (() => {
   const listeners = new Map();
   const binding = globalThis.__codexOfficialCommentRuntimeHost;
@@ -31,6 +31,10 @@ const COMMENT_PRELOAD_ELECTRON_SHIM = String.raw`
     },
     send(channel, message) {
       void binding(channel, message);
+    },
+    sendSync(channel) {
+      if (channel === "codex_desktop:get-browser-webmcp-enabled") return false;
+      throw new Error("Unsupported synchronous official preload channel: " + String(channel));
     },
     on(channel, listener) {
       let channelListeners = listeners.get(channel);
@@ -59,11 +63,33 @@ const COMMENT_PRELOAD_ELECTRON_SHIM = String.raw`
       return func(...args);
     },
   };
+  const webFrame = Object.freeze({
+    setVisualZoomLevelLimits() {
+      // Chromium already owns the zoom boundary in the hosted page.
+    },
+  });
+  // Electron preload scripts receive a narrow process object even with
+  // context isolation enabled. The official comment preload reads argv to
+  // select its runtime mode and emits a preload error event. Reproduce only
+  // those two observed capabilities instead of exposing Node.js to web pages.
+  if (typeof globalThis.process === "undefined") {
+    Object.defineProperty(globalThis, "process", {
+      configurable: true,
+      enumerable: false,
+      value: Object.freeze({
+        argv: Object.freeze([]),
+        emit() {
+          return false;
+        },
+      }),
+      writable: false,
+    });
+  }
   Object.defineProperty(globalThis, "require", {
     configurable: true,
     enumerable: false,
     value(name) {
-      if (name === "electron") return { contextBridge, ipcRenderer };
+      if (name === "electron") return { contextBridge, ipcRenderer, webFrame };
       throw new Error("Unsupported module requested by official preload: " + String(name));
     },
     writable: false,
@@ -293,6 +319,61 @@ export class OfficialBrowserRuntime {
 
   async start(): Promise<void> {
     await this.#loadState();
+  }
+
+  async clearBrowsingData(dataTypesValue: unknown): Promise<void> {
+    const dataTypes = parseBrowsingDataTypes(dataTypesValue);
+    const context =
+      this.#context ??
+      (this.#contextStarting === null ? null : await this.#contextStarting.catch(() => null));
+    if (dataTypes.has('cookies')) await context?.clearCookies();
+    if (context !== null && (dataTypes.has('cache') || dataTypes.has('siteData'))) {
+      const pages = context.pages();
+      const temporaryPage = pages.length === 0 ? await context.newPage() : null;
+      const page = pages[0] ?? temporaryPage;
+      if (page !== null) {
+        const session = await context.newCDPSession(page).catch(() => null);
+        if (session !== null) {
+          try {
+            if (dataTypes.has('cache')) {
+              await session.send('Network.clearBrowserCache').catch(() => undefined);
+            }
+            if (dataTypes.has('siteData')) {
+              const origins = new Set(
+                (
+                  await context.storageState({ indexedDB: true }).catch(() => ({ origins: [] }))
+                ).origins.map(({ origin }) => origin),
+              );
+              for (const current of context.pages()) {
+                const origin = browserPageOrigin(current.url());
+                if (origin !== null) origins.add(origin);
+              }
+              for (const origin of origins) {
+                await session
+                  .send('Storage.clearDataForOrigin', {
+                    origin,
+                    storageTypes: 'all',
+                  })
+                  .catch(() => undefined);
+              }
+            }
+          } finally {
+            await session.detach().catch(() => undefined);
+          }
+        }
+      }
+      await temporaryPage?.close().catch(() => undefined);
+    }
+    if (context === null) {
+      await clearClosedBrowserProfileData(this.#profileRoot, dataTypes);
+    } else if (dataTypes.has('history')) {
+      await context.close();
+      await clearClosedBrowserProfileData(this.#profileRoot, new Set(['history']));
+    }
+    if (dataTypes.has('downloads')) {
+      await rm(this.#downloadRoot, { force: true, recursive: true });
+      await mkdir(this.#downloadRoot, { recursive: true, mode: 0o700 });
+    }
   }
 
   async stop(): Promise<void> {
@@ -895,6 +976,13 @@ export class OfficialBrowserRuntime {
     page.on('download', (download) => {
       void this.#handleDownload(tab, download);
     });
+    page.on('pageerror', (error) => {
+      this.#report(asError(error), {
+        operation: 'browser-page-runtime',
+        browserTabId: tab.browserTabId,
+        conversationId: tab.conversationId,
+      });
+    });
     page.on('close', () => {
       if (tab.page !== page) return;
       tab.page = null;
@@ -975,7 +1063,7 @@ export class OfficialBrowserRuntime {
             this.#handleCommentRuntimeBridgeMessage(page, channel, message),
         );
         await context.addInitScript({
-          content: `${COMMENT_PRELOAD_ELECTRON_SHIM}\n${commentPreloadSource}`,
+          content: `${QUALIFIED_COMMENT_PRELOAD_ELECTRON_SHIM}\n${commentPreloadSource}`,
         });
       }
       for (const page of context.pages()) {
@@ -2209,6 +2297,77 @@ function parseSurfaceMessage(value: unknown): BrowserSurfaceClientMessage {
     default:
       throw new TypeError(`unknown browser surface message: ${type}`);
   }
+}
+
+const BROWSING_DATA_TYPES = new Set(['cookies', 'siteData', 'cache', 'downloads', 'history']);
+
+function parseBrowsingDataTypes(value: unknown): Set<string> {
+  if (
+    !Array.isArray(value) ||
+    value.length > BROWSING_DATA_TYPES.size ||
+    value.some((entry) => typeof entry !== 'string' || !BROWSING_DATA_TYPES.has(entry))
+  ) {
+    throw new TypeError('Browser browsing data types are invalid');
+  }
+  return new Set(value.filter((entry): entry is string => typeof entry === 'string'));
+}
+
+function browserPageOrigin(value: string): string | null {
+  try {
+    const url = new URL(value);
+    return url.protocol === 'http:' || url.protocol === 'https:' ? url.origin : null;
+  } catch {
+    return null;
+  }
+}
+
+async function clearClosedBrowserProfileData(
+  profileRoot: string,
+  dataTypes: ReadonlySet<string>,
+): Promise<void> {
+  const paths = new Set<string>();
+  const addDefault = (...segments: string[]) =>
+    paths.add(join(profileRoot, 'Default', ...segments));
+  if (dataTypes.has('cookies')) {
+    addDefault('Cookies');
+    addDefault('Cookies-journal');
+    addDefault('Network', 'Cookies');
+    addDefault('Network', 'Cookies-journal');
+  }
+  if (dataTypes.has('siteData')) {
+    for (const path of [
+      'File System',
+      'IndexedDB',
+      'Local Storage',
+      'QuotaManager',
+      'QuotaManager-journal',
+      'Service Worker',
+      'Session Storage',
+      'Shared Dictionary',
+      'Storage',
+      'WebStorage',
+    ]) {
+      addDefault(path);
+    }
+  }
+  if (dataTypes.has('cache')) {
+    for (const path of ['Cache', 'Code Cache', 'GPUCache']) addDefault(path);
+    for (const path of ['DawnGraphiteCache', 'DawnWebGPUCache', 'GrShaderCache', 'ShaderCache']) {
+      paths.add(join(profileRoot, path));
+    }
+  }
+  if (dataTypes.has('history')) {
+    for (const path of [
+      'History',
+      'History-journal',
+      'Top Sites',
+      'Top Sites-journal',
+      'Visited Links',
+    ]) {
+      addDefault(path);
+    }
+  }
+  await Promise.all([...paths].map(async (path) => rm(path, { force: true, recursive: true })));
 }
 
 function playwrightKey(message: Extract<BrowserSurfaceClientMessage, { type: 'key' }>): string {

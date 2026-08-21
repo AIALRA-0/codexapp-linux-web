@@ -9,6 +9,7 @@
   "types": "./dist/index.d.ts",
   "dependencies": {
     "@codexapp/contracts": "0.1.0",
-    "@electron/asar": "4.2.1"
+    "@electron/asar": "4.2.1",
+    "typescript": "5.9.3"
   }
 }

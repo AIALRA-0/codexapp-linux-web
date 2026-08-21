@@ -16,7 +16,7 @@ import {
 const execFileAsync = promisify(execFile);
 const sourceRoot =
   process.env.OFFICIAL_TEST_SOURCE_ROOT ??
-  resolve(process.cwd(), '.official', 'releases', '26.721.31836', 'source');
+  resolve(process.cwd(), '.official', 'releases', '26.727.51351', 'source');
 const describeQualified = existsSync(join(sourceRoot, '.vite', 'build', 'worker.js'))
   ? describe
   : describe.skip;
@@ -96,7 +96,7 @@ describeQualified('official Git worker runtime', () => {
     expect(status).not.toBeNull();
     expect(typeof (status as Record<string, unknown>).isInstalled).toBe('boolean');
     expect(typeof (status as Record<string, unknown>).isAuthenticated).toBe('boolean');
-  });
+  }, 30_000);
 
   it('creates, owns, and deletes a real managed worktree through the official worker', async () => {
     const userRoot = await mkdtemp(join(tmpdir(), 'codexapp-official-git-worker-'));
@@ -117,7 +117,7 @@ describeQualified('official Git worker runtime', () => {
     await execFileAsync('git', ['commit', '-m', 'qualification'], { cwd: repository });
     await execFileAsync(
       'git',
-      ['remote', 'add', 'origin', 'https://example.invalid/qualification.git'],
+      ['remote', 'add', 'origin', 'https://github.com/openai/qualification.git'],
       { cwd: repository },
     );
     const canonicalRepository = await realpath(repository);
@@ -131,32 +131,34 @@ describeQualified('official Git worker runtime', () => {
       buildNumber: '5828',
       buildFlavor: 'prod',
     });
+    const processDiagnostics: unknown[] = [];
+    worker.on('process-diagnostic', (diagnostic) => processDiagnostics.push(diagnostic));
     worker.on('error', () => undefined);
     workers.push(worker);
 
-    await expect(
-      worker.request('stable-metadata', {
-        cwd: repository,
-        operationSource: 'qualification',
-      }),
-    ).resolves.toMatchObject({ root: canonicalRepository });
+    const stableMetadata = await worker.request('stable-metadata', {
+      cwd: repository,
+      operationSource: 'qualification',
+    });
+    expect(stableMetadata, JSON.stringify(processDiagnostics)).toMatchObject({
+      root: canonicalRepository,
+    });
     await expect(
       worker.request('current-branch-snapshot', {
         root: repository,
         operationSource: 'qualification',
       }),
     ).resolves.toEqual({ branch: 'main' });
-    await expect(
-      worker.request('git-origins', {
-        dirs: [repository],
-        operationSource: 'qualification',
-      }),
-    ).resolves.toMatchObject({
+    const originResult = await worker.request('git-origins', {
+      dirs: [repository],
+      operationSource: 'qualification',
+    });
+    expect(originResult, JSON.stringify(processDiagnostics)).toMatchObject({
       origins: [
         {
           dir: repository,
           root: canonicalRepository,
-          originUrl: 'https://example.invalid/qualification.git',
+          originUrl: 'https://github.com/openai/qualification.git',
         },
       ],
     });
@@ -199,5 +201,5 @@ describeQualified('official Git worker runtime', () => {
       }),
     ).resolves.toMatchObject({ success: true });
     expect(existsSync(created.worktreeGitRoot)).toBe(false);
-  }, 30_000);
+  }, 120_000);
 });

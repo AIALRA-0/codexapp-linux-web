@@ -4,6 +4,7 @@ import { RpcSession } from 'capnweb';
 import WebSocket from 'ws';
 
 export async function connectOfficialBridge({ baseUrl, identityHeaders, publicOrigin }) {
+  const requestTimeoutMs = requestTimeoutFromEnvironment();
   const bootstrapResponse = await fetch(`${baseUrl}/__codex/bootstrap.js`, {
     headers: identityHeaders,
   });
@@ -30,6 +31,8 @@ export async function connectOfficialBridge({ baseUrl, identityHeaders, publicOr
   const portTransports = new Map();
   const workerResults = new Map();
   const viewMessageWaiters = new Set();
+  const recentViewMessages = [];
+  const chunkedMessages = new OfficialChunkedMessageAssembler();
   const ready = deferred();
 
   const send = (frame) => {
@@ -77,7 +80,11 @@ export async function connectOfficialBridge({ baseUrl, identityHeaders, publicOr
       return;
     }
     if (frame.type !== 'view-message') return;
-    const message = frame.message;
+    const received = chunkedMessages.receive(frame.message);
+    if (received.pending) return;
+    const message = received.message;
+    recentViewMessages.push(message);
+    if (recentViewMessages.length > 1_000) recentViewMessages.shift();
     for (const waiter of [...viewMessageWaiters]) {
       if (!waiter.predicate(message)) continue;
       viewMessageWaiters.delete(waiter);
@@ -119,7 +126,11 @@ export async function connectOfficialBridge({ baseUrl, identityHeaders, publicOr
       commandId,
       message,
     });
-    const response = await withTimeout(pending.promise, 120_000, `host command ${message.type}`);
+    const response = await withTimeout(
+      pending.promise,
+      requestTimeoutMs,
+      `host command ${message.type}`,
+    );
     if (response.ok !== true) throw new Error(response.error ?? 'host command failed');
     return response.result;
   };
@@ -135,27 +146,47 @@ export async function connectOfficialBridge({ baseUrl, identityHeaders, publicOr
       url: `vscode://codex/${method}`,
       body: JSON.stringify(params),
     });
-    const response = await withTimeout(pending.promise, 120_000, `desktop fetch ${method}`);
+    const response = await withTimeout(
+      pending.promise,
+      requestTimeoutMs,
+      `desktop fetch ${method}`,
+    );
     if (response.responseType !== 'success') {
       throw new Error(response.error ?? `desktop fetch failed: ${method}`);
     }
     return JSON.parse(response.bodyJsonString);
   };
 
-  const mcpRequest = async (method, params) => {
+  const appServerRequest = async (messageType, method, params, extra = {}) => {
     const id = randomUUID();
     const pending = deferred();
     mcpResults.set(id, pending);
     await command({
-      type: 'mcp-request',
+      ...extra,
+      type: messageType,
       request: { jsonrpc: '2.0', id, method, params },
     });
-    const response = await withTimeout(pending.promise, 120_000, `app-server request ${method}`);
+    const response = await withTimeout(
+      pending.promise,
+      requestTimeoutMs,
+      `app-server request ${method}`,
+    );
     if (response.error !== undefined) {
       throw new Error(response.error.message ?? `app-server request failed: ${method}`);
     }
     return response.result;
   };
+
+  const mcpRequest = async (method, params) => appServerRequest('mcp-request', method, params);
+
+  const prewarmThreadStart = async (params) =>
+    appServerRequest('thread-prewarm-start', 'thread/start', params, {
+      expiresAtMs: Date.now() + requestTimeoutMs,
+      hostId: 'local',
+      priority: 'normal',
+      source: 'official-bridge-smoke',
+      timeoutMs: requestTimeoutMs,
+    });
 
   const respondMcpRequest = async (id, result) =>
     command({
@@ -189,7 +220,7 @@ export async function connectOfficialBridge({ baseUrl, identityHeaders, publicOr
     });
     const accepted = await withTimeout(
       commandPending.promise,
-      120_000,
+      requestTimeoutMs,
       `worker command ${worker}/${method}`,
     );
     if (accepted.ok !== true) {
@@ -198,7 +229,7 @@ export async function connectOfficialBridge({ baseUrl, identityHeaders, publicOr
     }
     const response = await withTimeout(
       workerPending.promise,
-      120_000,
+      requestTimeoutMs,
       `worker response ${worker}/${method}`,
     );
     if (response.method !== method) {
@@ -247,6 +278,12 @@ export async function connectOfficialBridge({ baseUrl, identityHeaders, publicOr
   };
 
   const waitForViewMessage = (predicate, timeoutMs = 30_000) => {
+    const recent = recentViewMessages.findLast(predicate);
+    if (recent !== undefined) return Promise.resolve(recent);
+    return waitForNextViewMessage(predicate, timeoutMs);
+  };
+
+  const waitForNextViewMessage = (predicate, timeoutMs = 30_000) => {
     const pending = deferred();
     const waiter = {
       predicate,
@@ -276,8 +313,10 @@ export async function connectOfficialBridge({ baseUrl, identityHeaders, publicOr
     connectAppHost,
     desktopFetch,
     mcpRequest,
+    prewarmThreadStart,
     respondMcpRequest,
     waitForViewMessage,
+    waitForNextViewMessage,
     workerRequest,
     close() {
       for (const transport of portTransports.values()) {
@@ -288,10 +327,159 @@ export async function connectOfficialBridge({ baseUrl, identityHeaders, publicOr
   };
 }
 
-export function createIdentityHeaders({ email, proxySecret, subject, username }) {
+class OfficialChunkedMessageAssembler {
+  transfers = new Map();
+
+  receive(message) {
+    if (!isOfficialChunkedMessage(message)) return { pending: false, message };
+    if (message.kind === 'start') {
+      this.transfers.clear();
+      this.transfers.set(message.transferId, {
+        assembler: new OfficialTokenAssembler(),
+        nextSequence: message.sequence + 1,
+      });
+      return { pending: true };
+    }
+    const transfer = this.transfers.get(message.transferId);
+    if (transfer === undefined || message.sequence !== transfer.nextSequence) {
+      this.transfers.delete(message.transferId);
+      return { pending: true };
+    }
+    transfer.nextSequence += 1;
+    if (message.kind === 'chunk') {
+      transfer.assembler.consume(message.tokens);
+      return { pending: true };
+    }
+    this.transfers.delete(message.transferId);
+    return { pending: false, message: transfer.assembler.finish() };
+  }
+}
+
+class OfficialTokenAssembler {
+  root = UNSET;
+  stack = [];
+  stringChunks = null;
+  stringTarget = null;
+
+  consume(tokens) {
+    for (const token of tokens) {
+      switch (token.type) {
+        case 'array-start': {
+          const value = [];
+          this.saveValue(value);
+          this.stack.push({ type: 'array', value });
+          break;
+        }
+        case 'object-start': {
+          const value = {};
+          this.saveValue(value);
+          this.stack.push({ type: 'object', value, key: null });
+          break;
+        }
+        case 'container-end':
+          if (this.stack.pop() === undefined) throw new Error('unmatched chunk container end');
+          break;
+        case 'key':
+          this.setKey(token.value);
+          break;
+        case 'value':
+          this.saveValue(token.value);
+          break;
+        case 'string-start':
+          if (this.stringChunks !== null) throw new Error('nested chunk string');
+          this.stringChunks = [];
+          this.stringTarget = token.target;
+          break;
+        case 'string-chunk':
+          if (this.stringChunks === null) throw new Error('chunk string has no start');
+          this.stringChunks.push(token.value);
+          break;
+        case 'string-end': {
+          if (this.stringChunks === null || this.stringTarget === null) {
+            throw new Error('chunk string has no target');
+          }
+          const value = this.stringChunks.join('');
+          const target = this.stringTarget;
+          this.stringChunks = null;
+          this.stringTarget = null;
+          if (target === 'key') this.setKey(value);
+          else this.saveValue(value);
+          break;
+        }
+      }
+    }
+  }
+
+  finish() {
+    if (this.root === UNSET || this.stack.length > 0 || this.stringChunks !== null) {
+      throw new Error('chunked message ended before completion');
+    }
+    return this.root;
+  }
+
+  setKey(key) {
+    const container = this.stack.at(-1);
+    if (container?.type !== 'object' || container.key !== null) {
+      throw new Error('chunk key is outside an object');
+    }
+    container.key = key;
+  }
+
+  saveValue(value) {
+    const container = this.stack.at(-1);
+    if (container === undefined) {
+      if (this.root !== UNSET) throw new Error('chunked message has multiple roots');
+      this.root = value;
+    } else if (container.type === 'array') {
+      container.value.push(value);
+    } else {
+      if (container.key === null) throw new Error('chunked object value has no key');
+      Object.defineProperty(container.value, container.key, {
+        configurable: true,
+        enumerable: true,
+        value,
+        writable: true,
+      });
+      container.key = null;
+    }
+  }
+}
+
+const UNSET = Symbol('unset');
+
+function isOfficialChunkedMessage(message) {
+  return (
+    message !== null &&
+    typeof message === 'object' &&
+    message.marker === 'codex-host-chunked-message-v1' &&
+    typeof message.transferId === 'string' &&
+    Number.isSafeInteger(message.sequence) &&
+    (message.kind === 'start' ||
+      message.kind === 'end' ||
+      (message.kind === 'chunk' && Array.isArray(message.tokens)))
+  );
+}
+
+function requestTimeoutFromEnvironment() {
+  const raw = process.env.SMOKE_REQUEST_TIMEOUT_MS;
+  if (raw === undefined) return 120_000;
+  const parsed = Number(raw);
+  if (!Number.isSafeInteger(parsed) || parsed < 1_000 || parsed > 600_000) {
+    throw new Error('SMOKE_REQUEST_TIMEOUT_MS must be an integer between 1000 and 600000');
+  }
+  return parsed;
+}
+
+export function createIdentityHeaders({
+  email,
+  proxySecret,
+  proxySecretHeader = 'X-Aialra-Proxy-Secret',
+  subject,
+  username,
+}) {
   return {
     'X-Aialra-Authenticated': '1',
-    'X-Aialra-Proxy-Secret': proxySecret,
+    [proxySecretHeader]: proxySecret,
     'X-Aialra-Sub': subject,
     'X-Aialra-User': username,
     'X-Aialra-Email': email,

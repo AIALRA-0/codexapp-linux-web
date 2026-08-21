@@ -9,7 +9,7 @@ if [[ "$(id -u)" -ne 0 ]]; then
 fi
 
 application_root="${APPLICATION_ROOT:-/srv/aialra/apps/codexapp-official-web-host/current}"
-environment_file="/srv/aialra/config/secrets/codexapp-official-web-host.env"
+environment_file="${ENVIRONMENT_FILE:-/srv/aialra/config/secrets/codexapp-official-web-host.env}"
 runtime_parent="/srv/aialra/state"
 runtime_root="$(mktemp -d "$runtime_parent/codexapp-official-ui-smoke.XXXXXXXX")"
 nginx_source="$application_root/ops/nginx/codexapp-official-loopback-smoke.conf"
@@ -19,8 +19,11 @@ screenshot_path="/tmp/codexapp-official-ui-smoke-$$.png"
 app_port="13017"
 proxy_port="13016"
 proxy_enabled=0
+secret_group="${CODEXAPP_SECRET_GROUP:-codexappsecrets}"
 
 source "$application_root/ops/lib/systemd-host-hardening.sh"
+source "$application_root/ops/lib/pinned-official-release.sh"
+codexapp_load_pinned_official_release "$application_root"
 codexapp_prepare_host_hardening "$runtime_root"
 
 read_environment_value() {
@@ -69,6 +72,10 @@ for required_path in "$application_root" "$environment_file" "$nginx_source"; do
     exit 1
   fi
 done
+if ! getent group "$secret_group" >/dev/null; then
+  echo "official UI smoke secret group does not exist: $secret_group" >&2
+  exit 1
+fi
 if [[ -e "$nginx_target" || -L "$nginx_target" ]]; then
   echo "temporary Nginx smoke configuration already exists" >&2
   exit 1
@@ -84,9 +91,20 @@ chown "$service_user:$service_group" "$runtime_root"
 chmod 0700 "$runtime_root"
 
 browser_executable="$(read_environment_value BROWSER_EXECUTABLE)"
-renderer_version="$(read_environment_value EXPECTED_RENDERER_VERSION)"
-if [[ -z "$browser_executable" || -z "$renderer_version" ]]; then
-  echo "browser executable or renderer version is missing from the service environment" >&2
+renderer_version="$CODEXAPP_PINNED_RENDERER_VERSION"
+proxy_secret_file="$(read_environment_value AUTH_PROXY_SECRET_FILE)"
+if [[ -z "$browser_executable" || -z "$renderer_version" || -z "$proxy_secret_file" ]]; then
+  echo "browser executable, renderer version, or proxy proof file is missing" >&2
+  exit 1
+fi
+if [[ ! -f "$proxy_secret_file" || -L "$proxy_secret_file" ]]; then
+  echo "proxy proof file is missing or symbolic" >&2
+  exit 1
+fi
+proxy_secret=""
+IFS= read -r proxy_secret <"$proxy_secret_file" || true
+if [[ -z "$proxy_secret" ]]; then
+  echo "proxy proof is empty" >&2
   exit 1
 fi
 
@@ -95,14 +113,20 @@ systemd-run \
   --unit "$service_name" \
   --uid "$service_user" \
   --gid "$service_group" \
+  --property "SupplementaryGroups=$secret_group" \
   --working-directory "$application_root" \
   --property "EnvironmentFile=$environment_file" \
   "${CODEXAPP_HOST_HARDENING_ARGS[@]}" \
   -- \
   /usr/bin/env \
+  "${CODEXAPP_PINNED_OFFICIAL_ENV[@]}" \
+  "${CODEXAPP_HOST_SERVICE_ENV[@]}" \
   "PORT=$app_port" \
   "PUBLIC_ORIGIN=http://127.0.0.1:$proxy_port" \
   "RUNTIME_ROOT=$runtime_root" \
+  "BROWSER_BRIDGE_SCRIPT=$application_root/packages/browser-bridge/dist/index.js" \
+  "ELECTRON_NET_WORKER=$application_root/scripts/electron-net-worker.cjs" \
+  "ELECTRON_NET_USER_DATA_DIR=$runtime_root/electron-network" \
   /usr/bin/node "$application_root/apps/host/dist/main.js"
 
 for _attempt in $(seq 1 45); do
@@ -139,6 +163,14 @@ done
     SMOKE_RENDERER_VERSION="$renderer_version" \
     SMOKE_SCREENSHOT_PATH="$screenshot_path" \
     npm run smoke:official-ui
+  SMOKE_BASE_URL="http://127.0.0.1:$app_port" \
+    SMOKE_PUBLIC_ORIGIN="http://127.0.0.1:$proxy_port" \
+    SMOKE_PROXY_SECRET="$proxy_secret" \
+    npm run smoke:auth-isolation
+  SMOKE_BASE_URL="http://127.0.0.1:$app_port" \
+    SMOKE_PUBLIC_ORIGIN="http://127.0.0.1:$proxy_port" \
+    SMOKE_PROXY_SECRET="$proxy_secret" \
+    npm run smoke:task-start
 )
 
-printf '{"ok":true,"isolated":true,"proxyBoundary":true,"cleanup":"armed"}\n'
+printf '{"ok":true,"isolated":true,"proxyBoundary":true,"authIsolation":true,"taskStart":true,"cleanup":"armed"}\n'

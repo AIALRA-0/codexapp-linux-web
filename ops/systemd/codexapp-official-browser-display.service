@@ -1,0 +1,39 @@
+[Unit]
+Description=Private virtual display for CodexApp browser tools
+After=network.target
+Before=codexapp-official-web-host.service
+
+[Service]
+Type=simple
+User=codexappweb
+Group=codexappweb
+ExecStart=/usr/bin/Xvfb :99 -screen 0 1440x1000x24 -nolisten unix -listen tcp -ac -noreset
+Restart=on-failure
+RestartSec=3
+UMask=0077
+TasksMax=128
+MemoryMax=1G
+
+NoNewPrivileges=true
+PrivateTmp=true
+PrivateDevices=true
+ProtectSystem=strict
+ProtectHome=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectKernelLogs=true
+ProtectControlGroups=true
+ProtectClock=true
+RestrictSUIDSGID=true
+RestrictRealtime=true
+LockPersonality=true
+CapabilityBoundingSet=
+AmbientCapabilities=
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+IPAddressDeny=any
+IPAddressAllow=localhost
+SystemCallArchitectures=native
+SystemCallFilter=@system-service mincore
+
+[Install]
+WantedBy=multi-user.target

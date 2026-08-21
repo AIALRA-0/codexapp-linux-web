@@ -1,0 +1,62 @@
+{
+  "ok": true,
+  "threadLabel": "trillium-note-production",
+  "initial": {
+    "cold": {
+      "bytes": 562278,
+      "dataCount": 5,
+      "durationMs": 119,
+      "hasNextCursor": true,
+      "sha256": "fa32b2916959d2b16c3bda95838bf2d1c780341eda00dfe324f9ae9bc639e7b1"
+    },
+    "warm": {
+      "bytes": 562278,
+      "dataCount": 5,
+      "durationMs": 106,
+      "hasNextCursor": true,
+      "sha256": "fa32b2916959d2b16c3bda95838bf2d1c780341eda00dfe324f9ae9bc639e7b1"
+    }
+  },
+  "afterInvalidation": {
+    "mutatedEphemeral": {
+      "propagationWaitMs": 750,
+      "before": {
+        "bytes": 557,
+        "dataCount": 1,
+        "durationMs": 36,
+        "hasNextCursor": false,
+        "sha256": "a6be85c8411288dcc83e3a8b140b709e08629915cd6976f71988e0708bceba4b"
+      },
+      "after": {
+        "bytes": 997,
+        "dataCount": 2,
+        "durationMs": 14,
+        "hasNextCursor": false,
+        "sha256": "d5678660f7a1dd36290b2e172639ac02263508606cf2bb441ec138dd8734f51f"
+      },
+      "warm": {
+        "bytes": 997,
+        "dataCount": 2,
+        "durationMs": 6,
+        "hasNextCursor": false,
+        "sha256": "d5678660f7a1dd36290b2e172639ac02263508606cf2bb441ec138dd8734f51f"
+      }
+    },
+    "target": {
+      "afterMutation": {
+        "bytes": 562278,
+        "dataCount": 5,
+        "durationMs": 114,
+        "hasNextCursor": true,
+        "sha256": "fa32b2916959d2b16c3bda95838bf2d1c780341eda00dfe324f9ae9bc639e7b1"
+      },
+      "warm": {
+        "bytes": 562278,
+        "dataCount": 5,
+        "durationMs": 66,
+        "hasNextCursor": true,
+        "sha256": "fa32b2916959d2b16c3bda95838bf2d1c780341eda00dfe324f9ae9bc639e7b1"
+      }
+    }
+  }
+}
