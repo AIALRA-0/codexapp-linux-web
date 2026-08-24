@@ -1,0 +1,28 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1200" height="520" viewBox="0 0 1200 520" role="img" aria-labelledby="title desc">
+  <title id="title">CodexApp Official Web Host architecture</title>
+  <desc id="desc">An abstract browser bridge connecting an authenticated web session to an isolated official Codex runtime</desc>
+  <defs>
+    <linearGradient id="background" x1="0" y1="0" x2="1" y2="1"><stop offset="0" stop-color="#07111f"/><stop offset="1" stop-color="#101c31"/></linearGradient>
+    <linearGradient id="bridge" x1="0" y1="0" x2="1" y2="0"><stop offset="0" stop-color="#22d3ee"/><stop offset="1" stop-color="#8b5cf6"/></linearGradient>
+    <filter id="glow" x="-40%" y="-40%" width="180%" height="180%"><feGaussianBlur stdDeviation="10" result="blur"/><feMerge><feMergeNode in="blur"/><feMergeNode in="SourceGraphic"/></feMerge></filter>
+  </defs>
+  <rect width="1200" height="520" rx="32" fill="url(#background)"/>
+  <circle cx="140" cy="92" r="120" fill="#22d3ee" opacity="0.08"/><circle cx="1080" cy="430" r="170" fill="#8b5cf6" opacity="0.10"/>
+  <text x="600" y="90" text-anchor="middle" fill="#f8fafc" font-family="Segoe UI,Arial,sans-serif" font-size="42" font-weight="700">CodexApp Official Web Host</text>
+  <text x="600" y="128" text-anchor="middle" fill="#94a3b8" font-family="Segoe UI,Arial,sans-serif" font-size="18">Version-locked renderer · Explicit browser bridge · Isolated runtime</text>
+  <g transform="translate(100 190)">
+    <rect width="250" height="190" rx="20" fill="#111f34" stroke="#22d3ee" stroke-width="2"/><rect x="28" y="28" width="194" height="112" rx="10" fill="#08111f" stroke="#64748b"/>
+    <circle cx="48" cy="49" r="5" fill="#fb7185"/><circle cx="65" cy="49" r="5" fill="#fbbf24"/><circle cx="82" cy="49" r="5" fill="#4ade80"/><path d="M72 87h106M72 107h72" stroke="#22d3ee" stroke-width="8" stroke-linecap="round" opacity="0.8"/>
+    <text x="125" y="170" text-anchor="middle" fill="#e2e8f0" font-family="Segoe UI,Arial,sans-serif" font-size="17" font-weight="600">Authenticated browser</text>
+  </g>
+  <g transform="translate(475 190)">
+    <rect width="250" height="190" rx="20" fill="#111f34" stroke="#a78bfa" stroke-width="2"/><path d="M55 94h140M82 58l-36 36 36 36M168 58l36 36-36 36" fill="none" stroke="url(#bridge)" stroke-width="9" stroke-linecap="round" stroke-linejoin="round" filter="url(#glow)"/>
+    <text x="125" y="170" text-anchor="middle" fill="#e2e8f0" font-family="Segoe UI,Arial,sans-serif" font-size="17" font-weight="600">Versioned bridge</text>
+  </g>
+  <g transform="translate(850 190)">
+    <rect width="250" height="190" rx="20" fill="#111f34" stroke="#8b5cf6" stroke-width="2"/><ellipse cx="125" cy="62" rx="60" ry="24" fill="#241a46" stroke="#a78bfa" stroke-width="3"/><path d="M65 62v58c0 13 27 24 60 24s60-11 60-24V62" fill="#241a46" stroke="#a78bfa" stroke-width="3"/><path d="M65 91c0 13 27 24 60 24s60-11 60-24" fill="none" stroke="#a78bfa" stroke-width="3"/>
+    <text x="125" y="170" text-anchor="middle" fill="#e2e8f0" font-family="Segoe UI,Arial,sans-serif" font-size="17" font-weight="600">Isolated app-server</text>
+  </g>
+  <path d="M350 285h125M725 285h125" stroke="url(#bridge)" stroke-width="8" stroke-linecap="round" filter="url(#glow)"/><path d="M447 273l28 12-28 12M822 273l28 12-28 12" fill="none" stroke="#c4b5fd" stroke-width="6" stroke-linecap="round" stroke-linejoin="round"/>
+  <g fill="#94a3b8" font-family="Segoe UI,Arial,sans-serif" font-size="15"><text x="600" y="435" text-anchor="middle">Fail-closed qualification · Per-user CODEX_HOME · Atomic promotion and rollback</text><text x="600" y="470" text-anchor="middle">Repository-native illustration · No private renderer assets or runtime data</text></g>
+</svg>
